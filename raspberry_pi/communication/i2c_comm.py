@@ -1,0 +1,227 @@
+"""I2C communication helper between Raspberry Pi and Arduino Mega"""
+
+from __future__ import annotations
+
+import logging
+import struct
+import time
+from typing import Dict, Any, List, Optional
+
+logger = logging.getLogger('i2c_comm')
+
+try:
+    from smbus2 import SMBus, i2c_msg
+    I2C_AVAILABLE = True
+except ImportError:
+    I2C_AVAILABLE = False
+    SMBus = None
+    i2c_msg = None
+    logger.warning("smbus2 library not available; I2C communication disabled")
+
+
+class I2CComm:
+    """High level I2C protocol wrapper for Mega navigation board"""
+
+    # Command opcodes sent to Mega
+    CMD_PING = 0x01
+    CMD_NAV_START = 0x02
+    CMD_NAV_STOP = 0x03
+    CMD_NAV_PAUSE = 0x04
+    CMD_NAV_RESUME = 0x05
+    CMD_WAYPOINT_CLEAR = 0x10
+    CMD_WAYPOINT_PACKET = 0x11
+    CMD_WAYPOINT_COMMIT = 0x12
+    CMD_REQUEST_GPS = 0x20
+    CMD_REQUEST_STATUS = 0x21
+    CMD_HEARTBEAT = 0x30
+
+    # Response opcodes returned by Mega
+    RESP_ACK = 0x80
+    RESP_GPS = 0x81
+    RESP_STATUS = 0x82
+    RESP_ERROR = 0xFF
+
+    GPS_PAYLOAD_LEN = 1 + (4 * 4) + 1  # valid flag + floats + satellites
+    STATUS_PAYLOAD_LEN = 6  # mode, navActive, manualOverride, waypointCount, battery, signal
+
+    def __init__(self, config: Dict[str, Any]):
+        self.address = config.get('mega_address', 0x08)
+        self.bus_id = config.get('bus', 1)
+        self.retry_attempts = config.get('retry_attempts', 3)
+        self.request_timeout = config.get('request_timeout_ms', 200) / 1000.0
+
+        if not I2C_AVAILABLE:
+            logger.warning("I2C communication unavailable. Install smbus2 to enable Mega link.")
+            self.bus = None
+        else:
+            try:
+                self.bus = SMBus(self.bus_id)
+                logger.info("I2C bus %s opened, Mega address 0x%02X", self.bus_id, self.address)
+            except Exception as exc:
+                logger.error("Failed to open I2C bus: %s", exc)
+                self.bus = None
+
+    # ------------------------------------------------------------------
+    # Low-level helpers
+    # ------------------------------------------------------------------
+    def _write(self, payload: bytes) -> bool:
+        if not self.bus:
+            return False
+        try:
+            msg = i2c_msg.write(self.address, payload)
+            self.bus.i2c_rdwr(msg)
+            return True
+        except Exception as exc:
+            logger.error("I2C write failed: %s", exc)
+            return False
+
+    def _read(self, length: int) -> Optional[bytes]:
+        if not self.bus:
+            return None
+        try:
+            msg = i2c_msg.read(self.address, length)
+            self.bus.i2c_rdwr(msg)
+            return bytes(msg)
+        except Exception as exc:
+            logger.error("I2C read failed: %s", exc)
+            return None
+
+    def _exchange(self, command: int, data: bytes = b"", expect: int = 0) -> Optional[bytes]:
+        payload = bytes([command]) + data
+        if not self._write(payload):
+            return None
+
+        if expect == 0:
+            return b""
+
+        time.sleep(self.request_timeout)
+        return self._read(expect)
+
+    # ------------------------------------------------------------------
+    # Public operations
+    # ------------------------------------------------------------------
+    def ping(self) -> bool:
+        resp = self._exchange(self.CMD_PING, expect=2)
+        return self._is_ack(resp)
+
+    def start_navigation(self) -> bool:
+        return self._is_ack(self._exchange(self.CMD_NAV_START, expect=2))
+
+    def stop_navigation(self) -> bool:
+        return self._is_ack(self._exchange(self.CMD_NAV_STOP, expect=2))
+
+    def pause_navigation(self) -> bool:
+        return self._is_ack(self._exchange(self.CMD_NAV_PAUSE, expect=2))
+
+    def resume_navigation(self) -> bool:
+        return self._is_ack(self._exchange(self.CMD_NAV_RESUME, expect=2))
+
+    def clear_waypoints(self) -> bool:
+        return self._is_ack(self._exchange(self.CMD_WAYPOINT_CLEAR, expect=2))
+
+    def send_waypoints(self, waypoints: List[Dict[str, Any]]) -> bool:
+        if not waypoints:
+            return True
+
+        if not self.clear_waypoints():
+            logger.error("Failed to clear existing waypoints")
+            return False
+
+        for wp in waypoints:
+            payload = self._encode_waypoint_packet(wp)
+            resp = self._exchange(self.CMD_WAYPOINT_PACKET, payload, expect=2)
+            if not self._is_ack(resp):
+                logger.error("Failed to send waypoint %s", wp.get('id'))
+                return False
+
+        return self._is_ack(self._exchange(self.CMD_WAYPOINT_COMMIT, expect=2))
+
+    def request_gps_data(self) -> Optional[Dict[str, Any]]:
+        resp = self._exchange(self.CMD_REQUEST_GPS, expect=1 + self.GPS_PAYLOAD_LEN)
+        if not resp:
+            return None
+        if resp[0] == self.RESP_GPS and len(resp) >= 1 + self.GPS_PAYLOAD_LEN:
+            return self._decode_gps(resp[1:])
+        self._log_unexpected(resp, "GPS")
+        return None
+
+    def request_status(self) -> Optional[Dict[str, Any]]:
+        resp = self._exchange(self.CMD_REQUEST_STATUS, expect=1 + self.STATUS_PAYLOAD_LEN)
+        if not resp:
+            return None
+        if resp[0] == self.RESP_STATUS and len(resp) >= 1 + self.STATUS_PAYLOAD_LEN:
+            return self._decode_status(resp[1:])
+        self._log_unexpected(resp, "STATUS")
+        return None
+
+    def send_heartbeat(self) -> bool:
+        resp = self._exchange(self.CMD_HEARTBEAT, expect=2)
+        return self._is_ack(resp)
+
+    # ------------------------------------------------------------------
+    # Encoding helpers
+    # ------------------------------------------------------------------
+    def _encode_waypoint_packet(self, waypoint: Dict[str, Any]) -> bytes:
+        wp_id = int(waypoint.get('id', 0)) & 0xFFFF
+        seq = int(waypoint.get('sequence', 0)) & 0xFF
+        lat = float(waypoint.get('latitude', 0.0))
+        lon = float(waypoint.get('longitude', 0.0))
+        return struct.pack('<HBff', wp_id, seq, lat, lon)
+
+    def _decode_gps(self, payload: bytes) -> Dict[str, Any]:
+        valid = bool(payload[0])
+        if not valid:
+            return {"valid": False}
+        lat, lon, speed, heading = struct.unpack('<ffff', payload[1:17])
+        satellites = payload[17]
+        return {
+            "valid": True,
+            "latitude": lat,
+            "longitude": lon,
+            "speed": speed,
+            "heading": heading,
+            "satellites": satellites
+        }
+
+    def _decode_status(self, payload: bytes) -> Dict[str, Any]:
+        mode = payload[0]
+        nav_active = bool(payload[1])
+        manual_override = bool(payload[2])
+        waypoint_count = payload[3]
+        battery = payload[4]
+        signal = payload[5]
+        return {
+            "mode": "AUTO" if mode == 0 else "MANUAL",
+            "navigation_active": nav_active,
+            "manual_override": manual_override,
+            "waypoint_count": waypoint_count,
+            "battery_percent": battery,
+            "signal_quality": signal
+        }
+
+    def _is_ack(self, resp: Optional[bytes]) -> bool:
+        return bool(resp) and resp[0] == self.RESP_ACK
+
+    def _log_unexpected(self, resp: bytes, label: str) -> None:
+        if not resp:
+            logger.warning("No response when expecting %s", label)
+            return
+        if resp[0] == self.RESP_ERROR and len(resp) > 1:
+            logger.error("Mega reported error for %s: code %s", label, resp[1])
+        else:
+            logger.warning("Unexpected %s response: %s", label, resp.hex())
+
+    def close(self):
+        if self.bus:
+            try:
+                self.bus.close()
+            except Exception:
+                pass
+            self.bus = None
+
+    # Context manager helpers -------------------------------------------------
+    def __enter__(self) -> "I2CComm":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()

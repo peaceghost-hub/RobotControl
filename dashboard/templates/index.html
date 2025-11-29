@@ -1,0 +1,440 @@
+ <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Environmental Monitoring Robot - Dashboard</title>
+    
+    <!-- Leaflet CSS for Maps -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <!-- Chart.js for Data Visualization -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
+    
+    <!-- Socket.IO for Real-time Updates -->
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1>🤖 Environmental Monitoring Robot Dashboard</h1>
+                <div class="header-actions">
+                    <div class="device-selector">
+                        <label for="device-select">Device</label>
+                        <select id="device-select"></select>
+                    </div>
+                    <div class="connection-status">
+                        <span id="connection-indicator" class="status-dot offline"></span>
+                        <span id="connection-text">Connecting...</span>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Quick Toolbar for Overlays and Zoom -->
+        <div class="toolbar">
+            <div class="toolbar-left">
+                <button id="open-sensors-btn" class="btn btn-small">🌡️ Sensors</button>
+                <button id="open-data-btn" class="btn btn-small">📊 Data History</button>
+                <button id="open-waypoints-btn" class="btn btn-small">📋 Waypoints</button>
+                <button id="open-status-btn" class="btn btn-small">🔋 Status</button>
+                <button id="toggle-logs-btn" class="btn btn-small">📝 Logs</button>
+            </div>
+            <div class="toolbar-right">
+                <div class="zoom-controls">
+                    <button id="zoom-out-btn" class="btn btn-small">➖</button>
+                    <button id="zoom-reset-btn" class="btn btn-small">100%</button>
+                    <button id="zoom-in-btn" class="btn btn-small">➕</button>
+                </div>
+                <button id="reset-layout-btn" class="btn btn-small" title="Reset overlay positions and sizes">♻ Reset layout</button>
+                <span class="toolbar-hint">Drag or resize windows. Use zoom to fit your screen.</span>
+            </div>
+        </div>
+
+        <!-- Main Dashboard Grid -->
+        <div id="dashboard-scale">
+        <div class="dashboard-grid">
+            
+            <!-- Top Row: Camera Feed (Left) and GPS Map (Right) -->
+            <div class="panel camera-panel top-left">
+                <div class="panel-header">
+                    <h2>📹 Live Camera Feed</h2>
+                    <div class="camera-controls">
+                        <button id="snapshot-btn" class="btn btn-small">📸 Snapshot</button>
+                        <span id="camera-status" class="status-badge">No Feed</span>
+                        <span id="camera-mode-label" class="status-badge subtle">Relay</span>
+                    </div>
+                </div>
+                <div class="panel-content">
+                    <div class="camera-container">
+                        <img id="camera-feed" src="" alt="Camera Feed" />
+                        <div id="no-camera" class="no-feed-message">
+                            <span>📷</span>
+                            <p>Waiting for camera feed...</p>
+                        </div>
+                    </div>
+                    <div class="camera-info">
+                        <span id="camera-timestamp">--</span>
+                        <span id="camera-fps">0 FPS</span>
+                    </div>
+                    <div id="camera-direct-hint" class="camera-hint" style="display: none;">
+                        Streaming directly from camera endpoint.
+                        <a id="camera-direct-link" href="#" target="_blank">Open in new tab</a>
+                    </div>
+                </div>
+            </div>
+
+            <!-- GPS Map Panel (Right of Camera) -->
+            <div class="panel map-panel top-right">
+                <div class="panel-header">
+                    <h2>🗺️ Robot Location & Navigation</h2>
+                    <div class="map-controls">
+                        <button id="center-robot-btn" class="btn btn-small">🎯 Center</button>
+                        <button id="add-waypoint-btn" class="btn btn-small">📍 Add Waypoint</button>
+                        <button id="clear-waypoints-btn" class="btn btn-small">🗑️ Clear All</button>
+                    </div>
+                </div>
+                <div class="panel-content">
+                    <div id="map" class="map-container"></div>
+                    <div class="gps-info">
+                        <div class="gps-item">
+                            <span class="gps-label">Latitude:</span>
+                            <span id="gps-lat" class="gps-value">--</span>
+                        </div>
+                        <div class="gps-item">
+                            <span class="gps-label">Longitude:</span>
+                            <span id="gps-lon" class="gps-value">--</span>
+                        </div>
+                        <div class="gps-item">
+                            <span class="gps-label">Heading:</span>
+                            <span id="gps-heading" class="gps-value">--°</span>
+                        </div>
+                        <div class="gps-item">
+                            <span class="gps-label">Speed:</span>
+                            <span id="gps-speed" class="gps-value">-- m/s</span>
+                        </div>
+                        <div class="gps-item">
+                            <span class="gps-label">Source:</span>
+                            <span id="gps-source" class="gps-value">--</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Automatic Control Panel (Bottom-left) -->
+            <div class="panel control-panel bottom-left">
+                <div class="panel-header">
+                    <h2>🧭 Automatic Control</h2>
+                    <span id="control-mode-label" class="status-badge">AUTO</span>
+                </div>
+                <div class="panel-content">
+                    <div class="control-section">
+                        <div class="section-header">
+                            <h3>Autonomous Navigation</h3>
+                            <div class="control-actions">
+                                <button id="nav-start-btn" class="btn btn-primary">▶ Start</button>
+                                <button id="nav-pause-btn" class="btn btn-small">⏸ Pause</button>
+                                <button id="nav-resume-btn" class="btn btn-small">⏯ Resume</button>
+                                <button id="nav-stop-btn" class="btn btn-small danger">⏹ Stop</button>
+                            </div>
+                        </div>
+                        <div class="control-help">Send current waypoint queue and command the Mega to run autonomously.</div>
+                        <button id="send-waypoints-btn" class="btn btn-outline">📬 Send Waypoints</button>
+                    </div>
+
+                    <div class="control-section">
+                        <div class="section-header">
+                            <h3>Manual Override</h3>
+                            <button id="manual-release-btn" class="btn btn-small">🤖 Return to Auto</button>
+                        </div>
+                        <div class="manual-grid">
+                            <button id="manual-forward-btn" class="control-key">▲</button>
+                            <div class="manual-middle">
+                                <button id="manual-left-btn" class="control-key">◀</button>
+                                <button id="manual-stop-btn" class="control-key">■</button>
+                                <button id="manual-right-btn" class="control-key">▶</button>
+                            </div>
+                            <button id="manual-reverse-btn" class="control-key">▼</button>
+                        </div>
+                        <div class="speed-control">
+                            <label for="manual-speed-slider">Manual speed</label>
+                            <input type="range" id="manual-speed-slider" min="80" max="255" value="180">
+                            <span id="manual-speed-display">180</span>
+                        </div>
+                    </div>
+                    <div class="control-section gsm-hint">
+                        <h3>Connectivity Resilience</h3>
+                        <p>Configured for SIM800L primary uplink with room to upgrade to a higher bandwidth GSM/LTE module if live streaming requires it.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ZigBee Backup Control Panel (Bottom-right) -->
+            <div class="panel backup-panel bottom-right">
+                <div class="panel-header">
+                    <h2>🛰️ ZigBee Backup Control</h2>
+                    <span id="backup-status-pill" class="status-badge subtle">Disabled</span>
+                </div>
+                <div class="panel-content">
+                    <div class="control-help">Fallback control path routed through the ZigBee bridge when the Raspberry Pi is offline.</div>
+
+                    <div class="backup-meta">
+                        <span>Device: <strong id="backup-device-id">--</strong></span>
+                        <span>Last update: <strong id="backup-last-update">--</strong></span>
+                        <span>Last command: <strong id="backup-last-command">--</strong></span>
+                    </div>
+
+                    <div class="backup-actions">
+                        <button id="backup-engage-btn" class="btn btn-small">🔗 Engage</button>
+                        <button id="backup-release-btn" class="btn btn-small">🤖 Return</button>
+                    </div>
+
+                    <div class="backup-grid">
+                        <button id="backup-forward-btn" class="control-key">▲</button>
+                        <button id="backup-left-btn" class="control-key">◀</button>
+                        <button id="backup-stop-btn" class="control-key">■</button>
+                        <button id="backup-right-btn" class="control-key">▶</button>
+                        <button id="backup-reverse-btn" class="control-key">▼</button>
+                    </div>
+
+                    <div class="speed-control">
+                        <label for="backup-speed-slider">Backup speed</label>
+                        <input type="range" id="backup-speed-slider" min="80" max="255" value="160">
+                        <span id="backup-speed-display">160</span>
+                    </div>
+
+                    <div class="backup-meta">
+                        <span>Lat: <strong id="backup-lat">--</strong></span>
+                        <span>Lon: <strong id="backup-lon">--</strong></span>
+                        <span>Heading: <strong id="backup-heading">--°</strong></span>
+                        <span>Speed: <strong id="backup-speed">-- m/s</strong></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Close grid containers -->
+        </div>
+        </div>
+
+        </div>
+
+        <!-- Overlay Windows (Less-Critical Panels) -->
+        <!-- Waypoints Overlay -->
+        <div class="panel waypoints-panel overlay-window hidden" data-overlay-id="waypoints" style="width: 460px; height: 540px; left: 20px; top: 140px;">
+            <div class="panel-header overlay-header">
+                <h2>📋 Waypoint Queue</h2>
+                <span id="waypoint-count" class="badge">0</span>
+                <div class="overlay-actions">
+                    <button class="btn btn-small overlay-close" data-overlay-target="waypoints">✖</button>
+                </div>
+            </div>
+            <div class="panel-content">
+                <div id="waypoint-list" class="waypoint-list">
+                    <p class="empty-message">No waypoints set</p>
+                </div>
+                <div class="waypoint-form">
+                    <h3>Add Waypoint Manually</h3>
+                    <p class="waypoint-hint">Queue positions here then press <strong>Send Waypoints</strong> in the control panel to push them to the robot.</p>
+                    <input type="number" id="waypoint-lat" placeholder="Latitude" step="0.000001">
+                    <input type="number" id="waypoint-lon" placeholder="Longitude" step="0.000001">
+                    <input type="text" id="waypoint-desc" placeholder="Description (optional)">
+                    <button id="add-waypoint-manual-btn" class="btn btn-primary">Add Waypoint</button>
+                </div>
+            </div>
+            <div class="resize-handle" data-resize="se"></div>
+        </div>
+
+        <!-- Sensors Overlay -->
+        <div class="panel sensors-panel overlay-window hidden" data-overlay-id="sensors" style="width: 560px; height: 560px; right: 20px; top: 140px;">
+            <div class="panel-header overlay-header">
+                <h2>🌡️ Environmental Sensors</h2>
+                <div class="overlay-actions">
+                    <button id="export-data-btn" class="btn btn-small">Export</button>
+                    <button class="btn btn-small overlay-close" data-overlay-target="sensors">✖</button>
+                </div>
+            </div>
+            <div class="panel-content">
+                <div class="sensor-grid">
+                    <!-- Temperature -->
+                    <div class="sensor-card">
+                        <div class="sensor-icon">🌡️</div>
+                        <div class="sensor-info">
+                            <span class="sensor-label">Temperature</span>
+                            <span id="temperature" class="sensor-value">-- °C</span>
+                        </div>
+                    </div>
+                    
+                    <!-- Humidity -->
+                    <div class="sensor-card">
+                        <div class="sensor-icon">💧</div>
+                        <div class="sensor-info">
+                            <span class="sensor-label">Humidity</span>
+                            <span id="humidity" class="sensor-value">-- %</span>
+                        </div>
+                    </div>
+                    
+                    <!-- MQ-2 (Smoke/LPG) -->
+                    <div class="sensor-card">
+                        <div class="sensor-icon">💨</div>
+                        <div class="sensor-info">
+                            <span class="sensor-label">MQ-2 (Smoke)</span>
+                            <span id="mq2" class="sensor-value">--</span>
+                        </div>
+                    </div>
+                    
+                    <!-- MQ-135 (Air Quality) -->
+                    <div class="sensor-card">
+                        <div class="sensor-icon">🌫️</div>
+                        <div class="sensor-info">
+                            <span class="sensor-label">MQ-135 (CO2)</span>
+                            <span id="mq135" class="sensor-value">--</span>
+                        </div>
+                    </div>
+                    
+                    <!-- MQ-7 (CO) -->
+                    <div class="sensor-card">
+                        <div class="sensor-icon">⚠️</div>
+                        <div class="sensor-info">
+                            <span class="sensor-label">MQ-7 (CO)</span>
+                            <span id="mq7" class="sensor-value">--</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Sensor Chart -->
+                <div class="chart-container">
+                    <canvas id="sensorChart"></canvas>
+                </div>
+            </div>
+            <div class="resize-handle" data-resize="se"></div>
+        </div>
+
+        <!-- Data Overlay -->
+        <div class="panel data-panel overlay-window hidden" data-overlay-id="data" style="width: 720px; height: 520px; left: 520px; top: 160px;">
+            <div class="panel-header overlay-header">
+                <h2>📊 Sensor Data History</h2>
+                <div class="data-controls overlay-actions">
+                    <select id="data-filter">
+                        <option value="all">All Data</option>
+                        <option value="temperature">Temperature</option>
+                        <option value="humidity">Humidity</option>
+                        <option value="gas">Gas Sensors</option>
+                    </select>
+                    <button id="refresh-data-btn" class="btn btn-small">🔄 Refresh</button>
+                    <button class="btn btn-small overlay-close" data-overlay-target="data">✖</button>
+                </div>
+            </div>
+            <div class="panel-content">
+                <div class="table-container">
+                    <table id="data-table">
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>Temp (°C)</th>
+                                <th>Humidity (%)</th>
+                                <th>MQ-2</th>
+                                <th>MQ-135</th>
+                                <th>MQ-7</th>
+                            </tr>
+                        </thead>
+                        <tbody id="data-table-body">
+                            <tr>
+                                <td colspan="6" class="empty-message">No data available</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="pagination">
+                    <button id="prev-page-btn" class="btn btn-small" disabled>← Previous</button>
+                    <span id="page-info">Page 1</span>
+                    <button id="next-page-btn" class="btn btn-small">Next →</button>
+                </div>
+            </div>
+            <div class="resize-handle" data-resize="se"></div>
+        </div>
+
+        <!-- Logs Overlay (Visible by default) -->
+        <div class="panel logs-panel overlay-window" data-overlay-id="logs" style="width: 520px; height: 280px; right: 20px; bottom: 20px;">
+            <div class="panel-header overlay-header">
+                <h2>📝 System Logs</h2>
+                <div class="overlay-actions">
+                    <button id="clear-logs-btn" class="btn btn-small">Clear</button>
+                    <button class="btn btn-small overlay-close" data-overlay-target="logs">✖</button>
+                </div>
+            </div>
+            <div class="panel-content">
+                <div id="log-container" class="log-container">
+                    <div class="log-entry info">
+                        <span class="log-time">--:--:--</span>
+                        <span class="log-message">Dashboard initialized</span>
+                    </div>
+                </div>
+            </div>
+            <div class="resize-handle" data-resize="se"></div>
+        </div>
+
+        <!-- Status Overlay (Resizable) -->
+        <div class="panel status-panel overlay-window hidden" data-overlay-id="status" style="width: 560px; height: 380px; left: 40px; bottom: 20px;">
+            <div class="panel-header overlay-header">
+                <h2>🔋 Robot Status</h2>
+                <span id="last-update" class="timestamp">--</span>
+                <div class="overlay-actions">
+                    <button class="btn btn-small overlay-close" data-overlay-target="status">✖</button>
+                </div>
+            </div>
+            <div class="panel-content">
+                <div class="status-grid">
+                    <div class="status-item">
+                        <span class="status-label">Status</span>
+                        <span id="robot-online" class="status-value">Offline</span>
+                        <span id="robot-status-dot" class="status-dot offline"></span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">Battery</span>
+                        <span id="battery-level" class="status-value">--%</span>
+                        <div class="battery-bar">
+                            <div id="battery-fill" class="battery-fill" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">Signal</span>
+                        <span id="signal-strength" class="status-value">-- dBm</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">GPS Satellites</span>
+                        <span id="gps-satellites" class="status-value">--</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">Backup Link</span>
+                        <span id="backup-status-text" class="status-value">Disabled</span>
+                        <span class="status-note">Last update: <span id="backup-last-update-short">--</span></span>
+                    </div>
+                </div>
+            </div>
+            <div class="resize-handle" data-resize="se"></div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>🎓 ARM-Based Environmental Monitoring Robot | Telecommunications Engineering Project</p>
+            <p>© 2025 - University Undergraduate Project</p>
+        </footer>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <script id="dashboard-config" type="application/json">{{ dashboard_config | tojson }}</script>
+    
+    <!-- Custom JavaScript -->
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/map.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/sensors.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/camera.js') }}"></script>
+</body>
+</html>

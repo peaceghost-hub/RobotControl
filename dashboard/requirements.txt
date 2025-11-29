@@ -1,0 +1,14 @@
+Flask==3.0.0
+Flask-SocketIO==5.3.6
+Flask-CORS==4.0.1
+Flask-SQLAlchemy==3.1.1
+python-socketio==5.11.2
+python-engineio==4.9.1
+SQLAlchemy==2.0.31
+Werkzeug==3.0.3
+eventlet==0.36.1
+python-dotenv==1.0.1
+requests==2.32.3
+Pillow==11.0.0
+opencv-python==4.10.0.84
+numpy==1.26.4

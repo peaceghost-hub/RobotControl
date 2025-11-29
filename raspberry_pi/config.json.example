@@ -1,0 +1,99 @@
+{
+    "device_id": "robot_01",
+    "log_level": "INFO",
+    
+    "update_interval": 5,
+    "gps_update_interval": 2,
+    "status_update_interval": 10,
+    "waypoint_check_interval": 5,
+    
+    "sensors": {
+        "dht": {
+            "pin": 4,
+            "type": "DHT22"
+        },
+        "mq_sensors": {
+            "mq7": {
+                "channel": 1,
+                "enabled": true,
+                "calibration": 1.0
+            },
+            "mq135": {
+                "channel": 0,
+                "enabled": true,
+                "calibration": 1.0
+            }
+        },
+        "adc": {
+            "type": "ADS1015",
+            "address": 72,
+            "gain": 1
+        }
+    },
+    
+    "gsm": {
+        "port": "/dev/ttyUSB0",
+        "baudrate": 115200,
+        "apn": "your-apn-here",
+        "apn_user": "",
+        "apn_password": "",
+        "module_type": "SIM800L"
+    },
+    
+    "i2c": {
+        "bus": 1,
+        "mega_address": 8,
+        "retry_attempts": 3,
+        "request_timeout_ms": 200
+    },
+
+    "zigbee": {
+        "enabled": true,
+        "serial_port": "/dev/ttyUSB1",
+        "baudrate": 57600
+    },
+
+    "cloud_integrations": {
+        "thingspeak": {
+            "enabled": false,
+            "api_key": "",
+            "channel_id": "",
+            "field_map": {
+                "temperature": 1,
+                "humidity": 2,
+                "mq7": 3,
+                "mq135": 4
+            }
+        },
+        "blynk": {
+            "enabled": false,
+            "auth_token": "",
+            "virtual_pins": {
+                "temperature": "V0",
+                "humidity": "V1",
+                "mq7": "V2",
+                "mq135": "V3"
+            }
+        }
+    },
+    
+    "camera": {
+        "resolution": [640, 480],
+        "fps": 5,
+        "quality": 75,
+        "rotation": 0
+    },
+    
+    "dashboard_api": {
+        "base_url": "http://your-dashboard-server:5000",
+        "endpoints": {
+            "sensor_data": "/api/sensor_data",
+            "gps_data": "/api/gps_data",
+            "status": "/api/status",
+            "camera_frame": "/api/camera/frame",
+            "waypoints": "/api/waypoints"
+        },
+        "timeout": 10,
+        "retry_attempts": 3
+    }
+}
