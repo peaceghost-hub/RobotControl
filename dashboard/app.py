@@ -94,7 +94,8 @@ app.config.from_object(Config)
 CORS(app)
 
 # Initialize SocketIO for real-time communication
-socketio = SocketIO(app, cors_allowed_origins="*")
+# Force threading async mode to avoid eventlet/gevent on Python 3.13
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 # Initialize database
 db.init_app(app)
