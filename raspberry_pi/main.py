@@ -7,9 +7,13 @@ import time
 import json
 import logging
 import sys
+import os
 import signal
 from datetime import datetime
 from threading import Thread, Event
+
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import custom modules
 from raspberry_pi.sensors.sensor_manager import SensorManager
@@ -98,15 +102,26 @@ class RobotController:
         self.waypoint_interval = CONFIG.get('waypoint_check_interval', 5)
         
         # Initialize components
+        # Sensor Manager (optional)
+        self.sensor_manager = None
         try:
             self.sensor_manager = SensorManager(CONFIG['sensors'])
             logger.info("Sensor Manager initialized")
-            
+        except Exception as e:
+            logger.warning(f"Sensor Manager not available: {e}")
+        
+        # GSM Module (optional)
+        self.gsm = None
+        try:
             self.gsm = GSMModule(CONFIG['gsm'])
             logger.info("GSM Module initialized")
-            
-            self.comm_mode = None
-            self.robot_link = None
+        except Exception as e:
+            logger.warning(f"GSM Module not available: {e}")
+        
+        # Arduino Mega communication (optional)
+        self.comm_mode = None
+        self.robot_link = None
+        try:
             if CONFIG.get('i2c'):
                 self.robot_link = I2CComm(CONFIG['i2c'])
                 self.comm_mode = 'i2c'
@@ -118,21 +133,36 @@ class RobotController:
                 self.comm_mode = 'serial'
                 logger.info("Configured serial communication with Mega")
             else:
-                raise ValueError("No communication configuration found for Mega controller")
-            
+                logger.warning("No communication configuration found for Mega controller - running without navigation")
+        except Exception as e:
+            logger.warning(f"Arduino Mega communication not available: {e}")
+        
+        # Dashboard API (required)
+        try:
             self.api_client = DashboardAPI(CONFIG['dashboard_api'], self.device_id)
             logger.info("Dashboard API Client initialized")
-            
+        except Exception as e:
+            logger.error(f"Failed to initialize Dashboard API: {e}")
+            raise
+        
+        # Cloud uploader (optional)
+        try:
             self.cloud_uploader = CloudUploader(CONFIG.get('cloud_integrations'))
             logger.info("Cloud uploader configured")
-
-            self.camera = CameraStream(CONFIG['camera'])
-            logger.info("Camera Stream initialized")
-            self.command_poll_interval = CONFIG.get('command_poll_interval', 2)
-            
         except Exception as e:
-            logger.error(f"Failed to initialize components: {e}")
-            raise
+            logger.warning(f"Cloud uploader not available: {e}")
+            self.cloud_uploader = None
+
+        # Camera (optional)
+        self.camera = None
+        if CONFIG.get('camera', {}).get('enabled', False):
+            try:
+                self.camera = CameraStream(CONFIG['camera'])
+                logger.info("Camera Stream initialized")
+            except Exception as e:
+                logger.warning(f"Camera not available: {e}")
+        
+        self.command_poll_interval = CONFIG.get('command_poll_interval', 2)
         
         # Thread management
         self.threads = []
@@ -142,34 +172,45 @@ class RobotController:
         logger.info("Starting Robot Controller...")
         
         try:
-            # Connect GSM
-            if not self.gsm.connect():
-                logger.error("Failed to connect GSM module")
-                return False
-            
-            # Wait for internet connection
-            logger.info("Waiting for internet connection...")
-            while not self.gsm.check_internet():
-                time.sleep(5)
-            logger.info("Internet connected!")
+            # Connect GSM (optional - gracefully handle if hardware not available)
+            if self.gsm:
+                try:
+                    if self.gsm.connect():
+                        logger.info("GSM module connected")
+                        # Wait for internet connection
+                        logger.info("Waiting for internet connection...")
+                        for _ in range(3):  # Try 3 times, 5 seconds each
+                            if self.gsm.check_internet():
+                                logger.info("Internet connected via GSM!")
+                                break
+                            time.sleep(5)
+                    else:
+                        logger.warning("GSM module not connected - continuing without it")
+                except Exception as e:
+                    logger.warning(f"GSM initialization failed: {e} - continuing without it")
             
             # Start navigation communication link
-            if self.comm_mode == 'serial' and self.robot_link:
-                self.robot_link.start()
-            elif self.comm_mode == 'i2c' and self.robot_link:
-                if not self.robot_link.ping():
-                    logger.warning("Mega did not acknowledge I2C ping")
+            if self.robot_link:
+                try:
+                    if self.comm_mode == 'serial':
+                        self.robot_link.start()
+                    elif self.comm_mode == 'i2c':
+                        if not self.robot_link.ping():
+                            logger.warning("Mega did not acknowledge I2C ping")
+                except Exception as e:
+                    logger.warning(f"Failed to start navigation link: {e}")
             
             # Start camera streaming
-            if CONFIG['camera'].get('enabled', True):
+            if self.camera:
                 camera_thread = Thread(target=self.camera_loop, daemon=True)
                 camera_thread.start()
                 self.threads.append(camera_thread)
             
             # Start sensor reading loop
-            sensor_thread = Thread(target=self.sensor_loop, daemon=True)
-            sensor_thread.start()
-            self.threads.append(sensor_thread)
+            if self.sensor_manager:
+                sensor_thread = Thread(target=self.sensor_loop, daemon=True)
+                sensor_thread.start()
+                self.threads.append(sensor_thread)
             
             # Start GPS update loop
             gps_thread = Thread(target=self.gps_loop, daemon=True)
@@ -203,25 +244,40 @@ class RobotController:
         
         while not shutdown_event.is_set():
             try:
-                # Read all sensors
-                sensor_data = self.sensor_manager.read_all()
+                if not self.sensor_manager:
+                    logger.debug("Sensor manager not available, skipping")
+                    shutdown_event.wait(self.update_interval)
+                    continue
+                
+                # Read sensors
+                sensor_data = self.sensor_manager.read_all() if self.sensor_manager else {}
                 
                 # Add timestamp and device ID
                 sensor_data['timestamp'] = datetime.now().isoformat()
                 sensor_data['device_id'] = self.device_id
                 
+                # Replace None values with 0 for numeric fields
+                for key in ['temperature', 'humidity', 'mq7', 'mq135']:
+                    if sensor_data.get(key) is None:
+                        sensor_data[key] = 0
+                
                 # Send to dashboard
                 success = self.api_client.send_sensor_data(sensor_data)
                 
                 if success:
-                    logger.debug(f"Sensor data sent: Temp={sensor_data.get('temperature', 0):.1f}°C")
+                    temp = sensor_data.get('temperature', 0)
+                    if temp is not None:
+                        logger.debug(f"Sensor data sent: Temp={temp:.1f}°C")
+                    else:
+                        logger.debug("Sensor data sent (no readings)")
                 else:
                     logger.warning("Failed to send sensor data")
 
-                try:
-                    self.cloud_uploader.publish_sensor_data(sensor_data)
-                except Exception as exc:
-                    logger.error(f"Error publishing to cloud services: {exc}")
+                if self.cloud_uploader:
+                    try:
+                        self.cloud_uploader.publish_sensor_data(sensor_data)
+                    except Exception as exc:
+                        logger.error(f"Error publishing to cloud services: {exc}")
                 
             except Exception as e:
                 logger.error(f"Error in sensor loop: {e}")
@@ -271,7 +327,7 @@ class RobotController:
                 status_data = {
                     'online': True,
                     'battery': self.get_battery_level(),
-                    'signal_strength': self.gsm.get_signal_strength(),
+                    'signal_strength': self.gsm.get_signal_strength() if self.gsm else 0,
                     'system_info': {
                         'cpu': psutil.cpu_percent(),
                         'memory': psutil.virtual_memory().percent,
@@ -507,14 +563,15 @@ class RobotController:
         
         # Stop components
         try:
-            if CONFIG['camera'].get('enabled', True):
+            if self.camera and hasattr(self.camera, 'stop'):
                 self.camera.stop()
             if self.robot_link:
                 if self.comm_mode == 'serial' and hasattr(self.robot_link, 'stop'):
                     self.robot_link.stop()
                 elif hasattr(self.robot_link, 'close'):
                     self.robot_link.close()
-            self.gsm.disconnect()
+            if self.gsm and hasattr(self.gsm, 'disconnect'):
+                self.gsm.disconnect()
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
         

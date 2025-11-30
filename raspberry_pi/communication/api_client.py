@@ -143,6 +143,22 @@ class DashboardAPI:
             return response.get('data', [])
         return None
     
+    def fetch_pending_commands(self) -> Optional[List[Dict]]:
+        """
+        Fetch pending commands from dashboard
+        
+        Returns:
+            List of command dictionaries or None
+        """
+        params = f"?device_id={self.device_id}"
+        # Use the commands/pending endpoint
+        endpoint = self.endpoints.get('commands', '/api/commands/pending')
+        response = self._make_request('GET', endpoint + params)
+        
+        if response and response.get('status') == 'success':
+            return response.get('commands', [])
+        return []
+    
     def test_connection(self) -> bool:
         """
         Test connection to dashboard
