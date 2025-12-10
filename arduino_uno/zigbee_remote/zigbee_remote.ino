@@ -1,13 +1,13 @@
 /*
- * Arduino UNO ZigBee Remote Controller
+ * Arduino UNO Multi-Protocol Remote Controller (ZigBee / BLE / UART LoRa)
  * - Reads a 2-axis joystick (A0: X, A1: Y) and optional button (D4)
- * - Sends control frames over ZigBee (transparent serial) using SoftwareSerial
+ * - Sends control frames over a selected wireless link (SoftwareSerial)
  * - Receives location frames from the robot and prints them to USB Serial
- * - Periodic HELLO heartbeat announces controller ID
+ * - Periodic HELLO heartbeat announces controller ID + protocol
  *
- * Frame formats (compatible with dashboard zigbee_bridge legacy parser):
- *   Outgoing control:   "JOYSTICK,<direction>,<speed>\n" where direction in {forward,left,right,reverse,stop}
- *   Heartbeat:          "HELLO,<deviceId>\n"
+ * Frame formats (matches Mega wireless parser):
+ *   Outgoing control:   "MCTL,<DIR>[,<SPEED>]" where DIR in {FORWARD,BACKWARD,LEFT,RIGHT,STOP}
+ *   Heartbeat:          "HELLO,<deviceId>,<protocol>"
  *   Incoming GPS:       "GPS,<lat>,<lon>,<speed>,<heading>,<sats>,<iso8601>\n"
  *
  * Wiring:
@@ -24,10 +24,30 @@
 #include <Arduino.h>
 #include <SoftwareSerial.h>
 
+// ---------------- Protocol Selection ----------------
+// Select exactly one link below.
+#define USE_ZIGBEE 1
+// #define USE_BLE 1
+// #define USE_LORA 1
+
+#if (defined(USE_ZIGBEE) + defined(USE_BLE) + defined(USE_LORA)) != 1
+#error "Select exactly one protocol: USE_ZIGBEE, USE_BLE, or USE_LORA"
+#endif
+
 // ---------------- Configuration ----------------
-static const uint8_t PIN_ZIGBEE_RX = 2;   // UNO receives on 2 (connect to ZigBee TX)
-static const uint8_t PIN_ZIGBEE_TX = 3;   // UNO transmits on 3 (connect to ZigBee RX via level shift)
-static const long    ZIGBEE_BAUD   = 57600; // common for XBee, adjust to module config
+static const uint8_t PIN_LINK_RX = 2;   // UNO receives on 2 (connect to module TX)
+static const uint8_t PIN_LINK_TX = 3;   // UNO transmits on 3 (connect via level shift if needed)
+
+#if defined(USE_ZIGBEE)
+static const long LINK_BAUD = 57600;    // common for XBee in transparent mode
+static const char* LINK_NAME = "zigbee";
+#elif defined(USE_BLE)
+static const long LINK_BAUD = 38400;    // HC-05 default in AT mode; adjust if your module uses 9600
+static const char* LINK_NAME = "ble";
+#elif defined(USE_LORA)
+static const long LINK_BAUD = 9600;     // typical UART LoRa (e.g., E32) transparent serial
+static const char* LINK_NAME = "lora";
+#endif
 
 static const uint8_t PIN_JOY_X = A0;
 static const uint8_t PIN_JOY_Y = A1;
@@ -42,7 +62,7 @@ static const unsigned long SEND_INTERVAL_MS = 120;   // throttle transmissions
 static const unsigned long HEARTBEAT_MS    = 5000;   // HELLO interval
 
 // ------------------------------------------------
-SoftwareSerial zigbee(PIN_ZIGBEE_RX, PIN_ZIGBEE_TX); // RX, TX
+SoftwareSerial linkSerial(PIN_LINK_RX, PIN_LINK_TX); // RX, TX
 
 struct JoyState {
   int xRaw;
@@ -57,10 +77,10 @@ JoyState lastSent = {0,0,0,0,"stop", 0};
 unsigned long lastSendAt = 0;
 unsigned long lastHelloAt = 0;
 
-// Utility: safe string send to ZigBee port
-void sendZigbeeLine(const String& line) {
-  zigbee.print(line);
-  zigbee.print('\n');
+// Utility: safe string send to the selected link
+void sendLinkLine(const String& line) {
+  linkSerial.print(line);
+  linkSerial.print('\n');
 }
 
 // Map joystick deflection to direction/speed
@@ -129,24 +149,33 @@ bool joyChanged(const JoyState& a, const JoyState& b) {
 void maybeSendHeartbeat() {
   unsigned long now = millis();
   if (now - lastHelloAt >= HEARTBEAT_MS) {
-    String line = String("HELLO,") + DEVICE_ID;
-    sendZigbeeLine(line);
+    String line = String("HELLO,") + DEVICE_ID + "," + LINK_NAME;
+    sendLinkLine(line);
     lastHelloAt = now;
   }
 }
 
 void sendJoystick(const JoyState& s) {
-  String line = String("JOYSTICK,") + s.direction + "," + String(s.speed);
-  sendZigbeeLine(line);
+  // Match Mega wireless parser: expects "MCTL,<DIR>[,<SPEED>]"
+  String line;
+  if (String(s.direction) == "stop") {
+    line = F("MCTL,STOP");
+  } else {
+    // Direction keywords: FORWARD, BACKWARD, LEFT, RIGHT
+    String dir = String(s.direction);
+    dir.toUpperCase();
+    line = String("MCTL,") + dir + "," + String(s.speed);
+  }
+  sendLinkLine(line);
   lastSent = s;
   lastSendAt = millis();
 }
 
-// Read a line from ZigBee (non-blocking), returns true if a full line is available
-bool readZigbeeLine(String& out) {
+// Read a line from the selected link (non-blocking), returns true if a full line is available
+bool readLinkLine(String& out) {
   static String buf;
-  while (zigbee.available()) {
-    char c = (char)zigbee.read();
+  while (linkSerial.available()) {
+    char c = (char)linkSerial.read();
     if (c == '\n' || c == '\r') {
       if (buf.length() > 0) {
         out = buf;
@@ -184,13 +213,14 @@ void setup() {
   pinMode(PIN_JOY_SW, INPUT_PULLUP);
 
   Serial.begin(115200);           // USB serial for debug
-  zigbee.begin(ZIGBEE_BAUD);      // ZigBee serial
+  linkSerial.begin(LINK_BAUD);    // Selected link serial
 
   delay(500);
-  Serial.println(F("UNO ZigBee Remote starting..."));
+  Serial.print(F("UNO remote starting on "));
+  Serial.println(LINK_NAME);
 
   // Initial HELLO
-  sendZigbeeLine(String("HELLO,") + DEVICE_ID);
+  sendLinkLine(String("HELLO,") + DEVICE_ID + "," + LINK_NAME);
   lastHelloAt = millis();
 }
 
@@ -212,9 +242,9 @@ void loop() {
     digitalWrite(LED_BUILTIN, LOW);
   }
 
-  // Receive frames from robot via ZigBee (GPS, etc.)
+  // Receive frames from robot via selected link (GPS, etc.)
   String frame;
-  if (readZigbeeLine(frame)) {
+  if (readLinkLine(frame)) {
     handleInboundFrame(frame);
   }
 }

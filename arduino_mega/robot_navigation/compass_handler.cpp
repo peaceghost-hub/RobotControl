@@ -1,31 +1,18 @@
-/*
- * Compass Handler Implementation
- */
-
 #include "compass_handler.h"
+#include <Arduino.h>
+#include <Wire.h>
 
-CompassHandler::CompassHandler() {
-    heading = 0;
-    declination = 0;  // Set based on your location
-    initialized = false;
+CompassHandler::CompassHandler() 
+  : heading(0), 
+    declination(0),  // Set based on your location
+    initialized(false) {
 }
 
 bool CompassHandler::begin() {
-    Wire.begin();
-    
-    compass = HMC5883L();
-    
     if (!compass.begin()) {
-        Serial.println(F("# Compass init failed"));
         return false;
     }
-    
-    // Set measurement mode
-    compass.setRange(HMC5883L_RANGE_1_3GA);
-    compass.setMeasurementMode(HMC5883L_CONTINOUS);
-    compass.setDataRate(HMC5883L_DATARATE_30HZ);
-    compass.setSamples(HMC5883L_SAMPLES_8);
-    
+    compass.setMagGain(HMC5883_MAGGAIN_1_3);  // 1.3 gain
     initialized = true;
     return true;
 }
@@ -33,12 +20,14 @@ bool CompassHandler::begin() {
 void CompassHandler::update() {
     if (!initialized) return;
     
-    Vector norm = compass.readNormalize();
+    // Get a new sensor event
+    compass.getEvent(&event);
     
-    // Calculate heading
-    float headingRad = atan2(norm.YAxis, norm.XAxis);
+    // Calculate heading when the magnetometer is level, then the direction of the heading
+    // is equal to: atan2(y, x) in radians
+    float headingRad = atan2(event.magnetic.y, event.magnetic.x);
     
-    // Apply declination
+    // Add declination (convert to radians and add)
     headingRad += declination;
     
     // Correct for when signs are reversed
@@ -52,22 +41,19 @@ void CompassHandler::update() {
     }
     
     // Convert to degrees
-    heading = headingRad * 180.0 / PI;
+    heading = headingRad * 180 / PI;
 }
 
-float CompassHandler::getHeading() {
+float CompassHandler::getHeading() const {
     return heading;
 }
 
 void CompassHandler::setDeclination(float dec) {
-    // Declination in radians
-    // Find your declination: https://www.magnetic-declination.com/
-    declination = dec * PI / 180.0;
+    declination = dec * (PI / 180);  // Convert from degrees to radians
 }
 
 void CompassHandler::calibrate() {
-    Serial.println(F("# Compass calibration: Rotate robot 360 degrees"));
-    // Add calibration routine here
-    delay(10000);
-    Serial.println(F("# Calibration complete"));
+    // Calibration would go here
+    // This typically involves rotating the device in a figure-8 pattern
+    // and collecting min/max values for each axis
 }

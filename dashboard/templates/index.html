@@ -29,8 +29,16 @@
                         <select id="device-select"></select>
                     </div>
                     <div class="connection-status">
-                        <span id="connection-indicator" class="status-dot offline"></span>
-                        <span id="connection-text">Connecting...</span>
+                        <div class="status-item">
+                            <span>WebSocket:</span>
+                            <span id="websocket-indicator" class="status-dot offline"></span>
+                            <span id="websocket-text">Disconnected</span>
+                        </div>
+                        <div class="status-item">
+                            <span>Device:</span>
+                            <span id="device-indicator" class="status-dot offline"></span>
+                            <span id="device-text">Offline</span>
+                        </div>
                     </div>
                 </div>
             </div>

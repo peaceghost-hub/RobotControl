@@ -8,22 +8,29 @@
 
 #include <Arduino.h>
 #include <Wire.h>
-#include <HMC5883L.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_HMC5883_U.h>
+
+// Define PI if not already defined
+#ifndef PI
+#define PI 3.14159265358979323846
+#endif
 
 class CompassHandler {
-private:
-    HMC5883L compass;
-    float heading;
-    float declination;  // Magnetic declination for location
-    bool initialized;
-    
 public:
     CompassHandler();
     bool begin();
     void update();
-    float getHeading();
+    float getHeading() const;
     void setDeclination(float dec);
     void calibrate();
+
+private:
+    Adafruit_HMC5883_Unified compass;
+    sensors_event_t event;
+    float heading;
+    float declination;
+    bool initialized;
 };
 
-#endif
+#endif // COMPASS_HANDLER_H

@@ -39,6 +39,8 @@ window.CONFIG = CONFIG;
 // Global state
 const state = {
     connected: false,
+    lastStatusUpdate: null,
+    statusCheckInterval: null,
     latestData: {
         sensors: {},
         gps: {},
@@ -75,6 +77,9 @@ let socket;
 function initDashboard() {
     console.log('Initializing Dashboard...');
     addLog('info', 'Dashboard initializing...');
+    
+    // Initialize status check interval (check every 2 seconds)
+    state.statusCheckInterval = setInterval(checkRobotStatus, 2000);
     
     initDeviceSelector();
     initOverlaySystem();
@@ -149,7 +154,7 @@ function connectWebSocket() {
     socket.on('connect', () => {
         console.log('WebSocket connected');
         state.connected = true;
-        updateConnectionStatus(true);
+        updateConnectionStatus('websocket', true);
         addLog('success', 'Connected to server');
         
         // Request initial data
@@ -159,7 +164,8 @@ function connectWebSocket() {
     socket.on('disconnect', () => {
         console.log('WebSocket disconnected');
         state.connected = false;
-        updateConnectionStatus(false);
+        updateConnectionStatus('websocket', false);
+        updateConnectionStatus('device', false); // Also set device to offline if WebSocket disconnects
         addLog('warning', 'Disconnected from server');
     });
     
@@ -210,17 +216,29 @@ function connectWebSocket() {
 
 /**
  * Update Connection Status Indicator
+ * @param {string} type - 'websocket' or 'device'
+ * @param {boolean} connected - Connection status
  */
-function updateConnectionStatus(connected) {
-    const indicator = document.getElementById('connection-indicator');
-    const text = document.getElementById('connection-text');
+function updateConnectionStatus(type, connected) {
+    const indicator = document.getElementById(`${type}-indicator`);
+    const text = document.getElementById(`${type}-text`);
+    
+    if (!indicator || !text) return;
     
     if (connected) {
         indicator.className = 'status-dot online';
-        text.textContent = 'Connected';
+        text.textContent = type === 'websocket' ? 'Connected' : 'Online';
+        // Set class for styling
+        text.className = type === 'websocket' ? 'connected' : 'online';
+        // Remove any inline color styles
+        text.style.color = '';
     } else {
         indicator.className = 'status-dot offline';
-        text.textContent = 'Disconnected';
+        text.textContent = type === 'websocket' ? 'Disconnected' : 'Offline';
+        // Set class for styling
+        text.className = type === 'websocket' ? 'disconnected' : 'offline';
+        // Remove any inline color styles
+        text.style.color = '';
     }
 }
 
@@ -285,7 +303,13 @@ function handleGPSUpdate(data) {
  * Handle Status Update
  */
 function handleStatusUpdate(data) {
+    // Track when we received this status update
+    state.lastStatusUpdate = new Date();
     state.latestData.status = data;
+    
+    // Update device connection status
+    updateConnectionStatus('device', data.online);
+    
     if (typeof data.manual_override === 'boolean') {
         state.manualOverride = data.manual_override;
     }
@@ -1083,12 +1107,41 @@ function updateControlIndicators() {
 }
 
 /**
+ * Check if the robot is still connected by verifying the last status update time
+ */
+function checkRobotStatus() {
+    if (!state.latestData.status || !state.latestData.status.last_update) {
+        // No status received yet
+        return;
+    }
+    
+    const now = new Date();
+    const lastUpdate = new Date(state.latestData.status.last_update);
+    const secondsSinceUpdate = (now - lastUpdate) / 1000;
+    
+    // If no update in the last 10 seconds and currently marked as online, mark as offline
+    if (secondsSinceUpdate > 10 && state.latestData.status.online) {
+        const statusUpdate = {
+            ...state.latestData.status,
+            online: false,
+            last_update: now.toISOString()
+        };
+        handleStatusUpdate(statusUpdate);
+        addLog('warning', 'Robot connection lost - no recent status updates');
+    }
+}
+
+/**
  * Update Element Content
  */
 function updateElement(id, content) {
     const element = document.getElementById(id);
     if (element) {
-        element.textContent = content;
+        if (element.tagName === 'INPUT' || element.tagName === 'SELECT') {
+            element.value = content;
+        } else {
+            element.textContent = content;
+        }
     }
 }
 
@@ -1313,6 +1366,13 @@ function normalizeLocation(raw) {
 
 // Initialize dashboard when DOM is ready
 document.addEventListener('DOMContentLoaded', initDashboard);
+
+// Clean up intervals when page is unloaded
+window.addEventListener('beforeunload', () => {
+    if (state.statusCheckInterval) {
+        clearInterval(state.statusCheckInterval);
+    }
+});
 
 // Make functions globally available
 window.deleteWaypoint = deleteWaypoint;

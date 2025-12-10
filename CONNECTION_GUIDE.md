@@ -172,6 +172,249 @@ const char* DEVICE_ID = "esp32_01";
 
 ---
 
+## 🟣 Arduino Mega Setup
+
+### 1. Hardware Requirements
+
+- Arduino Mega 2560 microcontroller
+- NEO-6M GPS module (UART/Serial1, 9600 baud)
+- HMC5883L 3-axis compass (I2C)
+- HC-SR04 ultrasonic sensor (servo-mounted)
+- KY-032 infrared obstacle sensor
+- SG90 or MG90S servo motor
+- L298N motor driver
+- Wireless module (select one):
+  - **ZigBee**: XBee module (Serial2, 57600 baud)
+  - **LoRa**: RFM95W / SX1276 module (SPI)
+  - **Bluetooth**: HC-05 or HM-10 (Serial3)
+- Passive buzzer
+- Raspberry Pi 3B (I2C master, pins 20 & 21)
+
+### 2. Pin Configuration
+
+#### Arduino Mega 2560 Pin Assignments
+
+```
+DIGITAL PINS:
+  Pin 2   - KY-032 DO (Digital Output) ← NEW: Infrared obstacle detection
+  Pin 8   - HC-SR04 TRIG (Ultrasonic trigger)
+  Pin 9   - HC-SR04 ECHO (Ultrasonic echo)
+  Pin 10  - BUZZER (Passive buzzer)
+  Pin 11  - SERVO (Servo motor control, PWM)
+  Pin 14  - Serial3 TX (Bluetooth module)
+  Pin 15  - Serial3 RX (Bluetooth module)
+  Pin 16  - Serial2 TX (ZigBee module)
+  Pin 17  - Serial2 RX (ZigBee module)
+  Pin 18  - Serial1 TX (GPS module)
+  Pin 19  - Serial1 RX (GPS module)
+  Pin 50  - SPI MISO (LoRa if selected)
+  Pin 51  - SPI MOSI (LoRa if selected)
+  Pin 52  - SPI SCK (LoRa if selected)
+
+ANALOG PINS:
+  A0  - KY-032 AO (Analog Output) ← NEW: Distance proxy (0-1023)
+  A14 - (Available)
+  A15 - (Available)
+
+I2C PINS:
+  Pin 20 (SDA) - I2C to Raspberry Pi
+  Pin 21 (SCL) - I2C to Raspberry Pi
+```
+
+### 3. Wiring Diagrams
+
+#### KY-032 Infrared Obstacle Sensor (NEW)
+
+```
+KY-032 Module:
+┌─────────────┐
+│  VCC  GND   │
+│  DO   AO    │
+└─────────────┘
+    │    │    │    │
+    │    │    │    └──→ A0 (Analog Input)
+    │    │    └───────→ Pin 2 (Digital Input)
+    │    └────────────→ GND
+    └─────────────────→ +5V
+
+Digital Output (DO):
+  • HIGH (5V) when obstacle detected at close range
+  • LOW (0V) when no obstacle
+  • Can be used as binary detection signal
+
+Analog Output (AO):
+  • 0-1023 ADC value (via Pin A0)
+  • Higher value = closer object
+  • Adjustable sensitivity via potentiometer on module
+  • Detection range: ~2-30cm (adjustable)
+
+Connection Summary:
+  VCC   → +5V (Arduino Mega)
+  GND   → GND (Arduino Mega)
+  DO    → Pin 2 (Digital Input, HIGH when obstacle)
+  AO    → A0 (Analog Input, higher value = closer)
+```
+
+#### HC-SR04 Ultrasonic Sensor (Servo-Mounted)
+
+```
+HC-SR04 Module (on servo):
+┌──────────────┐
+│ VCC  GND     │
+│ TRIG ECHO    │
+└──────────────┘
+   │    │   │   │
+   │    │   │   └──→ Pin 9 (Pulse Input)
+   │    │   └──────→ Pin 8 (Trigger Output)
+   │    └──────────→ GND
+   └───────────────→ +5V
+
+Connection Summary:
+  VCC   → +5V (Arduino Mega)
+  GND   → GND (Arduino Mega)
+  TRIG  → Pin 8 (Digital Output, 10µs pulse triggers measurement)
+  ECHO  → Pin 9 (Digital Input, measures echo pulse duration)
+```
+
+#### SG90 Servo Motor
+
+```
+Servo Motor:
+┌──────────────┐
+│ Brown Red Orange │
+│ GND   VCC   PWM  │
+└──────────────┘
+  │    │    │
+  │    │    └──→ Pin 11 (PWM, 1000-2000µs pulse width)
+  │    └───────→ +5V (through power supply if >2A)
+  └────────────→ GND
+
+Connection Summary:
+  GND   → GND (Arduino Mega)
+  VCC   → +5V (Arduino Mega or dedicated power)
+  PWM   → Pin 11 (PWM output)
+
+Servo Angles (milliseconds pulse width):
+  20°  (Left)   ← 1000µs
+  90°  (Center) ← 1500µs
+  160° (Right)  ← 2000µs
+```
+
+#### Wireless Module Selection
+
+**Option A: ZigBee (XBee Module)**
+```
+XBee Module (on Serial2):
+  VCC   → +5V
+  GND   → GND
+  DOUT  → Pin 16 (Serial2 RX)
+  DIN   → Pin 17 (Serial2 TX)
+  Baud: 57600
+```
+
+**Option B: LoRa (RFM95W/SX1276)**
+```
+RFM95W Module (SPI):
+  VCC   → +3.3V (with 100nF capacitor)
+  GND   → GND
+  SCK   → Pin 52 (SPI Clock)
+  MOSI  → Pin 51 (SPI Data Out)
+  MISO  → Pin 50 (SPI Data In)
+  NSS   → Pin 9  (Chip Select)
+  RST   → Pin 8  (Reset)
+  DIO0  → Pin 2  (Interrupt, if using)
+```
+
+**Option C: Bluetooth (HC-05/HM-10)**
+```
+HC-05 Module (on Serial3):
+  VCC   → +5V
+  GND   → GND
+  TX    → Pin 14 (Serial3 RX)
+  RX    → Pin 15 (Serial3 TX)
+  Baud: 38400 (HC-05) or 9600 (HM-10)
+```
+
+#### I2C Devices (Raspberry Pi Connection)
+
+```
+HMC5883L Compass + NEO-6M GPS (via Raspberry Pi I2C):
+  Arduino Mega → Raspberry Pi
+    Pin 20 (SDA) ──→ GPIO 2 (I2C SDA)
+    Pin 21 (SCL) ──→ GPIO 3 (I2C SCL)
+    GND ──────────→ GND
+
+GPS Module (direct Serial1):
+  NEO-6M → Arduino Mega Serial1
+    TX → Pin 18 (Serial1 RX)
+    RX → Pin 19 (Serial1 TX)
+    Baud: 9600
+```
+
+### 4. Software Configuration
+
+Update `globals.h` to select your wireless protocol:
+
+```cpp
+// Uncomment ONE of the following wireless protocols:
+#define WIRELESS_PROTOCOL_ZIGBEE  1    // Use ZigBee (XBee on Serial2)
+// #define WIRELESS_PROTOCOL_LORA      1    // Use LoRa (RFM95W on SPI)
+// #define WIRELESS_PROTOCOL_BLE       1    // Use Bluetooth (HC-05 on Serial3)
+
+// Obstacle detection thresholds
+#define OBSTACLE_THRESHOLD 20       // cm (HC-SR04)
+#define KY032_DETECTION_THRESHOLD 600  // ADC value (KY-032)
+```
+
+### 5. Upload to Arduino Mega
+
+1. **Install Arduino IDE** and select:
+   - Board: "Arduino Mega 2560"
+   - Port: COM port of your Arduino
+   - Programmer: "AVRISP mkII" or similar
+
+2. **Upload the sketch**:
+   ```
+   File → Upload
+   ```
+
+3. **Monitor serial output**:
+   ```
+   Tools → Serial Monitor (115200 baud)
+   ```
+
+### 6. Dual-Sensor Obstacle Detection
+
+The system now uses two complementary obstacle sensors:
+
+| Sensor | Type | Range | Speed | Purpose |
+|--------|------|-------|-------|---------|
+| **HC-SR04** | Ultrasonic | 2-400cm | 30ms/scan | Detailed distance, path planning |
+| **KY-032** | Infrared | 2-30cm | <1ms | Immediate warning, collision prevention |
+
+**Detection Logic**:
+- **KY-032** (infrared) provides immediate detection when obstacle is very close
+- **HC-SR04** (ultrasonic) scans three directions (left, center, right) for path planning
+- **Combined**: Robot reacts immediately to KY-032 alert, then scans with HC-SR04 to find clear path
+- **Fault Tolerance**: If KY-032 fails, system continues with HC-SR04 only
+
+### 7. Testing Dual-Sensor System
+
+```cpp
+// In Arduino Serial Monitor, you should see:
+// # Obstacle avoidance with servo + dual sensors initialized
+// # - HC-SR04 ultrasonic (pins 8-9, servo-scanned)
+// # - KY-032 infrared (pin 2 digital, A0 analog)
+
+// Test obstacle detection:
+// 1. Place hand in front of robot
+// 2. IR sensor detects immediately (KY-032)
+// 3. Ultrasonic scans for clear path
+// 4. Robot attempts to navigate around obstacle
+```
+
+---
+
 ## 📡 API Endpoints
 
 ### Data Sending (Device → Dashboard)

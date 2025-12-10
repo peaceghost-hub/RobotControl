@@ -148,25 +148,58 @@ void Navigation::handleObstacleAvoidance() {
         obstacleDetectedTime = millis();
         Serial.print(F("# Obstacle detected at "));
         Serial.print(obstacleAvoid->getDistance());
-        Serial.println(F("cm"));
+        Serial.println(F("cm - scanning for clear path..."));
     }
     
-    // Stop and wait
+    // Stop immediately
     motors->stop();
-    delay(500);
+    delay(300);
     
-    // Try to go around obstacle
-    // Simple avoidance: turn right
-    motors->turnRight(150);
-    delay(1000);
+    // Scan for clear path
+    Serial.println(F("# Scanning path..."));
+    PathScan scan = obstacleAvoid->scanPath();
     
-    // Move forward a bit
-    motors->forward(150);
-    delay(1000);
+    Serial.print(F("# Scan: L="));
+    Serial.print(scan.leftDist);
+    Serial.print(F("cm C="));
+    Serial.print(scan.centerDist);
+    Serial.print(F("cm R="));
+    Serial.print(scan.rightDist);
+    Serial.println(F("cm"));
     
-    // Turn back left
-    motors->turnLeft(150);
-    delay(1000);
+    // Choose best path
+    if (scan.leftClear && scan.leftDist > scan.rightDist) {
+        // Turn left
+        Serial.println(F("# Turning left to avoid obstacle"));
+        motors->turnLeft(150);
+        delay(800);
+        motors->forward(150);
+        delay(1000);
+    } else if (scan.rightClear) {
+        // Turn right
+        Serial.println(F("# Turning right to avoid obstacle"));
+        motors->turnRight(150);
+        delay(800);
+        motors->forward(150);
+        delay(1000);
+    } else {
+        // No clear path - rotate more aggressively
+        Serial.println(F("# No clear path, rotating..."));
+        motors->turnLeft(180);
+        delay(1500);
+        // Scan again
+        PathScan rescan = obstacleAvoid->scanPath();
+        if (rescan.leftClear || rescan.rightClear) {
+            motors->forward(150);
+            delay(800);
+        } else {
+            // Still blocked, try opposite direction
+            motors->turnRight(180);
+            delay(2000);
+        }
+    }
+    
+    motors->stop();
 }
 
 float Navigation::calculateDistance(float lat1, float lon1, float lat2, float lon2) {

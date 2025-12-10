@@ -7,12 +7,12 @@
 #define NAVIGATION_H
 
 #include <Arduino.h>
+#include "globals.h"
 #include "gps_handler.h"
 #include "compass_handler.h"
 #include "motor_control.h"
 #include "obstacle_avoidance.h"
 
-#define MAX_WAYPOINTS 20
 #define WAYPOINT_RADIUS 5.0  // meters - distance to consider waypoint reached
 
 struct Waypoint {
