@@ -1141,12 +1141,13 @@ def handle_disconnect():
 def handle_update_request(data):
     """Handle request for latest data"""
     with thread_lock:
+        camera_entry = latest_data.get('camera_frame') or {}
         emit('full_update', {
             'sensors': latest_data['sensors'],
             'gps': latest_data['gps'],
             'status': latest_data['status'],
             'camera': {
-                'timestamp': latest_data.get('camera_frame', {}).get('timestamp'),
+                'timestamp': camera_entry.get('timestamp'),
                 # We do not include large frame payloads here to keep event light
             },
             'backup': latest_data.get('backup')
