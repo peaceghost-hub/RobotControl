@@ -37,12 +37,18 @@ class Config:
     API_RATE_LIMIT = 100  # requests per minute
     
     # Camera Configuration
-    CAMERA_FRAME_RATE = 10  # FPS when relaying frames
-    CAMERA_RESOLUTION = (640, 480)
-    CAMERA_QUALITY = 85  # JPEG quality (0-100)
+    CAMERA_FRAME_RATE = int(os.environ.get('CAMERA_FRAME_RATE', 10))  # FPS when relaying frames
+    CAMERA_RESOLUTION = (
+        int(os.environ.get('CAMERA_RES_WIDTH', 640)),
+        int(os.environ.get('CAMERA_RES_HEIGHT', 480))
+    )
+    CAMERA_QUALITY = int(os.environ.get('CAMERA_QUALITY', 85))  # JPEG quality (0-100)
     CAMERA_STREAM_MODE = os.environ.get('CAMERA_STREAM_MODE', 'relay')  # relay | direct
     CAMERA_STREAM_URL = os.environ.get('CAMERA_STREAM_URL', '')  # direct stream endpoint
     CAMERA_ALLOW_FALLBACK = os.environ.get('CAMERA_ALLOW_FALLBACK', 'True') == 'True'
+    # MJPEG relay served by dashboard when True
+    CAMERA_MJPEG_ENABLED = os.environ.get('CAMERA_MJPEG_ENABLED', 'True') == 'True'
+    CAMERA_MAX_FRAME_SIZE = int(os.environ.get('CAMERA_MAX_FRAME_SIZE', 2 * 1024 * 1024))
     
     # Robot Configuration
     ROBOT_TIMEOUT = 30  # seconds - consider robot offline if no update

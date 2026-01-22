@@ -74,7 +74,9 @@ except FileNotFoundError:
                 "enabled": False,
                 "resolution": [640, 480],
                 "fps": 5,
-                "quality": 75
+                "quality": 75,
+                # optional max frame bytes allowed for outbound frames (safety)
+                "max_frame_size": 2 * 1024 * 1024
             },
             "log_level": "INFO",
             "i2c": {
@@ -170,7 +172,10 @@ class RobotController:
         if CONFIG.get('camera', {}).get('enabled', False):
             try:
                 self.camera = CameraStream(CONFIG['camera'])
-                logger.info("Camera Stream initialized")
+                if self.camera and self.camera.enabled:
+                    logger.info("Camera Stream initialized")
+                else:
+                    logger.warning("Camera Stream unavailable after init")
             except Exception as e:
                 logger.warning(f"Camera not available: {e}")
         
@@ -231,7 +236,7 @@ class RobotController:
                     logger.warning(f"Failed to start navigation link: {e}")
             
             # Start camera streaming
-            if self.camera:
+            if self.camera and self.camera.enabled:
                 camera_thread = Thread(target=self.camera_loop, daemon=True)
                 camera_thread.start()
                 self.threads.append(camera_thread)
@@ -402,7 +407,7 @@ class RobotController:
 
             # Wait before next update
             shutdown_event.wait(self.status_interval)
-
+    
     def command_loop(self):
         """Poll dashboard for control commands"""
         logger.info("Starting command loop...")
@@ -503,73 +508,47 @@ class RobotController:
         return self.robot_link.send_waypoints(waypoints)
     
     def camera_loop(self):
-        """Capture and stream camera frames"""
-        logger.info("Starting camera loop...")
-        
-        while not shutdown_event.is_set():
-            try:
-                # Capture frame
-                frame = self.camera.capture_frame()
-                
-                if frame:
-                    # Encode frame as base64
-                    import base64
-                    try:
-                        import importlib
+        """Capture and stream camera frames (optimized)"""
+        if not self.camera or not self.camera.enabled:
+            logger.info("Camera not enabled; skipping camera loop")
+            return
 
-                        cv2 = importlib.import_module('cv2')
-                        CV2_AVAILABLE = True
-                    except ImportError:
-                        CV2_AVAILABLE = False
-                        logger.warning("OpenCV not available for frame encoding")
-                        continue
-                    
-                    # Encode as JPEG
-                    _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, CONFIG['camera']['quality']])
-                    frame_base64 = base64.b64encode(buffer).decode('utf-8')
-                    
-                    # Send to dashboard
-                    frame_data = {
-                        'frame': frame_base64,
-                        'timestamp': datetime.now().isoformat(),
-                        'device_id': self.device_id
-                    }
-                    
-                    success = self.api_client.send_camera_frame(frame_data)
-                    
-                    if not success:
-                        logger.warning("Failed to send camera frame")
-                
-            except Exception as e:
-                logger.error(f"Error in camera loop: {e}")
-            
-            # Wait before next frame (based on FPS)
-            shutdown_event.wait(1.0 / CONFIG['camera']['fps'])
-    
-    def waypoint_loop(self):
-        """Check for new waypoints and send to Arduino"""
-        logger.info("Starting waypoint loop...")
+        logger.info("Starting camera loop (optimized JPEG capture)...")
+        max_frame_bytes = int(CONFIG.get('camera', {}).get('max_frame_size', 2 * 1024 * 1024))
+        base_url = self.api_client.base_url.rstrip('/') if getattr(self.api_client, 'base_url', None) else CONFIG.get('dashboard_api', {}).get('base_url', '').rstrip('/')
 
         while not shutdown_event.is_set():
             try:
-                waypoints = self.api_client.get_waypoints()
-                if waypoints:
-                    waypoints = sorted(waypoints, key=lambda w: w.get('sequence', 0))
-                    logger.info(f"Received {len(waypoints)} waypoints")
-
-                    success = self.robot_link.send_waypoints(waypoints) if self.robot_link else False
-
-                    if success:
-                        logger.info("Waypoints sent to Arduino")
+                # Capture JPEG bytes directly
+                jpeg_bytes = self.camera.capture_frame_jpeg()
+                if not jpeg_bytes:
+                    logger.debug("No JPEG captured")
+                else:
+                    # Safety check on frame size
+                    if len(jpeg_bytes) > max_frame_bytes:
+                        logger.warning("Captured frame too large (%d bytes) - skipping", len(jpeg_bytes))
                     else:
-                        logger.warning("Failed to send waypoints to Arduino")
-
+                        # Send raw JPEG bytes to dashboard binary endpoint to avoid base64 overhead
+                        # POST binary data with Content-Type image/jpeg
+                        try:
+                            import requests
+                            url = f"{base_url}/api/camera/frame_binary"
+                            params = {
+                                'device_id': self.device_id,
+                                'timestamp': datetime.utcnow().isoformat()
+                            }
+                            headers = {'Content-Type': 'image/jpeg'}
+                            resp = requests.post(url, params=params, data=jpeg_bytes, headers=headers, timeout=5)
+                            if resp.status_code not in (200, 202):
+                                logger.debug("Server returned %s for frame upload", resp.status_code)
+                        except Exception as exc:
+                            logger.debug("Failed to upload binary frame: %s", exc)
             except Exception as e:
-                logger.error(f"Error in waypoint loop: {e}")
+                logger.exception("Error in camera loop: %s", e)
 
-            # Check for new waypoints periodically
-            shutdown_event.wait(self.waypoint_interval)
-    
+            # Sleep according to configured fps (respect shutdown_event)
+            shutdown_event.wait(1.0 / max(1, int(CONFIG.get('camera', {}).get('fps', 5))))
+
     def get_battery_level(self):
         """Get battery level (implement based on hardware)"""
         # TODO: Implement actual battery level reading
@@ -580,7 +559,7 @@ class RobotController:
             return 85.0
         except:
             return 0.0
-    
+
     def get_cpu_temperature(self):
         """Get Raspberry Pi CPU temperature"""
         try:
@@ -589,7 +568,7 @@ class RobotController:
                 return temp
         except:
             return 0.0
-    
+
     def shutdown(self):
         """Gracefully shutdown all systems"""
         logger.info("Shutting down robot controller...")

@@ -6,7 +6,7 @@ Flask Backend Server
 
 This server handles:
 - Sensor data reception and storage
-- Live camera feed streaming
+- Live camera feed streaming (MJPEG and WebSocket)
 - GPS location tracking
 - Waypoint management
 - Robot status monitoring
@@ -19,9 +19,10 @@ import logging
 from threading import Lock
 import base64
 from typing import Optional
+import time
 
 try:
-    from flask import Flask, render_template, request, jsonify, Response
+    from flask import Flask, render_template, request, jsonify, Response, stream_with_context
     from flask_socketio import SocketIO, emit
     from flask_cors import CORS
     FLASK_AVAILABLE = True
@@ -55,7 +56,7 @@ except ImportError:
         print("Warning: Could not import database models")
         # Define dummy classes for development
         class db:
-            pass
+            def init_app(self, *args, **kwargs): pass
         class SensorReading:
             pass
         class GPSLocation:
@@ -108,6 +109,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Store latest data for quick access
+# camera_frame will store bytes under 'frame_bytes' and base64 under 'frame_b64' for API compatibility
 latest_data = {
     'sensors': {},
     'gps': {},
@@ -139,6 +141,22 @@ backup_state = {
 
 zigbee_bridge = None
 
+# Helper to set latest camera frame (bytes)
+def _store_camera_frame_bytes(frame_bytes: bytes, timestamp: Optional[str] = None, device_id: Optional[str] = None):
+    """Store raw jpeg bytes and precompute base64 for backward compatibility"""
+    try:
+        frame_b64 = base64.b64encode(frame_bytes).decode('utf-8')
+    except Exception:
+        frame_b64 = ''
+    data = {
+        'frame_bytes': frame_bytes,
+        'frame_b64': frame_b64,
+        'timestamp': timestamp or datetime.utcnow().isoformat(),
+        'device_id': device_id or app.config.get('DEFAULT_DEVICE_ID', 'robot_01')
+    }
+    with thread_lock:
+        latest_data['camera_frame'] = data
+    return data
 
 def _sanitize_for_json(value):
     """Best-effort conversion to JSON-serializable primitives."""
@@ -366,7 +384,10 @@ def build_frontend_config():
         'camera': {
             'streamMode': cfg.get('CAMERA_STREAM_MODE', 'relay'),
             'streamUrl': cfg.get('CAMERA_STREAM_URL'),
-            'allowFallback': cfg.get('CAMERA_ALLOW_FALLBACK', True)
+            'allowFallback': cfg.get('CAMERA_ALLOW_FALLBACK', True),
+            'frameRate': cfg.get('CAMERA_FRAME_RATE', 10),
+            'maxFrameSize': cfg.get('CAMERA_MAX_FRAME_SIZE', 2 * 1024 * 1024),
+            'mjpegEnabled': cfg.get('CAMERA_MJPEG_ENABLED', True)
         },
         'commands': {
             'retryInterval': cfg.get('COMMAND_RETRY_INTERVAL', 2)
@@ -960,7 +981,7 @@ def acknowledge_command(command_id: int):
 @app.route('/api/camera/frame', methods=['POST'])
 def receive_camera_frame():
     """
-    Receive camera frame from Raspberry Pi
+    Receive camera frame from Raspberry Pi (legacy JSON base64)
     Expected JSON format:
     {
         "frame": "base64_encoded_image",
@@ -972,37 +993,133 @@ def receive_camera_frame():
         if app.config.get('CAMERA_STREAM_MODE') == 'direct' and not app.config.get('CAMERA_ALLOW_FALLBACK', True):
             return jsonify({'status': 'ignored', 'message': 'Direct camera stream enabled'}), 202
 
-        data = request.get_json()
-        
-        with thread_lock:
-            latest_data['camera_frame'] = {
-                'frame': data.get('frame'),
-                'timestamp': data.get('timestamp')
-            }
+        data = request.get_json() or {}
+        frame_b64 = data.get('frame', '')
+        timestamp = data.get('timestamp')
+        device_id = data.get('device_id')
 
-        
-        # Broadcast frame to connected clients
+        if not frame_b64 or not isinstance(frame_b64, str):
+            return jsonify({'status': 'error', 'message': 'Missing or invalid frame'}), 400
+
+        # Basic validation on size
+        max_bytes = app.config.get('CAMERA_MAX_FRAME_SIZE', 2 * 1024 * 1024)
+        max_b64_len = int(max_bytes * 4 / 3) + 32
+        if len(frame_b64) > max_b64_len:
+            logger.warning("Rejected oversized base64 camera frame (len=%d, max=%d)", len(frame_b64), max_b64_len)
+            return jsonify({'status': 'error', 'message': 'Frame too large'}), 413
+
+        try:
+            frame_bytes = base64.b64decode(frame_b64)
+        except Exception:
+            return jsonify({'status': 'error', 'message': 'Invalid base64 frame'}), 400
+
+        _store_camera_frame_bytes(frame_bytes, timestamp=timestamp, device_id=device_id)
+
+        # Broadcast frame to connected clients (we keep emitting base64 for backward compatibility)
         socketio.emit('camera_frame', {
-            'frame': data.get('frame'),
-            'timestamp': data.get('timestamp')
+            'frame': frame_b64,
+            'timestamp': timestamp
         }, namespace='/realtime')
-        
+
         return jsonify({'status': 'success'}), 200
-        
+
     except Exception as e:
-        logger.error(f"Error receiving camera frame: {str(e)}")
+        logger.exception(f"Error receiving camera frame: {str(e)}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/camera/frame_binary', methods=['POST'])
+def receive_camera_frame_binary():
+    """
+    Receive binary JPEG frame from Raspberry Pi
+    - Content-Type: image/jpeg
+    - optional query params: device_id, timestamp
+    """
+    try:
+        if app.config.get('CAMERA_STREAM_MODE') == 'direct' and not app.config.get('CAMERA_ALLOW_FALLBACK', True):
+            return jsonify({'status': 'ignored', 'message': 'Direct camera stream enabled'}), 202
+
+        # Read raw bytes
+        frame_bytes = request.get_data()
+        if not frame_bytes:
+            return jsonify({'status': 'error', 'message': 'No frame bytes received'}), 400
+
+        max_bytes = app.config.get('CAMERA_MAX_FRAME_SIZE', 2 * 1024 * 1024)
+        if len(frame_bytes) > max_bytes:
+            logger.warning("Rejected oversized binary camera frame (len=%d, max=%d)", len(frame_bytes), max_bytes)
+            return jsonify({'status': 'error', 'message': 'Frame too large'}), 413
+
+        device_id = request.args.get('device_id') or request.form.get('device_id')
+        timestamp = request.args.get('timestamp') or request.form.get('timestamp') or datetime.utcnow().isoformat()
+
+        data = _store_camera_frame_bytes(frame_bytes, timestamp=timestamp, device_id=device_id)
+
+        # Emit minimal socket event (we keep legacy frame emission optional)
+        try:
+            socketio.emit('camera_frame', {
+                'frame': data['frame_b64'],
+                'timestamp': data['timestamp']
+            }, namespace='/realtime')
+        except Exception:
+            # If socket emission fails, we still accepted the frame
+            logger.debug("Socket emit for camera frame failed")
+
+        return jsonify({'status': 'success'}), 200
+
+    except Exception as e:
+        logger.exception("Error receiving binary camera frame: %s", e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/api/camera/latest')
 def get_latest_frame():
-    """Get the most recent camera frame"""
+    """Get the most recent camera frame (legacy JSON returning base64)"""
     with thread_lock:
         frame_data = latest_data.get('camera_frame')
         if frame_data:
-            return jsonify({'status': 'success', 'data': frame_data}), 200
+            return jsonify({'status': 'success', 'data': {
+                'frame': frame_data.get('frame_b64'),
+                'timestamp': frame_data.get('timestamp'),
+                'device_id': frame_data.get('device_id')
+            }}), 200
         else:
             return jsonify({'status': 'error', 'message': 'No frame available'}), 404
+
+
+@app.route('/camera/mjpeg')
+def mjpeg_stream():
+    """
+    Serve an MJPEG multipart stream of the latest frames.
+    Clients can point an <img> at /camera/mjpeg and receive live frames.
+    """
+    if not app.config.get('CAMERA_MJPEG_ENABLED', True):
+        return jsonify({'status': 'error', 'message': 'MJPEG disabled'}), 404
+
+    boundary = "--frame"
+
+    def generate():
+        last_ts = None
+        while True:
+            with thread_lock:
+                frame_entry = latest_data.get('camera_frame')
+            if frame_entry and frame_entry.get('frame_bytes'):
+                ts = frame_entry.get('timestamp')
+                if ts != last_ts:
+                    last_ts = ts
+                    frame_bytes = frame_entry['frame_bytes']
+                    try:
+                        yield (b"%b\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n" %
+                               (boundary.encode('utf-8'), len(frame_bytes)))
+                        yield frame_bytes
+                        yield b"\r\n"
+                    except GeneratorExit:
+                        break
+                    except Exception as e:
+                        logger.debug("Error yielding MJPEG frame: %s", e)
+            # small sleep to avoid busy-looping; respects server performance
+            time.sleep(0.03)
+
+    return Response(stream_with_context(generate()), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
 # ============= WEBSOCKET EVENTS =============
@@ -1028,7 +1145,10 @@ def handle_update_request(data):
             'sensors': latest_data['sensors'],
             'gps': latest_data['gps'],
             'status': latest_data['status'],
-            'camera': latest_data.get('camera_frame'),
+            'camera': {
+                'timestamp': latest_data.get('camera_frame', {}).get('timestamp'),
+                # We do not include large frame payloads here to keep event light
+            },
             'backup': latest_data.get('backup')
         })
 
