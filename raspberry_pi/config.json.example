@@ -40,6 +40,15 @@
         "module_type": "SIM800L"
     },
     
+    "sim7600e": {
+        "port": "/dev/ttyUSB0",
+        "baudrate": 115200,
+        "apn": "your-apn-here",
+        "apn_user": "",
+        "apn_password": "",
+        "gps_enabled": true
+    },
+    
     "i2c": {
         "bus": 1,
         "mega_address": 8,

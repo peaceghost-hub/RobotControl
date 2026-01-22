@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Import custom modules
 from raspberry_pi.sensors.sensor_manager import SensorManager
 from raspberry_pi.communication.gsm_module import GSMModule
+from raspberry_pi.communication.sim7600e_gps import SIM7600EGPS
 from raspberry_pi.communication.serial_comm import ArduinoComm
 from raspberry_pi.communication.i2c_comm import I2CComm
 from raspberry_pi.communication.cloud_uploader import CloudUploader
@@ -110,13 +111,24 @@ class RobotController:
         except Exception as e:
             logger.warning(f"Sensor Manager not available: {e}")
         
-        # GSM Module (optional)
+        # GSM Module (optional) - supports SIM800L/SIM900
         self.gsm = None
         try:
             self.gsm = GSMModule(CONFIG['gsm'])
             logger.info("GSM Module initialized")
         except Exception as e:
             logger.warning(f"GSM Module not available: {e}")
+        
+        # SIM7600E with GPS (optional) - if configured, takes priority over Neo-6M
+        self.sim7600e = None
+        self.gps_from_gsm = False
+        try:
+            if CONFIG.get('sim7600e'):
+                self.sim7600e = SIM7600EGPS(CONFIG['sim7600e'])
+                self.gps_from_gsm = True
+                logger.info("SIM7600E module initialized (GPS from GSM module)")
+        except Exception as e:
+            logger.warning(f"SIM7600E module not available: {e}")
         
         # Arduino Mega communication (optional)
         self.comm_mode = None
@@ -172,8 +184,26 @@ class RobotController:
         logger.info("Starting Robot Controller...")
         
         try:
+            # Connect SIM7600E (optional - for GPS + LTE)
+            if self.sim7600e:
+                try:
+                    if self.sim7600e.connect():
+                        logger.info("SIM7600E module connected")
+                        # Wait for GPS lock
+                        logger.info("Waiting for GPS lock...")
+                        for attempt in range(5):
+                            gps_data = self.sim7600e.get_gps_data()
+                            if gps_data:
+                                logger.info(f"GPS locked! Position: {gps_data['latitude']:.6f}, {gps_data['longitude']:.6f}")
+                                break
+                            time.sleep(3)
+                    else:
+                        logger.warning("SIM7600E not connected - GPS from Neo-6M only")
+                except Exception as e:
+                    logger.warning(f"SIM7600E initialization failed: {e} - using Neo-6M")
+            
             # Connect GSM (optional - gracefully handle if hardware not available)
-            if self.gsm:
+            if self.gsm and not self.sim7600e:
                 try:
                     if self.gsm.connect():
                         logger.info("GSM module connected")
@@ -286,13 +316,28 @@ class RobotController:
             shutdown_event.wait(self.update_interval)
     
     def gps_loop(self):
-        """Request and transmit GPS data from Arduino"""
+        """Request and transmit GPS data from Arduino or SIM7600E"""
         logger.info("Starting GPS loop...")
         
         while not shutdown_event.is_set():
             try:
-                # Request GPS data from Arduino
-                gps_data = self.robot_link.request_gps_data() if self.robot_link else None
+                gps_data = None
+                
+                # Priority 1: Get GPS from SIM7600E if available
+                if self.sim7600e:
+                    gps_data = self.sim7600e.get_gps_data()
+                    if gps_data:
+                        # Forward to Mega as fallback
+                        if self.robot_link:
+                            try:
+                                self.robot_link.send_gps_data(gps_data)
+                                logger.debug("Forwarded SIM7600E GPS to Mega")
+                            except Exception as e:
+                                logger.debug(f"Could not forward GPS to Mega: {e}")
+                
+                # Fallback: Request GPS data from Arduino Neo-6M
+                if not gps_data and self.robot_link:
+                    gps_data = self.robot_link.request_gps_data()
                 
                 if gps_data and gps_data.get('valid'):
                     # Add timestamp and device ID

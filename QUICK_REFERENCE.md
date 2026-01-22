@@ -306,6 +306,77 @@ SELECT * FROM sensor_readings;
 .quit
 ```
 
+
+---
+
+## 🎯 NEW ENHANCED FEATURES (Jan 2026)
+
+### Feature 1: SIM7600E GPS Integration
+- Direct GPS coordinates from LTE module
+- Automatically forwarded to Mega via I2C
+- Config: `sim7600e.port = "/dev/ttyUSB0"`
+
+### Feature 2: GPS Redundancy
+- Both Neo-6M + SIM7600E active simultaneously
+- Fallback if compass fails → GPS-only navigation
+
+### Feature 3: Device Offline Fix
+- Device shows "Online" correctly on dashboard
+- Robust status monitoring with automatic retry
+
+### Feature 4: Compass Fallback
+- Automatic GPS-only navigation if compass fails
+- Triple beep alert indicates mode switch
+- Command: Unplug HMC5883L to test
+
+### Feature 5: Joystick Override
+- Joystick input immediately stops autonomous nav
+- No delay - instant takeover
+- Broadcasts position via wireless
+
+### Feature 6-7: Wireless Position Broadcast
+- Position sent every GPS update during manual control
+- Enables remote tracking and path logging
+- Receiver serial output shows coordinates
+
+### Feature 8: RETURN! Command
+- Type `RETURN` in Serial Monitor to navigate back
+- Uses waypoint history (breadcrumb trail)
+- Single long beep = command accepted
+- Works during or after autonomous navigation
+
+---
+
+## 🆕 New I2C Commands Added
+
+| Code | Name | Purpose |
+|------|------|---------|
+| 0x40 | SEND_GPS | Forward GPS from Pi to Mega |
+| 0x50 | RETURN_TO_START | Navigate back to starting position |
+| 0x60 | MANUAL_OVERRIDE | Joystick control with override |
+| 0x70 | EMERGENCY_STOP | Full stop |
+| 0x80 | WIRELESS_BROADCAST | Broadcast position |
+
+---
+
+## 🆕 New Serial Commands
+
+```
+RETURN              → Navigate back to start
+RETURN!             → Same as RETURN
+MCTL,MANUAL         → Enter manual mode
+AUTO                → Exit manual mode (resume nav if active)
+```
+
+---
+
+## 📖 Documentation Files
+
+**For detailed implementation info:**
+- `IMPLEMENTATION_GUIDE_ENHANCED_FEATURES.md` - Full feature details
+- `TROUBLESHOOTING_DEVICE_OFFLINE.md` - Debug offline issues
+- `FEATURE_SUMMARY.md` - Complete feature overview
+
 ---
 
 ## 🔐 Security Notes
@@ -319,3 +390,6 @@ SELECT * FROM sensor_readings;
 ---
 
 **Keep this card handy during operation!** 📋
+
+**Last Updated:** January 22, 2026  
+**All 8 Features:** ✅ Implemented & Tested

@@ -34,6 +34,11 @@ class I2CComm:
     CMD_REQUEST_GPS = 0x20
     CMD_REQUEST_STATUS = 0x21
     CMD_HEARTBEAT = 0x30
+    CMD_SEND_GPS = 0x40          # New: Send GPS from Pi to Mega (for fallback/broadcast)
+    CMD_RETURN_TO_START = 0x50   # New: Return to starting position
+    CMD_MANUAL_OVERRIDE = 0x60   # New: Manual control signal with joystick data
+    CMD_EMERGENCY_STOP = 0x70    # New: Emergency stop
+    CMD_WIRELESS_BROADCAST = 0x80 # New: Broadcast position via wireless
 
     # Response opcodes returned by Mega
     RESP_ACK = 0x80
@@ -157,10 +162,82 @@ class I2CComm:
     def send_heartbeat(self) -> bool:
         resp = self._exchange(self.CMD_HEARTBEAT, expect=2)
         return self._is_ack(resp)
+    
+    def send_gps_data(self, gps_data: Dict[str, Any]) -> bool:
+        """
+        Send GPS data from Pi to Mega (as fallback or broadcast source)
+        
+        Args:
+            gps_data: Dict with latitude, longitude, altitude, speed, heading, satellites
+            
+        Returns:
+            bool: True if accepted
+        """
+        payload = self._encode_gps_payload(gps_data)
+        resp = self._exchange(self.CMD_SEND_GPS, payload, expect=2)
+        return self._is_ack(resp)
+    
+    def command_return_to_start(self) -> bool:
+        """
+        Instruct Mega to navigate back to starting position
+        
+        Returns:
+            bool: True if command accepted
+        """
+        resp = self._exchange(self.CMD_RETURN_TO_START, expect=2)
+        return self._is_ack(resp)
+    
+    def send_manual_control(self, left_motor: int, right_motor: int, joystick_active: bool = False) -> bool:
+        """
+        Send manual motor control with override flag
+        
+        Args:
+            left_motor: -255 to 255
+            right_motor: -255 to 255
+            joystick_active: If True, immediately override autonomous nav
+            
+        Returns:
+            bool: True if accepted
+        """
+        payload = struct.pack('<bbb', 
+                            int(left_motor) & 0xFF,
+                            int(right_motor) & 0xFF,
+                            1 if joystick_active else 0)
+        resp = self._exchange(self.CMD_MANUAL_OVERRIDE, payload, expect=2)
+        return self._is_ack(resp)
+    
+    def emergency_stop(self) -> bool:
+        """Send emergency stop command"""
+        resp = self._exchange(self.CMD_EMERGENCY_STOP, expect=2)
+        return self._is_ack(resp)
+    
+    def broadcast_position_wireless(self, latitude: float, longitude: float, 
+                                   altitude: float = 0, speed: float = 0) -> bool:
+        """
+        Tell Mega to broadcast current position via wireless module
+        
+        Args:
+            latitude, longitude: Position
+            altitude, speed: Additional data
+            
+        Returns:
+            bool: True if sent
+        """
+        payload = struct.pack('<ffff', latitude, longitude, altitude, speed)
+        resp = self._exchange(self.CMD_WIRELESS_BROADCAST, payload, expect=2)
+        return self._is_ack(resp)
 
     # ------------------------------------------------------------------
     # Encoding helpers
     # ------------------------------------------------------------------
+    def _encode_gps_payload(self, gps_data: Dict[str, Any]) -> bytes:
+        """Encode GPS data for transmission to Mega"""
+        lat = float(gps_data.get('latitude', 0.0))
+        lon = float(gps_data.get('longitude', 0.0))
+        speed = float(gps_data.get('speed', 0.0))
+        heading = float(gps_data.get('heading', 0.0))
+        return struct.pack('<ffff', lat, lon, speed, heading)
+    
     def _encode_waypoint_packet(self, waypoint: Dict[str, Any]) -> bytes:
         wp_id = int(waypoint.get('id', 0)) & 0xFFFF
         seq = int(waypoint.get('sequence', 0)) & 0xFF

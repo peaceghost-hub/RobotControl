@@ -1,3 +1,5 @@
+
+
 /*
  * Environmental Monitoring Robot - Navigation Controller (Arduino Mega 2560)
  * 
@@ -368,6 +370,98 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
       prepareAck();
       break;
 
+    // === NEW COMMANDS FOR ENHANCED FEATURES ===
+    
+    case CMD_SEND_GPS:
+      // Pi sending GPS data as fallback (for SIM7600E or when Neo-6M unavailable)
+      if (length >= 16) {
+        float lat, lon, speed, heading;
+        memcpy(&lat, &payload[0], sizeof(float));
+        memcpy(&lon, &payload[4], sizeof(float));
+        memcpy(&speed, &payload[8], sizeof(float));
+        memcpy(&heading, &payload[12], sizeof(float));
+        
+        // Update navigation with Pi's GPS data
+        navigation.updateGpsData(lat, lon, speed, heading);
+        
+        // If compass is not responding, fallback to GPS-only navigation
+        if (!compass.isValid()) {
+          navigation.fallbackToGpsOnly();
+          DEBUG_SERIAL.println(F("# Navigation: Compass invalid, switched to GPS-only mode"));
+          beepPattern(3, 100, 100);  // Triple beep alert
+        }
+        
+        prepareAck();
+      } else {
+        prepareError(ERR_PACKET_SIZE);
+      }
+      break;
+    
+    case CMD_RETURN_TO_START:
+      // Navigate back to starting position
+      if (navigationActive) {
+        navigation.returnToStart();
+        DEBUG_SERIAL.println(F("# Navigation: RETURN command received, navigating to start"));
+        beepPattern(1, 200, 0);  // Single long beep
+        prepareAck();
+      } else {
+        prepareError(0xFD);  // Not in navigation mode
+      }
+      break;
+    
+    case CMD_MANUAL_OVERRIDE:
+      // Manual joystick control with override flag
+      if (length >= 3) {
+        int8_t leftMotor = (int8_t)payload[0];
+        int8_t rightMotor = (int8_t)payload[1];
+        bool joystickActive = payload[2] != 0;
+        
+        // Immediately stop autonomous navigation if joystick touched
+        if (joystickActive && navigationActive) {
+          navigationActive = false;
+          navigation.pause();
+          DEBUG_SERIAL.println(F("# Joystick detected! Autonomous nav paused"));
+        }
+        
+        // Set motors directly
+        motors.setMotors((int)leftMotor, (int)rightMotor);
+        manualOverride = true;
+        controlMode = MODE_MANUAL;
+        lastManualCommand = millis();
+        
+        // Broadcast position via wireless immediately (for backup logging)
+        if (wireless.isConnected() && gps.isValid()) {
+          sendWirelessGps();
+        }
+        
+        prepareAck();
+      } else {
+        prepareError(ERR_PACKET_SIZE);
+      }
+      break;
+    
+    case CMD_EMERGENCY_STOP:
+      // Stop everything immediately
+      motors.stop();
+      navigationActive = false;
+      manualOverride = false;
+      navigation.stop();
+      beepPattern(5, 50, 50);  // Multiple rapid beeps - emergency alert
+      DEBUG_SERIAL.println(F("# EMERGENCY STOP"));
+      prepareAck();
+      break;
+    
+    case CMD_WIRELESS_BROADCAST:
+      // Broadcast position via wireless module
+      if (length >= 16) {
+        // Position data for broadcast
+        sendWirelessGps();
+        prepareAck();
+      } else {
+        prepareError(ERR_PACKET_SIZE);
+      }
+      break;
+
     default:
       prepareError(0xFE);
       break;
@@ -534,6 +628,20 @@ void processWirelessMessage(const String& message) {
   else if (command == "AUTO" || command == "RELEASE") {
     exitManualMode(true);
     DEBUG_SERIAL.println(F("# Exiting manual mode"));
+  }
+  else if (command == "RETURN!" || command == "RETURN") {
+    // Return to starting position
+    if (navigationActive || gps.isValid()) {
+      navigation.returnToStart();
+      navigationActive = true;
+      manualOverride = false;
+      controlMode = MODE_AUTO;
+      DEBUG_SERIAL.println(F("# RETURN command: Navigating back to start position"));
+      beepPattern(1, 200, 0);
+      sendWirelessStatus();
+    } else {
+      DEBUG_SERIAL.println(F("# ERROR: Cannot RETURN - no navigation data or GPS fix"));
+    }
   }
 }
 
