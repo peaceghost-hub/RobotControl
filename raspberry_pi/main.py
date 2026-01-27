@@ -65,7 +65,7 @@ except FileNotFoundError:
                     "mq135": {"channel": 0, "enabled": True}
                 },
                 "adc": {
-                    "type": "ADS1015",
+                    "type": "ADS1115",
                     "address": 72,
                     "gain": 1
                 }

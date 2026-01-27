@@ -69,7 +69,7 @@ public:
     void pause();
     void update();
     bool isComplete();
-    
+
     // Compass fallback & GPS-only navigation
     void setUseCompass(bool enabled);
     bool getUseCompass() const;
@@ -91,4 +91,6 @@ private:
     void navigateToWaypointGpsOnly();  // Without compass
     void handleObstacleAvoidance();
     void handleReturnNavigation();
+};
+
 #endif

@@ -22,6 +22,7 @@ public:
     bool begin();
     void update();
     float getHeading() const;
+    bool isValid() const;
     void setDeclination(float dec);
     void calibrate();
 

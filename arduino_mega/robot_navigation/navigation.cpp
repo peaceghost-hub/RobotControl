@@ -4,12 +4,24 @@
 
 #include "navigation.h"
 
+#ifndef DEG_TO_RAD
+#define DEG_TO_RAD (PI/180.0)
+#endif
+#ifndef RAD_TO_DEG
+#define RAD_TO_DEG (180.0/PI)
+#endif
+
 Navigation::Navigation() {
     waypointCount = 0;
     currentWaypointIndex = 0;
     navigationActive = false;
     obstacleDetectedTime = 0;
     inAvoidanceMode = false;
+    historyCount = 0;
+    currentHistoryIndex = 0;
+    returningToStart = false;
+    useCompass = true;
+    lastPositionSave = 0;
 }
 
 void Navigation::begin(GPSHandler* g, CompassHandler* c, MotorControl* m, ObstacleAvoidance* o) {
@@ -66,6 +78,11 @@ void Navigation::update() {
     if (!navigationActive || !gps->isValid()) {
         return;
     }
+    // Periodically save position for RETURN feature
+    if (millis() - lastPositionSave >= 5000) {
+        saveCurrentPosition();
+        lastPositionSave = millis();
+    }
     
     // Check for obstacles
     if (obstacleAvoid->isObstacleDetected()) {
@@ -79,8 +96,18 @@ void Navigation::update() {
         Serial.println(F("# Obstacle cleared, resuming navigation"));
     }
     
+    // Handle RETURN mode if active
+    if (returningToStart) {
+        handleReturnNavigation();
+        return;
+    }
+
     // Navigate to current waypoint
-    navigateToWaypoint();
+    if (useCompass) {
+        navigateToWaypoint();
+    } else {
+        navigateToWaypointGpsOnly();
+    }
 }
 
 bool Navigation::isComplete() {
@@ -222,4 +249,105 @@ float Navigation::calculateBearing(float lat1, float lon1, float lat2, float lon
     bearing = fmod((bearing + 360.0), 360.0);
     
     return bearing;
+}
+
+// ================= Additional features / stubs =================
+
+void Navigation::setUseCompass(bool enabled) {
+    useCompass = enabled;
+}
+
+bool Navigation::getUseCompass() const {
+    return useCompass;
+}
+
+void Navigation::fallbackToGpsOnly() {
+    useCompass = false;
+}
+
+void Navigation::saveCurrentPosition() {
+    if (!gps || !gps->isValid()) return;
+    HistoryPoint p;
+    p.latitude = gps->getLatitude();
+    p.longitude = gps->getLongitude();
+    p.timestamp = millis();
+    if (historyCount < MAX_HISTORY_POINTS) {
+        history[historyCount++] = p;
+    } else {
+        history[currentHistoryIndex] = p;
+        currentHistoryIndex = (currentHistoryIndex + 1) % MAX_HISTORY_POINTS;
+    }
+}
+
+void Navigation::returnToStart() {
+    if (historyCount == 0) return;
+    returningToStart = true;
+}
+
+bool Navigation::isReturning() const {
+    return returningToStart;
+}
+
+void Navigation::clearHistory() {
+    historyCount = 0;
+    currentHistoryIndex = 0;
+}
+
+void Navigation::updateGpsData(float lat, float lon, float speed, float heading) {
+    // Minimal stub: Record position into history for RETURN and trust compass heading
+    // A fuller implementation would feed data into GPSHandler.
+    (void)speed; (void)heading;
+    HistoryPoint p{lat, lon, millis()};
+    if (historyCount < MAX_HISTORY_POINTS) {
+        history[historyCount++] = p;
+    } else {
+        history[currentHistoryIndex] = p;
+        currentHistoryIndex = (currentHistoryIndex + 1) % MAX_HISTORY_POINTS;
+    }
+}
+
+void Navigation::navigateToWaypointGpsOnly() {
+    // Fallback: use target bearing as surrogate heading correction
+    if (currentWaypointIndex >= waypointCount) return;
+    Waypoint& current = waypoints[currentWaypointIndex];
+    float lat = gps->getLatitude();
+    float lon = gps->getLongitude();
+    float distance = calculateDistance(lat, lon, current.latitude, current.longitude);
+    if (distance < WAYPOINT_RADIUS) {
+        current.reached = true;
+        motors->stop();
+        currentWaypointIndex++;
+        if (currentWaypointIndex >= waypointCount) navigationActive = false;
+        return;
+    }
+    float targetBearing = calculateBearing(lat, lon, current.latitude, current.longitude);
+    // Without compass, approximate by short nudges and re-evaluation
+    motors->forward(150);
+    delay(250);
+    motors->stop();
+}
+
+void Navigation::handleReturnNavigation() {
+    if (historyCount == 0) {
+        returningToStart = false;
+        return;
+    }
+    // Choose the oldest point as the start (index 0 if not wrapped)
+    int idx = (historyCount < MAX_HISTORY_POINTS) ? 0 : currentHistoryIndex;
+    HistoryPoint target = history[idx];
+
+    float lat = gps->getLatitude();
+    float lon = gps->getLongitude();
+    float distance = calculateDistance(lat, lon, target.latitude, target.longitude);
+
+    if (distance < WAYPOINT_RADIUS) {
+        returningToStart = false;
+        motors->stop();
+        Serial.println(F("# Returned to start"));
+        return;
+    }
+
+    float bearing = calculateBearing(lat, lon, target.latitude, target.longitude);
+    float heading = compass->getHeading();
+    motors->adjustForHeading(heading, bearing);
 }

@@ -48,6 +48,10 @@ float CompassHandler::getHeading() const {
     return heading;
 }
 
+bool CompassHandler::isValid() const {
+    return initialized;
+}
+
 void CompassHandler::setDeclination(float dec) {
     declination = dec * (PI / 180);  // Convert from degrees to radians
 }
