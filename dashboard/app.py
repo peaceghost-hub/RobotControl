@@ -130,6 +130,10 @@ latest_data = {
     }
 }
 
+# Buffer robot events (optional, small ring buffer)
+recent_events = []
+MAX_EVENTS = 50
+
 backup_state = {
     'active': False,
     'device_id': None,
@@ -1069,6 +1073,31 @@ def receive_camera_frame_binary():
     except Exception as e:
         logger.exception("Error receiving binary camera frame: %s", e)
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/event', methods=['POST'])
+def receive_robot_event():
+    """Receive robot events (e.g., obstacle detected) and broadcast via WebSocket."""
+    try:
+        data = request.get_json(silent=True) or {}
+        event = {
+            'type': data.get('type') or 'UNKNOWN',
+            'device_id': data.get('device_id') or 'robot_01',
+            'timestamp': data.get('timestamp') or datetime.utcnow().isoformat(),
+            'payload': {k: v for k, v in data.items() if k not in ('type','device_id','timestamp')}
+        }
+        with thread_lock:
+            recent_events.append(event)
+            if len(recent_events) > MAX_EVENTS:
+                del recent_events[0]
+        try:
+            socketio.emit('robot_event', event, namespace='/realtime')
+        except Exception:
+            logger.debug("Failed to emit robot_event")
+        return jsonify({'status': 'success', 'event': event}), 200
+    except Exception as exc:
+        logger.exception("Error receiving robot event: %s", exc)
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
 
 
 @app.route('/api/camera/latest')

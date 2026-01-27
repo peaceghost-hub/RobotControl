@@ -33,12 +33,14 @@ class I2CComm:
     CMD_WAYPOINT_COMMIT = 0x12
     CMD_REQUEST_GPS = 0x20
     CMD_REQUEST_STATUS = 0x21
+    CMD_REQUEST_OBSTACLE = 0x22   # New: Request obstacle flag/distance
     CMD_HEARTBEAT = 0x30
     CMD_SEND_GPS = 0x40          # New: Send GPS from Pi to Mega (for fallback/broadcast)
     CMD_RETURN_TO_START = 0x50   # New: Return to starting position
     CMD_MANUAL_OVERRIDE = 0x60   # New: Manual control signal with joystick data
     CMD_EMERGENCY_STOP = 0x70    # New: Emergency stop
     CMD_WIRELESS_BROADCAST = 0x80 # New: Broadcast position via wireless
+    CMD_FOLLOW_LINE = 0x90        # New: Enable/disable line follower
 
     # Response opcodes returned by Mega
     RESP_ACK = 0x80
@@ -226,6 +228,24 @@ class I2CComm:
         payload = struct.pack('<ffff', latitude, longitude, altitude, speed)
         resp = self._exchange(self.CMD_WIRELESS_BROADCAST, payload, expect=2)
         return self._is_ack(resp)
+
+    def set_line_follow(self, enabled: bool) -> bool:
+        """Enable or disable line follower mode on Mega."""
+        payload = bytes([1 if enabled else 0])
+        resp = self._exchange(self.CMD_FOLLOW_LINE, payload, expect=2)
+        return self._is_ack(resp)
+
+    def request_obstacle_status(self) -> Optional[Dict[str, Any]]:
+        """Request obstacle detection flag and distance from Mega."""
+        resp = self._exchange(self.CMD_REQUEST_OBSTACLE, expect=4)
+        if not resp:
+            return None
+        if resp[0] == 0x83 and len(resp) >= 4:  # RESP_OBSTACLE
+            flag = bool(resp[1])
+            distance = (resp[2] << 8) | resp[3]
+            return {"obstacle": flag, "distance_cm": distance}
+        self._log_unexpected(resp, "OBSTACLE")
+        return None
 
     # ------------------------------------------------------------------
     # Encoding helpers

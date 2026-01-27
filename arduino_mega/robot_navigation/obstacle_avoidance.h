@@ -24,6 +24,7 @@
 // └─ VCC → 5V
 #define KY032_DO_PIN 2     // Digital output (active HIGH when obstacle detected)
 #define KY032_AO_PIN A0    // Analog output (0-1023, inversely proportional to distance)
+// Line follower module pins are defined in globals.h (LINE_FOLLOWER_OUT, LINE_FOLLOWER_ENA)
 
 // Servo positions for ultrasonic scanning
 #define SERVO_CENTER 90

@@ -148,57 +148,47 @@ void Navigation::handleObstacleAvoidance() {
         obstacleDetectedTime = millis();
         Serial.print(F("# Obstacle detected at "));
         Serial.print(obstacleAvoid->getDistance());
-        Serial.println(F("cm - scanning for clear path..."));
+        Serial.println(F("cm - stopping for 5s and planning avoidance"));
     }
-    
-    // Stop immediately
+
+    // Stop and wait 5 seconds before avoiding
     motors->stop();
-    delay(300);
-    
-    // Scan for clear path
-    Serial.println(F("# Scanning path..."));
-    PathScan scan = obstacleAvoid->scanPath();
-    
-    Serial.print(F("# Scan: L="));
-    Serial.print(scan.leftDist);
-    Serial.print(F("cm C="));
-    Serial.print(scan.centerDist);
-    Serial.print(F("cm R="));
-    Serial.print(scan.rightDist);
-    Serial.println(F("cm"));
-    
-    // Choose best path
-    if (scan.leftClear && scan.leftDist > scan.rightDist) {
-        // Turn left
-        Serial.println(F("# Turning left to avoid obstacle"));
-        motors->turnLeft(150);
-        delay(800);
-        motors->forward(150);
-        delay(1000);
-    } else if (scan.rightClear) {
-        // Turn right
-        Serial.println(F("# Turning right to avoid obstacle"));
-        motors->turnRight(150);
-        delay(800);
-        motors->forward(150);
-        delay(1000);
-    } else {
-        // No clear path - rotate more aggressively
-        Serial.println(F("# No clear path, rotating..."));
-        motors->turnLeft(180);
-        delay(1500);
-        // Scan again
-        PathScan rescan = obstacleAvoid->scanPath();
-        if (rescan.leftClear || rescan.rightClear) {
-            motors->forward(150);
-            delay(800);
-        } else {
-            // Still blocked, try opposite direction
-            motors->turnRight(180);
-            delay(2000);
+    delay(5000);
+
+    // First attempt: steer right by 70 degrees
+    Serial.println(F("# Avoidance: steer right 70°"));
+    motors->turnDegrees(70, 160);
+
+    // Check path ahead
+    PathScan rightScan = obstacleAvoid->scanPath();
+    bool rightClear = (rightScan.centerDist == -1 || rightScan.centerDist > OBSTACLE_THRESHOLD);
+
+    if (!rightClear) {
+        // Return to original heading (undo right turn)
+        Serial.println(F("# Path blocked; returning to original heading"));
+        motors->turnDegrees(-70, 160);
+
+        // Second attempt: steer left by 70 degrees
+        Serial.println(F("# Avoidance: steer left 70°"));
+        motors->turnDegrees(-70, 160);
+
+        PathScan leftScan = obstacleAvoid->scanPath();
+        bool leftClear = (leftScan.centerDist == -1 || leftScan.centerDist > OBSTACLE_THRESHOLD);
+        if (!leftClear) {
+            // Still blocked: scan wide and pick the clearer side
+            Serial.println(F("# Still blocked; scanning wide and nudging forward"));
+            PathScan wide = obstacleAvoid->scanPath();
+            if (wide.rightClear) {
+                motors->turnDegrees(30, 150);
+            } else if (wide.leftClear) {
+                motors->turnDegrees(-30, 150);
+            }
         }
     }
-    
+
+    // Advance cautiously then resume navigation
+    motors->forward(150);
+    delay(800);
     motors->stop();
 }
 

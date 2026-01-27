@@ -24,6 +24,7 @@ class MotorControl {
 private:
     int speedLeft;
     int speedRight;
+    const float TURN_MS_PER_DEG = 10.0f; // approximate timing per degree
     
 public:
     MotorControl();
@@ -33,6 +34,7 @@ public:
     void backward(int speed = 200);
     void turnLeft(int speed = 150);
     void turnRight(int speed = 150);
+    void turnDegrees(int degrees, int speed = 150);
     void stop();
     
     void setMotors(int left, int right);

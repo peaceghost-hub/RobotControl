@@ -83,6 +83,19 @@ void MotorControl::turnRight(int speed) {
     analogWrite(MOTOR_RIGHT_EN, speed);
 }
 
+void MotorControl::turnDegrees(int degrees, int speed) {
+    // Positive degrees -> turn right, negative -> turn left
+    int absDeg = abs(degrees);
+    unsigned long duration = (unsigned long)(absDeg * TURN_MS_PER_DEG);
+    if (degrees >= 0) {
+        turnRight(speed);
+    } else {
+        turnLeft(speed);
+    }
+    delay(duration);
+    stop();
+}
+
 void MotorControl::stop() {
     digitalWrite(MOTOR_LEFT_IN1, LOW);
     digitalWrite(MOTOR_LEFT_IN2, LOW);

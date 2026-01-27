@@ -25,19 +25,10 @@
             }
         },
         "adc": {
-            "type": "ADS1015",
+            "type": "ADS1115",
             "address": 72,
             "gain": 1
         }
-    },
-    
-    "gsm": {
-        "port": "/dev/ttyUSB0",
-        "baudrate": 115200,
-        "apn": "your-apn-here",
-        "apn_user": "",
-        "apn_password": "",
-        "module_type": "SIM800L"
     },
     
     "sim7600e": {

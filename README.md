@@ -15,7 +15,7 @@ This project implements an autonomous environmental monitoring robot using ARM-b
   - MQ Series Gas Sensors (MQ-2, MQ-135, etc.)
   - DHT11/DHT22 Temperature & Humidity Sensor
 - **Communication:**
-  - GSM Module (SIM800L/SIM900) for internet connectivity
+  - GSM Module (SIM7600E LTE with integrated GPS) for internet connectivity
   - Serial communication with Arduino Mega
 - **Camera:**
   - Pi Camera Module for live video feed

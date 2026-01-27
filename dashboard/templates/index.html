@@ -157,6 +157,17 @@
 
                     <div class="control-section">
                         <div class="section-header">
+                            <h3>Line Follower Assist</h3>
+                            <div class="control-actions">
+                                <button id="line-follow-enable-btn" class="btn btn-small">✅ Enable</button>
+                                <button id="line-follow-disable-btn" class="btn btn-small">🚫 Disable</button>
+                            </div>
+                        </div>
+                        <div class="control-help">Observer-controlled line following using camera guidance. Toggle on/off from here.</div>
+                    </div>
+
+                    <div class="control-section">
+                        <div class="section-header">
                             <h3>Manual Override</h3>
                             <button id="manual-release-btn" class="btn btn-small">🤖 Return to Auto</button>
                         </div>
@@ -430,11 +441,11 @@
         <!-- Footer -->
         <footer class="footer">
             <p>🎓 ARM-Based Environmental Monitoring Robot | Telecommunications Engineering Project</p>
-            <p>© 2025 - University Undergraduate Project</p>
+            <p>© 2026 - University Undergraduate Project</p>
         </footer>
     </div>
 
-    <!-- Leaflet JS -->
+        <!-- Leaflet JS -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
     <script id="dashboard-config" type="application/json">{{ dashboard_config | tojson }}</script>
@@ -443,6 +454,11 @@
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
     <script src="{{ url_for('static', filename='js/map.js') }}"></script>
     <script src="{{ url_for('static', filename='js/sensors.js') }}"></script>
-    <script src="{{ url_for('static', filename='js/camera.js') }}"></script>
+
+    <!-- Camera must load last; add cache-buster -->
+    <script src="{{ url_for('static', filename='js/camera.js') }}?v=20260122"></script>
+
+    <!-- Toast Notifications Container -->
+    <div id="toast-container" class="toast-container"></div>
 </body>
 </html>

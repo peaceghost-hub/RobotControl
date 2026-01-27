@@ -19,7 +19,7 @@ struct PendingWaypoint;
 // Hardware definitions
 #define DEBUG_SERIAL   Serial
 #define GPS_SERIAL     Serial1     // RX1 (19), TX1 (18)
-#define BUZZER_PIN     10
+#define BUZZER_PIN     34
 
 // ==================== WIRELESS PROTOCOL SELECTION ====================
 // Uncomment ONE of these to select wireless protocol:
@@ -65,11 +65,20 @@ const uint8_t CMD_WAYPOINT_PACKET = 0x11;
 const uint8_t CMD_WAYPOINT_COMMIT = 0x12;
 const uint8_t CMD_REQUEST_GPS     = 0x20;
 const uint8_t CMD_REQUEST_STATUS  = 0x21;
+const uint8_t CMD_REQUEST_OBSTACLE= 0x22;  // New: request obstacle flag/distance
 const uint8_t CMD_HEARTBEAT       = 0x30;
+// Enhanced feature commands
+const uint8_t CMD_SEND_GPS        = 0x40;  // Pi -> Mega GPS forwarding
+const uint8_t CMD_RETURN_TO_START = 0x50;
+const uint8_t CMD_MANUAL_OVERRIDE = 0x60;
+const uint8_t CMD_EMERGENCY_STOP  = 0x70;
+const uint8_t CMD_WIRELESS_BROADCAST = 0x80;
+const uint8_t CMD_FOLLOW_LINE     = 0x90;  // Enable/disable line follower mode
 
 const uint8_t RESP_ACK    = 0x80;
 const uint8_t RESP_GPS    = 0x81;
 const uint8_t RESP_STATUS = 0x82;
+const uint8_t RESP_OBSTACLE=0x83;  // Obstacle status response
 const uint8_t RESP_ERROR  = 0xFF;
 
 // Error codes
@@ -152,6 +161,10 @@ void markZigbeeHandshake();
 void checkReadyTone();
 uint8_t readBatteryPercent();
 uint8_t readSignalQuality();
+
+// Line follower sensor pins (4-pin module: GND, VCC, OUT, ENA)
+#define LINE_FOLLOWER_OUT 32
+#define LINE_FOLLOWER_ENA 33
 
 // Constants for HMC5883L
 #ifndef HMC5883_MAGGAIN_1_3

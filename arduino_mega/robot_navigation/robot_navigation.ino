@@ -65,6 +65,7 @@ bool navigationActive = false;
 bool manualOverride = false;
 bool i2cHandshakeComplete = false;
 bool wirelessHandshakeComplete = false;
+bool lineFollowEnabled = false;
 
 unsigned long lastStatusUpdate = 0;
 unsigned long lastWirelessGps = 0;
@@ -168,6 +169,11 @@ void setup() {
   motors.begin();
   obstacleAvoid.begin();
   navigation.begin(&gps, &compass, &motors, &obstacleAvoid);
+
+  // Line follower sensor setup
+  pinMode(LINE_FOLLOWER_ENA, OUTPUT);
+  digitalWrite(LINE_FOLLOWER_ENA, LOW); // disabled by default
+  pinMode(LINE_FOLLOWER_OUT, INPUT);
   
   // Initialize wireless module
   if (wireless.begin()) {
@@ -180,6 +186,22 @@ void setup() {
   
   DEBUG_SERIAL.println(F("# Note: System continues with any component failures - graceful degradation enabled"));
   DEBUG_SERIAL.println(F("# Awaiting I2C and wireless handshakes..."));
+
+  // Continuous startup beep for 3 seconds as requested
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(3000);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  // Perform an I2C bus scan (Arduino side) to verify devices (e.g., compass at 0x1E)
+  DEBUG_SERIAL.println(F("# I2C scan (Arduino bus on SDA=20, SCL=21):"));
+  for (uint8_t address = 1; address < 127; address++) {
+    Wire.beginTransmission(address);
+    uint8_t error = Wire.endTransmission();
+    if (error == 0) {
+      DEBUG_SERIAL.print(F(" - Found I2C device at 0x"));
+      DEBUG_SERIAL.println(address, HEX);
+    }
+  }
 }
 
 // ========================== MAIN LOOP ======================================
@@ -214,6 +236,22 @@ void loop() {
 
   handleWireless();
   processManualTimeout();
+
+  // Optional line follow mode when enabled
+  if (lineFollowEnabled && !manualOverride) {
+    // Sensor OUT: HIGH on line, LOW off line (depends on module, invert if needed)
+    int onLine = digitalRead(LINE_FOLLOWER_OUT);
+    if (onLine == HIGH) {
+      motors.forward(140);
+    } else {
+      // Simple search: wiggle to find line
+      motors.turnLeft(130);
+      delay(200);
+      motors.turnRight(130);
+      delay(200);
+      motors.stop();
+    }
+  }
 
   // Alert operator of obstacles in manual mode
   if (manualOverride && obstacleAvoid.isObstacleDetected()) {
@@ -460,6 +498,35 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
       } else {
         prepareError(ERR_PACKET_SIZE);
       }
+      break;
+
+    case CMD_FOLLOW_LINE:
+      // Payload: [enable:1]
+      if (length >= 1) {
+        bool enable = payload[0] != 0;
+        lineFollowEnabled = enable;
+        digitalWrite(LINE_FOLLOWER_ENA, enable ? HIGH : LOW);
+        if (enable) {
+          navigationActive = false; // pause autonomous when line-following
+          motors.stop();
+          DEBUG_SERIAL.println(F("# Line follower ENABLED"));
+        } else {
+          DEBUG_SERIAL.println(F("# Line follower DISABLED"));
+        }
+        prepareAck();
+      } else {
+        prepareError(ERR_PACKET_SIZE);
+      }
+      break;
+
+    case CMD_REQUEST_OBSTACLE:
+      // Respond with obstacle flag and distance
+      responseBuffer[0] = RESP_OBSTACLE;
+      responseBuffer[1] = obstacleAvoid.isObstacleDetected() ? 1 : 0;
+      int dist = obstacleAvoid.getDistance();
+      responseBuffer[2] = (dist >> 8) & 0xFF;
+      responseBuffer[3] = dist & 0xFF;
+      responseLength = 4;
       break;
 
     default:

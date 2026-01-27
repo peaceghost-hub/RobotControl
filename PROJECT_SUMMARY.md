@@ -25,7 +25,7 @@ Design and implement an autonomous environmental monitoring robot that:
 - **Navigation Controller:** Arduino Mega 2560
 - **Environmental Sensors:** DHT22, MQ-2, MQ-135, MQ-7
 - **Navigation Sensors:** NEO-6M GPS, HMC5883L Compass, HC-SR04 Ultrasonic
-- **Communication:** SIM800L GSM Module
+- **Communication:** SIM7600E LTE Module (with integrated GPS)
 - **Vision:** Pi Camera Module V2
 - **Mobility:** L298N Motor Driver, 2× DC Motors
 

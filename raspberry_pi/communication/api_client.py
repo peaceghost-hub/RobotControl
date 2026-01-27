@@ -115,6 +115,12 @@ class DashboardAPI:
         """
         response = self._make_request('POST', self.endpoints['status'], data)
         return response is not None and response.get('status') == 'success'
+
+    def send_event(self, data: Dict[str, Any]) -> bool:
+        """Send robot event (e.g., obstacle detected) to dashboard."""
+        endpoint = self.endpoints.get('event', '/api/event')
+        response = self._make_request('POST', endpoint, data)
+        return response is not None and response.get('status') == 'success'
     
     def send_camera_frame(self, data: Dict[str, Any]) -> bool:
         """

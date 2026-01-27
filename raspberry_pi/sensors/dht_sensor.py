@@ -74,10 +74,30 @@ class DHTSensor:
                 delay_seconds=2
             )
             
+            # Validate and clamp readings to plausible ranges
             if humidity is not None and temperature is not None:
+                try:
+                    t = float(temperature)
+                    h = float(humidity)
+                    # Typical ranges: temp -40..85°C, humidity 0..100%
+                    if not (-40.0 <= t <= 85.0):
+                        t = None
+                    if not (0.0 <= h <= 100.0):
+                        h = None
+                except Exception:
+                    t = None
+                    h = None
+
+                # If invalid, keep last valid reading if available
+                if t is None or h is None:
+                    if self.last_reading:
+                        return self.last_reading
+                    else:
+                        return {'temperature': None, 'humidity': None}
+
                 self.last_reading = {
-                    'temperature': round(temperature, 2),
-                    'humidity': round(humidity, 2)
+                    'temperature': round(t, 2),
+                    'humidity': round(h, 2)
                 }
                 self.last_read_time = current_time
                 logger.debug(f"DHT reading: {self.last_reading}")

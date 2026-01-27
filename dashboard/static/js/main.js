@@ -212,6 +212,11 @@ function connectWebSocket() {
     socket.on('backup_update', (data) => {
         handleBackupUpdate(data);
     });
+
+    // Robot events (e.g., obstacle detected)
+    socket.on('robot_event', (event) => {
+        handleRobotEvent(event);
+    });
 }
 
 /**
@@ -1216,6 +1221,18 @@ function setupEventListeners() {
     const sendWaypointsBtn = document.getElementById('send-waypoints-btn');
     if (sendWaypointsBtn) sendWaypointsBtn.addEventListener('click', sendWaypointsToRobot);
 
+    // Line Follower controls
+    const lfEnableBtn = document.getElementById('line-follow-enable-btn');
+    if (lfEnableBtn) lfEnableBtn.addEventListener('click', async () => {
+        const ok = await sendRobotCommand('FOLLOW_LINE');
+        if (ok) addLog('info', 'Line follower enabled');
+    });
+    const lfDisableBtn = document.getElementById('line-follow-disable-btn');
+    if (lfDisableBtn) lfDisableBtn.addEventListener('click', async () => {
+        const ok = await sendRobotCommand('FOLLOW_LINE_OFF');
+        if (ok) addLog('info', 'Line follower disabled');
+    });
+
     const manualButtonMap = {
         'manual-forward-btn': 'forward',
         'manual-left-btn': 'left',
@@ -1377,6 +1394,61 @@ window.addEventListener('beforeunload', () => {
 // Make functions globally available
 window.deleteWaypoint = deleteWaypoint;
 window.addLog = addLog;
+
+/**
+ * Handle robot events from backend
+ */
+function handleRobotEvent(event) {
+    if (!event) return;
+    const type = (event.type || 'EVENT').toUpperCase();
+    const device = event.device_id || state.deviceId || 'robot';
+    const payload = event.payload || {};
+
+    // Simple severity mapping
+    let level = 'info';
+    if (type.includes('OBSTACLE') || payload.obstacle) level = 'warning';
+    if (type.includes('ERROR')) level = 'error';
+
+    // Build message
+    let msg = `Event ${type} from ${device}`;
+    const details = [];
+    if (payload.distance !== undefined) details.push(`distance=${payload.distance}`);
+    if (payload.distance_cm !== undefined) details.push(`distance=${payload.distance_cm}cm`);
+    if (payload.direction) details.push(`direction=${payload.direction}`);
+    if (payload.note) details.push(payload.note);
+    if (details.length) msg += ` (${details.join(', ')})`;
+
+    addLog(level, msg);
+    showToast(level, 'Obstacle detected', msg);
+
+    // Map visual indicator
+    if (typeof window.showObstacleIndicator === 'function') {
+        const dist = (payload.distance_cm !== undefined) ? Number(payload.distance_cm) : (payload.distance !== undefined ? Number(payload.distance) : NaN);
+        window.showObstacleIndicator(isNaN(dist) ? null : dist, payload.direction || null);
+    }
+}
+
+/**
+ * Toast Notifications
+ */
+function showToast(type = 'info', title = '', detail = '') {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.innerHTML = `
+        <div>
+            <div class="title">${title || type.toUpperCase()}</div>
+            ${detail ? `<div class="detail">${detail}</div>` : ''}
+        </div>
+    `;
+    container.appendChild(toast);
+    // Auto-dismiss
+    setTimeout(() => {
+        toast.style.animation = 'fadeOut 200ms ease-out forwards';
+        setTimeout(() => toast.remove(), 220);
+    }, 4000);
+}
 
 /**
  * Overlay Windows (draggable/toggle)

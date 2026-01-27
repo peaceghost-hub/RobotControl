@@ -24,9 +24,9 @@
   - MQ-2 Gas Sensor (Smoke, LPG)
   - MQ-135 Gas Sensor (Air Quality, CO2)
   - MQ-7 Gas Sensor (Carbon Monoxide)
-  - MCP3008 ADC (Analog to Digital Converter)
+  - ADS1115 ADC (16-bit Analog to Digital Converter, I2C)
 - **Camera:** Raspberry Pi Camera Module V2
-- **Communication:** SIM800L/SIM900 GSM Module
+- **Communication:** SIM7600E LTE Module (with integrated GPS)
 - **Power:** 5V 3A Power Supply
 
 ### Arduino Mega 2560 Components:
@@ -148,8 +148,8 @@ nano config.json
 
 Update:
 - `dashboard_api.base_url` → Your dashboard server URL
-- `gsm.port` → Your GSM module port (usually `/dev/ttyUSB0`)
-- `gsm.apn` → Your mobile carrier's APN
+- `sim7600e.port` → Your SIM7600E module port (usually `/dev/ttyUSB0`)
+- `sim7600e.apn` → Your mobile carrier's APN
 - `arduino.port` → Arduino port (usually `/dev/ttyACM0`)
 
 ### 5. Test Sensors
@@ -239,35 +239,37 @@ DHT22 GND  → Pi GND (Pin 6)
 DHT22 DATA → Pi GPIO 4 (Pin 7)
 ```
 
-#### MCP3008 ADC (for MQ Sensors):
+#### ADS1115 ADC (for MQ Sensors):
 ```
-MCP3008 VDD  → Pi 3.3V (Pin 1)
-MCP3008 VREF → Pi 3.3V
-MCP3008 AGND → Pi GND
-MCP3008 DGND → Pi GND
-MCP3008 CLK  → Pi SCLK (Pin 23)
-MCP3008 DOUT → Pi MISO (Pin 21)
-MCP3008 DIN  → Pi MOSI (Pin 19)
-MCP3008 CS   → Pi CE0 (Pin 24)
+ADS1115 VDD  → Pi 5V (Pin 2)
+ADS1115 GND  → Pi GND (Pin 6)
+ADS1115 SCL  → Pi SCL (GPIO 3, Pin 5)
+ADS1115 SDA  → Pi SDA (GPIO 2, Pin 3)
+ADS1115 ADDR → Pi GND (for address 0x48)
 ```
 
 #### MQ Sensors:
 ```
 MQ-2 VCC   → 5V
 MQ-2 GND   → GND
-MQ-2 AOUT  → MCP3008 CH0
+MQ-2 AOUT  → ADS1115 A0
 
-MQ-135 AOUT → MCP3008 CH1
-MQ-7 AOUT   → MCP3008 CH2
+MQ-135 AOUT → ADS1115 A1
+MQ-7 AOUT   → ADS1115 A2
 ```
 
-#### GSM Module (SIM800L):
+#### SIM7600E LTE Module:
 ```
-SIM800L VCC → Pi 5V (with voltage regulator)
-SIM800L GND → Pi GND
-SIM800L TX  → Pi RX (GPIO 15, Pin 10)
-SIM800L RX  → Pi TX (GPIO 14, Pin 8)
+SIM7600E PWRKEY → Pi GPIO (for power control)
+SIM7600E VCC    → Pi 5V (requires 2A+ power supply)
+SIM7600E GND    → Pi GND
+SIM7600E TX     → Pi RX (GPIO 15, Pin 10) or USB
+SIM7600E RX     → Pi TX (GPIO 14, Pin 8) or USB
+GPS Antenna     → Connect to SIM7600E GPS port
+LTE Antenna     → Connect to SIM7600E main antenna port
 ```
+
+**Note:** SIM7600E can be connected via USB (/dev/ttyUSB0) which is recommended for better power stability.
 
 #### Pi Camera:
 - Connect to Camera CSI port on Raspberry Pi
@@ -366,11 +368,13 @@ python3 main.py
 - Verify wiring connections
 - Test with simple scripts
 
-**Problem:** GSM not connecting  
+**Problem:** SIM7600E not connecting  
 **Solution:**
-- Check SIM card is inserted and active
+- Check SIM card is inserted and active with LTE data plan
 - Verify APN settings in `config.json`
-- Check GSM module power supply (needs 2A)
+- Check SIM7600E power supply (needs 2A+ current)
+- Ensure USB connection is stable or use UART with proper voltage
+- Check antenna connections (both GPS and LTE)
 
 **Problem:** Camera not working  
 **Solution:**

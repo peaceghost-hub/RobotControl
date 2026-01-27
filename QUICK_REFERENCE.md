@@ -43,10 +43,10 @@ python3 main.py
 | Component | Pin | GPIO |
 |-----------|-----|------|
 | DHT22 Data | 7 | GPIO 4 |
-| MCP3008 SCLK | 23 | GPIO 11 |
-| MCP3008 MISO | 21 | GPIO 9 |
-| MCP3008 MOSI | 19 | GPIO 10 |
-| MCP3008 CS | 24 | GPIO 8 |
+| ADS1115 SDA | 3 | GPIO 2 (I2C) |
+| ADS1115 SCL | 5 | GPIO 3 (I2C) |
+| Arduino Mega I2C | 3, 5 | GPIO 2, 3 |
+| SIM7600E TX/RX | 8, 10 | UART0 |
 
 ### Arduino Mega
 | Component | Pin |
@@ -63,6 +63,10 @@ python3 main.py
 | Motor Right EN | 6 |
 | Motor Right IN1 | 24 |
 | Motor Right IN2 | 25 |
+| Line Follower Sensors (5-ch) | A0–A4 |
+| Line Follower (single sensor DO) | 32 |
+| ZigBee Module TX | RX2 (17) |
+| ZigBee Module RX | TX2 (16) |
 
 ---
 
@@ -75,7 +79,9 @@ python3 main.py
     "dashboard_api": {
         "base_url": "http://your-dashboard:5000"
     },
-    "gsm": {
+    "sim7600e": {
+        "port": "/dev/ttyUSB0",
+        "baudrate": 115200,
         "apn": "your-carrier-apn"
     }
 }

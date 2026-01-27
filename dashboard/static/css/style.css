@@ -542,6 +542,18 @@ tr:hover {
     box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.15);
 }
 
+/* Robot obstacle glow */
+.robot-marker-body.obstacle-glow {
+    filter: drop-shadow(0 0 8px rgba(239, 68, 68, 0.9));
+    animation: obstaclePulse 1s ease-in-out 2;
+}
+
+@keyframes obstaclePulse {
+    0% { transform: scale(1) }
+    50% { transform: scale(1.15) }
+    100% { transform: scale(1) }
+}
+
 /* Control Panel */
 .control-panel .panel-content {
     padding: 20px;
@@ -784,6 +796,51 @@ tr:hover {
     padding-bottom: 75%; /* 4:3 aspect ratio */
     overflow: hidden;
 }
+
+/* Toast Notifications */
+.toast-container {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    z-index: 2000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.toast {
+    min-width: 260px;
+    max-width: 360px;
+    background: #111827;
+    color: #e5e7eb;
+    border-left: 4px solid var(--primary-color);
+    box-shadow: var(--shadow-lg);
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    align-items: start;
+    gap: 10px;
+    opacity: 0.95;
+    animation: fadeIn 160ms ease-in;
+}
+
+.toast .title {
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.toast .detail {
+    font-size: 12px;
+    color: #9ca3af;
+}
+
+.toast.info { border-color: var(--primary-color); }
+.toast.success { border-color: var(--success-color); }
+.toast.warning { border-color: var(--warning-color); }
+.toast.error { border-color: var(--danger-color); }
+
+@keyframes fadeIn { from { opacity: 0; transform: translateY(8px) } to { opacity: 0.95; transform: translateY(0) } }
+@keyframes fadeOut { from { opacity: 0.95 } to { opacity: 0 } }
 
 .map-container iframe,
 .map-container .leaflet-container,

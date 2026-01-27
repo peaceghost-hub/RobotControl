@@ -53,7 +53,7 @@ except FileNotFoundError:
                 "port": "/dev/ttyUSB0",
                 "baudrate": 9600,
                 "apn": "your-apn",
-                "module_type": "SIM800L"
+                "module_type": "SIM7600E"
             },
             "sensors": {
                 "dht": {
@@ -113,11 +113,12 @@ class RobotController:
         except Exception as e:
             logger.warning(f"Sensor Manager not available: {e}")
         
-        # GSM Module (optional) - supports SIM800L/SIM900
+        # GSM Module (optional - legacy, prefer SIM7600E)
         self.gsm = None
         try:
-            self.gsm = GSMModule(CONFIG['gsm'])
-            logger.info("GSM Module initialized")
+            if CONFIG.get('gsm') and not CONFIG.get('sim7600e'):
+                self.gsm = GSMModule(CONFIG['gsm'])
+                logger.info("GSM Module initialized (legacy)")
         except Exception as e:
             logger.warning(f"GSM Module not available: {e}")
         
@@ -328,15 +329,16 @@ class RobotController:
             try:
                 gps_data = None
                 
-                # Priority 1: Get GPS from SIM7600E if available
+                # Priority 1: Get GPS from SIM7600E if available (dashboard feed only by default)
                 if self.sim7600e:
                     gps_data = self.sim7600e.get_gps_data()
                     if gps_data:
-                        # Forward to Mega as fallback
-                        if self.robot_link:
+                        # Optionally forward to Mega if configured
+                        forward_cfg = CONFIG.get('sim7600e', {}).get('forward_to_mega', False)
+                        if forward_cfg and self.robot_link:
                             try:
                                 self.robot_link.send_gps_data(gps_data)
-                                logger.debug("Forwarded SIM7600E GPS to Mega")
+                                logger.debug("Forwarded SIM7600E GPS to Mega (per config)")
                             except Exception as e:
                                 logger.debug(f"Could not forward GPS to Mega: {e}")
                 
@@ -344,7 +346,7 @@ class RobotController:
                 if not gps_data and self.robot_link:
                     gps_data = self.robot_link.request_gps_data()
                 
-                if gps_data and gps_data.get('valid'):
+                if gps_data and gps_data.get('latitude') is not None and gps_data.get('longitude') is not None:
                     # Add timestamp and device ID
                     gps_data['timestamp'] = datetime.now().isoformat()
                     gps_data['device_id'] = self.device_id
@@ -353,7 +355,10 @@ class RobotController:
                     success = self.api_client.send_gps_data(gps_data)
                     
                     if success:
-                        logger.debug(f"GPS data sent: {gps_data['latitude']:.6f}, {gps_data['longitude']:.6f}")
+                        try:
+                            logger.debug(f"GPS data sent: {gps_data['latitude']:.6f}, {gps_data['longitude']:.6f}")
+                        except Exception:
+                            logger.debug("GPS data sent (values present)")
                     else:
                         logger.warning("Failed to send GPS data")
                 else:
@@ -390,6 +395,28 @@ class RobotController:
                     nav_status = self.robot_link.request_status()
                     if nav_status:
                         status_data['navigation'] = nav_status
+
+                    # Poll obstacle status and notify dashboard
+                    try:
+                        obstacle = self.robot_link.request_obstacle_status()
+                    except Exception:
+                        obstacle = None
+                    if obstacle and obstacle.get('obstacle'):
+                        status_data['event'] = {
+                            'type': 'OBSTACLE_DETECTED',
+                            'distance_cm': obstacle.get('distance_cm', -1),
+                            'timestamp': datetime.utcnow().isoformat()
+                        }
+                        # Send immediate event notification
+                        try:
+                            self.api_client.send_event({
+                                'device_id': self.device_id,
+                                'type': 'OBSTACLE_DETECTED',
+                                'distance_cm': obstacle.get('distance_cm', -1),
+                                'timestamp': status_data['event']['timestamp']
+                            })
+                        except Exception as exc:
+                            logger.debug(f"Failed to send obstacle event: {exc}")
 
                     if self.comm_mode == 'i2c':
                         try:
@@ -457,6 +484,18 @@ class RobotController:
                 success = self._handle_manual_speed(payload)
             elif command_type == 'WAYPOINT_PUSH':
                 success = self._handle_waypoint_push()
+            elif command_type == 'FOLLOW_LINE':
+                # Payload: {"enabled": true|false}
+                enabled = bool((payload or {}).get('enabled', True))
+                if hasattr(self.robot_link, 'set_line_follow'):
+                    success = self.robot_link.set_line_follow(enabled)
+                else:
+                    success = False
+            elif command_type == 'FOLLOW_LINE_OFF':
+                if hasattr(self.robot_link, 'set_line_follow'):
+                    success = self.robot_link.set_line_follow(False)
+                else:
+                    success = False
             else:
                 logger.warning(f"Unknown command: {command_type}")
                 error_message = f"Unknown command {command_type}"

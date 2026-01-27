@@ -1,4 +1,4 @@
-"""MQ Gas Sensors Module using ADS1015 I2C ADC"""
+"""MQ Gas Sensors Module using ADS1x15 I2C ADC (ADS1115 preferred)"""
 
 import logging
 import time
@@ -7,7 +7,7 @@ from typing import Dict, Any
 logger = logging.getLogger('mq_sensors')
 
 try:
-    from Adafruit_ADS1x15 import ADS1015
+    from Adafruit_ADS1x15 import ADS1115, ADS1015
     ADS_AVAILABLE = True
 except ImportError:
     ADS_AVAILABLE = False
@@ -15,7 +15,7 @@ except ImportError:
 
 
 class MQSensors:
-    """MQ Series Gas Sensors with ADS1015 I2C ADC"""
+    """MQ Series Gas Sensors with ADS1x15 I2C ADC (uses ADS1115 when available)"""
 
     DEFAULT_GAIN = 1  # +/-4.096V
 
@@ -28,10 +28,16 @@ class MQSensors:
         self.ads = None
         if ADS_AVAILABLE:
             try:
-                self.ads = ADS1015(address=self.address)
-                logger.info("ADS1015 initialized on I2C address 0x%02X", self.address)
+                # Prefer ADS1115 (16-bit); fallback to ADS1015
+                self.ads = ADS1115(address=self.address)
+                logger.info("ADS1115 initialized on I2C address 0x%02X", self.address)
             except Exception as exc:
-                logger.error("Failed to initialize ADS1015: %s", exc)
+                logger.warning("Failed to initialize ADS1115: %s - falling back to ADS1015", exc)
+                try:
+                    self.ads = ADS1015(address=self.address)
+                    logger.info("ADS1015 initialized on I2C address 0x%02X", self.address)
+                except Exception as exc2:
+                    logger.error("Failed to initialize ADS1x15 ADC: %s", exc2)
 
         for name, info in sensor_config.items():
             if info.get('enabled', False):

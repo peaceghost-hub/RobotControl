@@ -7,6 +7,7 @@ let robotMarker;
 let waypointMarkers = [];
 let robotPath;
 let mapClickEnabled = false;
+let obstacleCircles = [];
 
 /**
  * Initialize Map
@@ -105,6 +106,41 @@ function updateRobotPosition(lat, lon, heading = 0, source = 'primary') {
         Heading: ${heading.toFixed(1)}°<br>
         Source: ${source === 'backup' ? 'Backup (ZigBee)' : 'Primary'}
     `);
+}
+
+/**
+ * Show visual indicator near the robot for obstacles
+ * @param {number|null} distanceCm - distance in centimeters (optional)
+ * @param {string|null} direction - optional direction label
+ */
+function showObstacleIndicator(distanceCm = null, direction = null) {
+    if (!map || !robotMarker) return;
+    const pos = robotMarker.getLatLng();
+    const radiusMeters = (typeof distanceCm === 'number' && !isNaN(distanceCm)) ? Math.max(0.5, distanceCm / 100.0) : 1.5;
+    const circle = L.circle(pos, {
+        radius: radiusMeters,
+        color: '#ef4444',
+        fillColor: '#ef4444',
+        fillOpacity: 0.15,
+        weight: 2
+    }).addTo(map);
+    obstacleCircles.push(circle);
+
+    // Brief glow on robot marker
+    const markerElement = robotMarker.getElement();
+    const body = markerElement && markerElement.querySelector('.robot-marker-body');
+    if (body) {
+        body.classList.add('obstacle-glow');
+        setTimeout(() => body.classList.remove('obstacle-glow'), 1600);
+    }
+
+    // Auto-remove the circle after a few seconds
+    setTimeout(() => {
+        try {
+            map.removeLayer(circle);
+        } catch (e) { /* ignore */ }
+        obstacleCircles = obstacleCircles.filter(c => c !== circle);
+    }, 3000);
 }
 
 /**
@@ -271,3 +307,4 @@ window.updateRobotPosition = updateRobotPosition;
 window.updateMapWaypoints = updateMapWaypoints;
 window.centerMapOnRobot = centerMapOnRobot;
 window.setBackupMapMode = setBackupMapMode;
+window.showObstacleIndicator = showObstacleIndicator;
