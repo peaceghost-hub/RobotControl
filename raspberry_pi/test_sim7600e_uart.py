@@ -162,18 +162,38 @@ def get_module_info(ser):
     resp = send_at(ser, 'AT+CGREG?', 0.5)
     print(f"GPRS Reg: {resp.strip()[:80]}")
 
+
+def network_precheck(ser):
+    """Run basic network readiness checks per SIMCom docs."""
+    print("\n=== Network Pre-check (SIMCom recommended) ===")
+    for cmd, label, wait in [
+        ("AT+CSQ", "Signal (CSQ)", 0.8),
+        ("AT+CREG?", "Circuit Reg (CREG)", 0.8),
+        ("AT+CPSI?", "System Info (CPSI)", 1.0),
+        ("AT+CGREG?", "Packet Reg (CGREG)", 0.8),
+    ]:
+        resp = send_at(ser, cmd, deadline_s=wait, tries=2)
+        print(f"{label}: {resp.strip()[:120]}")
+
 def setup_data_connection(ser, apn):
     """Setup mobile data connection"""
     print(f"\n=== Setting up Data Connection (APN: {apn}) ===")
     
-    # Configure PDP context
+    # Configure PDP context (two common variants shown in SIMCom notes)
     print("1. Configuring PDP context...")
-    cmd = f'AT+CGDCONT=1,"IP","{apn}"'
-    resp = send_at(ser, cmd, 1.0)
-    if 'OK' in resp:
-        print("   ✓ PDP context set")
-    else:
-        print(f"   ⚠ Response: {resp.strip()[:60]}")
+    cmd1 = f'AT+CGDCONT=1,"IP","{apn}"'
+    resp = send_at(ser, cmd1, deadline_s=1.2, tries=2)
+    print(f"   CGDCONT: {resp.strip()[:120]}")
+
+    # Some firmware uses the internal TCP/IP stack profile commands
+    cmd2 = f'AT+CGSOCKCONT=1,"IP","{apn}"'
+    resp = send_at(ser, cmd2, deadline_s=1.2, tries=2)
+    if resp:
+        print(f"   CGSOCKCONT: {resp.strip()[:120]}")
+
+    resp = send_at(ser, 'AT+CSOCKSETPN=1', deadline_s=1.2, tries=2)
+    if resp:
+        print(f"   CSOCKSETPN: {resp.strip()[:120]}")
     
     # Attach to GPRS
     print("2. Attaching to GPRS network...")
@@ -217,9 +237,14 @@ def test_internet(ser):
     resp = send_at(ser, 'AT+CGACT?', 1.0)
     print(f"PDP Status: {resp.strip()[:80]}")
     
-    # Get IP address
-    resp = send_at(ser, 'AT+CIFSR', 2.0)
-    print(f"IP Address: {resp.strip()[:80]}")
+    # Get IP address (two variants depending on stack)
+    resp = send_at(ser, 'AT+IPADDR', deadline_s=1.5, tries=2)
+    if resp.strip():
+        print(f"IPADDR: {resp.strip()[:120]}")
+
+    resp = send_at(ser, 'AT+CIFSR', deadline_s=2.0, tries=2)
+    if resp.strip():
+        print(f"CIFSR: {resp.strip()[:120]}")
     
     print("\nPinging 8.8.8.8...")
     resp = send_at(ser, 'AT+CPING="8.8.8.8",1,4,64,1000,10000', 20.0)
@@ -231,6 +256,22 @@ def test_internet(ser):
     else:
         print(f"⚠ Ping response: {resp.strip()[:100]}")
         return False
+
+
+def gps_quick_test(ser):
+    """Try to start GPS and fetch a fix (may take minutes outdoors)."""
+    print("\n=== GPS Quick Test ===")
+    print("Starting GPS engine (standalone)...")
+    resp = send_at(ser, 'AT+CGPS=1,1', deadline_s=1.5, tries=2)
+    print(f"CGPS start: {resp.strip()[:120]}")
+
+    print("Waiting 5 seconds...")
+    time.sleep(5)
+
+    resp = send_at(ser, 'AT+CGPSINFO', deadline_s=1.5, tries=2)
+    print(f"CGPSINFO: {resp.strip()[:200]}")
+    if ',,,,,,' in resp or 'OK' in resp and 'CGPSINFO' in resp and ',,' in resp:
+        print("Note: No fix yet is normal indoors. Try outside with GPS antenna attached.")
 
 def main():
     print("=" * 60)
@@ -254,8 +295,9 @@ def main():
         sys.exit(1)
     
     try:
-        # Get module info
+        # Basic info + precheck
         get_module_info(ser)
+        network_precheck(ser)
         
         # Get APN
         print("\n" + "=" * 60)
@@ -275,6 +317,12 @@ def main():
             print("3. Check if roaming is needed")
             print("4. Try manual commands in minicom/screen")
         
+        # Optional GPS
+        print("\n" + "=" * 60)
+        do_gps = input("Run GPS quick test? (y/N): ").strip().lower() == 'y'
+        if do_gps:
+            gps_quick_test(ser)
+
         print("\n" + "=" * 60)
         print("Test complete!")
         print("\nIf successful, update config.json with:")
