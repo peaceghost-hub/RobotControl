@@ -165,6 +165,26 @@ class DashboardAPI:
             return response.get('commands', [])
         return []
     
+    def ack_command(self, command_id: int, status: str = 'completed', error_message: str = '') -> bool:
+        """
+        Acknowledge command completion to dashboard
+        
+        Args:
+            command_id: ID of the command being acknowledged
+            status: Command status ('completed', 'failed', etc.)
+            error_message: Optional error message
+            
+        Returns:
+            bool: True if successful
+        """
+        data = {
+            'status': status,
+            'error_message': error_message
+        }
+        endpoint = f"/api/commands/{command_id}/ack"
+        response = self._make_request('POST', endpoint, data)
+        return response is not None and response.get('status') == 'success'
+    
     def test_connection(self) -> bool:
         """
         Test connection to dashboard
