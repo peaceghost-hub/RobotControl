@@ -17,10 +17,12 @@ def find_sim7600e():
                   '/dev/serial0', '/dev/ttyAMA0']
     
     print("Scanning for SIM7600E...")
+    permission_error_ports = []
+    
     for port in candidates:
         if not os.path.exists(port):
             continue
-        print(f"  Trying {port}...", end=' ')
+        print(f"  Trying {port}...", end=' ', flush=True)
         try:
             ser = serial.Serial(port, 115200, timeout=2)
             time.sleep(0.5)
@@ -36,17 +38,27 @@ def find_sim7600e():
             else:
                 print(f"✗ No AT response")
         except PermissionError:
-            print(f"✗ Permission denied (run: sudo usermod -aG dialout $USER)")
-            sys.exit(1)
+            print(f"✗ Permission denied")
+            permission_error_ports.append(port)
         except Exception as e:
-            print(f"✗ {e}")
+            print(f"✗ {type(e).__name__}")
     
     print("\n❌ SIM7600E not found on any port!")
+    
+    if permission_error_ports:
+        print(f"\n⚠️  Permission denied on: {', '.join(permission_error_ports)}")
+        print("\nFix permissions with:")
+        print(f"  sudo usermod -aG dialout $USER")
+        print(f"  sudo chmod 666 {' '.join(permission_error_ports)}")
+        print("Then restart or run: newgrp dialout")
+        return None
+    
     print("\nTroubleshooting:")
-    print("1. Check USB cable is connected")
-    print("2. Run: ls -l /dev/tty* | grep USB")
-    print("3. Check power LED on SIM7600E module")
-    print("4. Verify user is in dialout group: groups $USER")
+    print("1. Check USB cable is connected to SIM7600E")
+    print("2. Run: ls -l /dev/tty* | grep -E 'USB|ACM'")
+    print("3. Check power LED on SIM7600E module (should be blinking)")
+    print("4. Try: dmesg | tail -20 (look for new USB device)")
+    print("5. Verify user is in dialout group: groups $USER")
     return None
 
 def send_at(ser, cmd, timeout=2):
