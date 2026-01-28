@@ -1,79 +1,129 @@
 #!/usr/bin/env python3
-"""
-SIM7600E UART Test Script
-Tests serial UART connection (/dev/ttyAMA0) and internet setup
+"""SIM7600E UART Test Script.
+
+Tests serial UART connection (Pi UART) and data setup.
+
+Notes:
+- Many SIM7600E/SIM7x00 *module* UART pins are 1.8V logic (per SIMCom docs).
+    If your board exposes raw UART pins, do NOT connect Pi TX (3.3V) directly to
+    module RX (1.8V). Use a level shifter.
 """
 
+import argparse
 import serial
 import time
 import sys
 import os
 
-def send_at(ser, cmd, wait_time=1.0):
-    """Send AT command and return response"""
-    ser.reset_input_buffer()
-    ser.reset_output_buffer()
-    
-    try:
-        ser.write(f'{cmd}\r\n'.encode())
-        ser.flush()
-    except Exception as e:
-        print(f"Error writing to serial: {e}")
-        return ""
-    
-    time.sleep(wait_time)
+
+DEFAULT_PORTS = ["/dev/serial0", "/dev/ttyAMA0", "/dev/ttyS0"]
+
+def send_at(ser: serial.Serial, cmd: str, deadline_s: float = 1.0, tries: int = 2) -> str:
+    """Send an AT command and return whatever response arrives before deadline.
+
+    Uses short, non-blocking reads and never blocks indefinitely on write/flush.
+    """
+    payload = f"{cmd}\r\n".encode()
     response = ""
-    
-    try:
-        while ser.in_waiting:
-            chunk = ser.read(ser.in_waiting)
-            response += chunk.decode('utf-8', errors='ignore')
+
+    for _ in range(max(1, tries)):
+        try:
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+        except Exception:
+            pass
+
+        try:
+            ser.write(payload)
+        except serial.SerialTimeoutException:
+            return "__WRITE_TIMEOUT__"
+        except Exception as e:
+            return f"__WRITE_ERROR__:{type(e).__name__}:{e}"
+
+        start = time.time()
+        buf = ""
+        while (time.time() - start) < max(0.1, deadline_s):
+            try:
+                waiting = ser.in_waiting
+                if waiting:
+                    buf += ser.read(waiting).decode("utf-8", errors="ignore")
+                    if "OK" in buf or "ERROR" in buf:
+                        break
+            except Exception:
+                break
             time.sleep(0.05)
-    except Exception as e:
-        print(f"Error reading from serial: {e}")
-    
+
+        response += buf
+        if "OK" in response or "ERROR" in response:
+            break
+
     return response
 
-def test_basic_connection():
-    """Test basic AT communication"""
+
+def _open_serial(port: str, baudrate: int) -> serial.Serial:
+    return serial.Serial(
+        port=port,
+        baudrate=baudrate,
+        timeout=0.2,
+        write_timeout=0.5,
+        rtscts=False,
+        dsrdtr=False,
+        exclusive=True,
+    )
+
+def test_basic_connection(ports: list[str], baudrate: int) -> serial.Serial | None:
+    """Test basic AT communication on one or more ports."""
     print("\n=== Testing UART Connection ===")
-    
-    try:
-        ser = serial.Serial('/dev/ttyAMA0', 115200, timeout=2)
-        time.sleep(0.5)
-    except PermissionError:
-        print("❌ Permission denied on /dev/ttyAMA0")
-        print("\nFix with:")
-        print("  sudo usermod -aG dialout $USER")
-        print("  newgrp dialout")
-        print("Then restart the script")
-        return None
-    except FileNotFoundError:
-        print("❌ /dev/ttyAMA0 not found!")
-        print("\nMake sure:")
-        print("1. UART is enabled: sudo raspi-config")
-        print("2. Go to: Interface Options → Serial Port")
-        print("3. Enable serial port hardware: YES")
-        print("4. Disable login shell: NO")
-        print("5. Reboot: sudo reboot")
-        return None
-    except Exception as e:
-        print(f"❌ Error opening /dev/ttyAMA0: {e}")
-        return None
-    
-    print("✓ /dev/ttyAMA0 opened successfully")
-    
-    # Test AT command
-    print("Sending AT command...")
-    response = send_at(ser, 'AT', 0.5)
-    
-    if 'OK' in response:
-        print("✓ SIM7600E responding to AT commands!")
-        return ser
-    else:
-        print(f"✗ No OK response. Got: {repr(response[:100])}")
+
+    for port in ports:
+        if not port:
+            continue
+        if not os.path.exists(port):
+            continue
+
+        print(f"\nOpening {port} @ {baudrate}...")
+        try:
+            ser = _open_serial(port, baudrate)
+            time.sleep(0.2)
+        except PermissionError:
+            print(f"❌ Permission denied on {port}")
+            continue
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            print(f"❌ Error opening {port}: {type(e).__name__}: {e}")
+            continue
+
+        print("Sending AT (autobaud-style: may need a few tries)...")
+        response = send_at(ser, "AT", deadline_s=0.8, tries=4)
+
+        if response == "__WRITE_TIMEOUT__":
+            print("❌ Write timed out. Common causes:")
+            print("- Wrong UART device (console/BT using it)")
+            print("- Miswired TX/RX or missing GND")
+            print("- Board requires RTS/CTS (rare)")
+            ser.close()
+            continue
+
+        if "OK" in response:
+            print("✓ SIM7600E responding to AT commands!")
+            return ser
+
+        print(f"✗ No OK. First bytes: {repr(response[:120])}")
         ser.close()
-        return None
+
+    print("\n❌ Could not get AT response on any port.")
+    print("\nMost common causes on Raspberry Pi:")
+    print("1) Wrong UART device: try /dev/serial0 (recommended), /dev/ttyS0, /dev/ttyAMA0")
+    print("2) Serial console/Bluetooth is using the UART")
+    print("   - In raspi-config: Interface Options → Serial Port")
+    print("     Disable login shell over serial: YES")
+    print("     Enable serial port hardware: YES")
+    print("   - Then reboot")
+    print("3) Wiring: TX/RX swapped and common GND required")
+    print("4) Logic levels: many SIM7x00 UART pins are 1.8V; Pi TX is 3.3V")
+    print("   - Use a level shifter if your board exposes raw module UART pins")
+    return None
 
 def get_module_info(ser):
     """Get module information"""
@@ -186,9 +236,20 @@ def main():
     print("=" * 60)
     print("SIM7600E UART Connection Test")
     print("=" * 60)
-    
+
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument(
+        "--port",
+        default="auto",
+        help="Serial port to use (default: auto -> /dev/serial0,/dev/ttyAMA0,/dev/ttyS0)",
+    )
+    parser.add_argument("--baud", type=int, default=115200, help="Baud rate (default: 115200)")
+    args = parser.parse_args()
+
+    ports = DEFAULT_PORTS if str(args.port).lower() == "auto" else [args.port]
+
     # Test basic connection
-    ser = test_basic_connection()
+    ser = test_basic_connection(ports=ports, baudrate=args.baud)
     if not ser:
         sys.exit(1)
     
