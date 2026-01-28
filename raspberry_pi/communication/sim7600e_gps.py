@@ -7,6 +7,8 @@ import logging
 import serial
 import time
 import threading
+import glob
+import os
 from typing import Optional, Dict, Tuple
 from datetime import datetime
 
@@ -27,12 +29,14 @@ class SIM7600EGPS:
                 - apn, apn_user, apn_password: APN settings
                 - gps_enabled: Whether to enable GPS (default True)
         """
-        self.port = config.get('port', '/dev/ttyUSB0')
+        # Allow "auto" port selection (USB or UART) by probing common device paths.
+        self.port = config.get('port', 'auto')
         self.baudrate = config.get('baudrate', 115200)
         self.apn = config.get('apn', 'internet')
         self.apn_user = config.get('apn_user', '')
         self.apn_password = config.get('apn_password', '')
         self.gps_enabled = config.get('gps_enabled', True)
+        self.data_enabled = config.get('data_enabled', True)
         
         self.serial = None
         self.connected = False
@@ -41,11 +45,91 @@ class SIM7600EGPS:
         self._stop_event = threading.Event()
         self._gps_thread = None
         
-        logger.info(f"SIM7600E module initialized on {self.port}")
+        logger.info(f"SIM7600E module initialized (port={self.port})")
+
+    @staticmethod
+    def _candidate_ports() -> list[str]:
+        # Prefer stable symlinks if present
+        candidates: list[str] = []
+        for fixed in ('/dev/serial0', '/dev/ttyAMA0'):
+            candidates.append(fixed)
+        # USB serial adapters / CDC ACM
+        candidates.extend(sorted(glob.glob('/dev/ttyUSB*')))
+        candidates.extend(sorted(glob.glob('/dev/ttyACM*')))
+        # De-duplicate while preserving order
+        seen = set()
+        out: list[str] = []
+        for p in candidates:
+            if p not in seen:
+                seen.add(p)
+                out.append(p)
+        return out
+
+    def _resolve_port(self) -> Optional[str]:
+        """Return a working serial port path by probing for AT response."""
+        preferred = str(self.port).strip() if self.port is not None else 'auto'
+
+        def can_try(path: str) -> bool:
+            return bool(path) and os.path.exists(path)
+
+        ports: list[str] = []
+        if preferred and preferred.lower() != 'auto':
+            ports.append(preferred)
+        ports.extend(self._candidate_ports())
+
+        saw_permission_error = False
+        for path in ports:
+            if not can_try(path):
+                continue
+            try:
+                test_ser = serial.Serial(
+                    port=path,
+                    baudrate=self.baudrate,
+                    timeout=1,
+                    parity=serial.PARITY_NONE,
+                    stopbits=serial.STOPBITS_ONE,
+                    bytesize=serial.EIGHTBITS,
+                )
+                time.sleep(0.3)
+                test_ser.reset_input_buffer()
+                test_ser.write(b'AT\r\n')
+                test_ser.flush()
+                start = time.time()
+                buf = ''
+                while (time.time() - start) < 1.5:
+                    if test_ser.in_waiting:
+                        buf += test_ser.read(test_ser.in_waiting).decode(errors='ignore')
+                        if 'OK' in buf:
+                            test_ser.close()
+                            return path
+                    time.sleep(0.05)
+                test_ser.close()
+            except Exception as exc:
+                # If device exists but isn't accessible, hint about permissions.
+                try:
+                    import errno
+                    if getattr(exc, 'errno', None) == errno.EACCES:
+                        saw_permission_error = True
+                except Exception:
+                    pass
+                continue
+
+        if saw_permission_error:
+            logger.error("SIM7600E serial device found but permission denied (add user to 'dialout' or run as root)")
+        return None
     
     def connect(self) -> bool:
         """Connect and initialize module"""
         try:
+            resolved = self._resolve_port()
+            if not resolved:
+                logger.error("SIM7600E serial port not found. Set config port or connect via USB/UART.")
+                return False
+
+            if resolved != self.port:
+                logger.info("SIM7600E auto-selected port %s", resolved)
+            self.port = resolved
+
             self.serial = serial.Serial(
                 port=self.port,
                 baudrate=self.baudrate,
@@ -64,6 +148,19 @@ class SIM7600EGPS:
             # Power on module
             self._send_at_command('AT+CFUN=1', 'OK')
             time.sleep(1)
+
+            # Basic SIM readiness
+            self._send_at_command('AT+CPIN?', 'OK')
+
+            # Bring up data session if enabled
+            if self.data_enabled:
+                try:
+                    if self._setup_data_connection():
+                        logger.info("SIM7600E data session ready")
+                    else:
+                        logger.warning("SIM7600E data session not ready")
+                except Exception as exc:
+                    logger.warning("SIM7600E data setup failed: %s", exc)
             
             # Enable GPS if configured
             if self.gps_enabled:
@@ -81,6 +178,40 @@ class SIM7600EGPS:
         except Exception as e:
             logger.error(f"Failed to connect SIM7600E: {e}")
             return False
+
+    def _setup_data_connection(self) -> bool:
+        """Attempt to bring up a PDP context / data session."""
+        if not self.serial or not self.serial.is_open:
+            return False
+
+        # Prefer LTE registration query when available
+        self._send_at_command('AT+CEREG?', 'OK')
+        self._send_at_command('AT+CREG?', 'OK')
+        self._send_at_command('AT+CGREG?', 'OK')
+
+        # Set APN
+        apn = (self.apn or '').strip()
+        if not apn:
+            return False
+        if not self._send_at_command(f'AT+CGDCONT=1,"IP","{apn}"', 'OK'):
+            return False
+
+        # Attach to packet service
+        self._send_at_command('AT+CGATT=1', 'OK', timeout=10)
+
+        # Open network (SIMCom stack)
+        # NETOPEN returns OK and then +NETOPEN: 0 on success.
+        if not self._send_at_command('AT+NETOPEN', 'OK', timeout=10):
+            # Some firmwares require closing first
+            self._send_at_command('AT+NETCLOSE', 'OK', timeout=5)
+            if not self._send_at_command('AT+NETOPEN', 'OK', timeout=10):
+                return False
+
+        # Query IP address
+        self._send_at_command('AT+IPADDR', 'OK', timeout=5)
+
+        # Final sanity: registration check used as "internet ready" proxy
+        return self.check_internet()
     
     def disconnect(self):
         """Disconnect module"""

@@ -21,9 +21,14 @@ class GSMModule:
         Args:
             config: GSM configuration dictionary
         """
-        self.port = config['port']
-        self.baudrate = config['baudrate']
-        self.apn = config['apn']
+        # Validate required configuration keys early to avoid opaque KeyErrors.
+        self.port = config.get('port')
+        self.baudrate = config.get('baudrate')
+        self.apn = config.get('apn')
+
+        missing = [k for k, v in (('port', self.port), ('baudrate', self.baudrate), ('apn', self.apn)) if not v]
+        if missing:
+            raise ValueError(f"Missing GSM config keys: {', '.join(missing)}")
         self.apn_user = config.get('apn_user', '')
         self.apn_password = config.get('apn_password', '')
         self.module_type = config.get('module_type', 'SIM800L')

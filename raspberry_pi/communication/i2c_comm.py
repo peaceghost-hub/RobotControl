@@ -95,14 +95,27 @@ class I2CComm:
 
     def _exchange(self, command: int, data: bytes = b"", expect: int = 0) -> Optional[bytes]:
         payload = bytes([command]) + data
-        if not self._write(payload):
-            return None
+        attempts = max(1, int(self.retry_attempts))
 
-        if expect == 0:
-            return b""
+        for attempt in range(1, attempts + 1):
+            if not self._write(payload):
+                if attempt < attempts:
+                    time.sleep(min(0.05, self.request_timeout))
+                    continue
+                return None
 
-        time.sleep(self.request_timeout)
-        return self._read(expect)
+            if expect == 0:
+                return b""
+
+            time.sleep(self.request_timeout)
+            resp = self._read(expect)
+            if resp is not None:
+                return resp
+
+            if attempt < attempts:
+                time.sleep(min(0.05, self.request_timeout))
+
+        return None
 
     # ------------------------------------------------------------------
     # Public operations

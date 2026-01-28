@@ -28,19 +28,29 @@ from raspberry_pi.utils.logger import setup_logger
 from raspberry_pi.utils.data_formatter import DataFormatter
 
 # Configuration
-try:
-    with open('config.json', 'r') as f:
-        CONFIG = json.load(f)
-except FileNotFoundError:
-    # Try relative to this file's directory
-    import os
-    config_path = os.path.join(os.path.dirname(__file__), 'config.json')
-    try:
-        with open(config_path, 'r') as f:
-            CONFIG = json.load(f)
-    except FileNotFoundError:
-        print("Warning: config.json not found, using default configuration")
-        CONFIG = {
+def _load_config() -> tuple[dict, str]:
+    """Load robot configuration.
+
+    Priority:
+      1) $ROBOT_CONFIG_PATH (if set)
+      2) config.json next to this file (raspberry_pi/config.json)
+      3) ./config.json in current working directory
+    """
+    env_path = os.environ.get('ROBOT_CONFIG_PATH')
+    candidates = []
+    if env_path:
+        candidates.append(env_path)
+    candidates.append(os.path.join(os.path.dirname(__file__), 'config.json'))
+    candidates.append(os.path.join(os.getcwd(), 'config.json'))
+
+    for path in candidates:
+        try:
+            with open(path, 'r') as f:
+                return json.load(f), path
+        except FileNotFoundError:
+            continue
+
+    return {
             "device_id": "robot_01",
             "update_interval": 5,
             "gps_update_interval": 2,
@@ -83,10 +93,14 @@ except FileNotFoundError:
                 "bus": 1,
                 "mega_address": 8
             }
-        }
+        }, "<default>"
+
+
+CONFIG, _CONFIG_PATH = _load_config()
 
 # Setup logging
 logger = setup_logger('main', CONFIG.get('log_level', 'INFO'))
+logger.info("Loaded config from %s", _CONFIG_PATH)
 
 # Global shutdown event
 shutdown_event = Event()
@@ -113,25 +127,38 @@ class RobotController:
         except Exception as e:
             logger.warning(f"Sensor Manager not available: {e}")
         
-        # GSM Module (optional - legacy, prefer SIM7600E)
+        # GSM Module (optional - legacy) and/or SIM7600E (preferred)
+        # Support older configs that put SIM7600E settings under "gsm" by using module_type.
         self.gsm = None
+        self.sim7600e = None
+        self.gps_from_gsm = False
+
+        gsm_cfg = CONFIG.get('gsm') or {}
+        sim_cfg = CONFIG.get('sim7600e')
+        gsm_module_type = str(gsm_cfg.get('module_type', '')).strip().upper()
+
+        # If SIM7600E is configured explicitly, use it.
+        # If module_type indicates SIM7600E, treat the gsm config as sim7600e config.
+        if not sim_cfg and gsm_cfg and gsm_module_type == 'SIM7600E':
+            sim_cfg = gsm_cfg
+
+        # SIM7600E with GPS (optional) - takes priority over Neo-6M
+        if sim_cfg:
+            try:
+                self.sim7600e = SIM7600EGPS(sim_cfg)
+                self.gps_from_gsm = True
+                logger.info("SIM7600E module initialized")
+            except Exception as e:
+                logger.warning(f"SIM7600E module not available: {e}")
+
+        # Legacy GSM module only if enabled and not SIM7600E
         try:
-            if CONFIG.get('gsm') and not CONFIG.get('sim7600e'):
-                self.gsm = GSMModule(CONFIG['gsm'])
+            gsm_enabled = bool(gsm_cfg.get('enabled', True))
+            if gsm_enabled and gsm_cfg and not self.sim7600e:
+                self.gsm = GSMModule(gsm_cfg)
                 logger.info("GSM Module initialized (legacy)")
         except Exception as e:
             logger.warning(f"GSM Module not available: {e}")
-        
-        # SIM7600E with GPS (optional) - if configured, takes priority over Neo-6M
-        self.sim7600e = None
-        self.gps_from_gsm = False
-        try:
-            if CONFIG.get('sim7600e'):
-                self.sim7600e = SIM7600EGPS(CONFIG['sim7600e'])
-                self.gps_from_gsm = True
-                logger.info("SIM7600E module initialized (GPS from GSM module)")
-        except Exception as e:
-            logger.warning(f"SIM7600E module not available: {e}")
         
         # Arduino Mega communication (optional)
         self.comm_mode = None
@@ -140,9 +167,10 @@ class RobotController:
             if CONFIG.get('i2c'):
                 self.robot_link = I2CComm(CONFIG['i2c'])
                 self.comm_mode = 'i2c'
-                logger.info("Configured I2C communication with Mega")
-                if not getattr(self.robot_link, 'bus', None):
-                    logger.warning("I2C bus not initialized; Mega link may be offline")
+                if getattr(self.robot_link, 'bus', None):
+                    logger.info("Configured I2C communication with Mega")
+                else:
+                    logger.warning("I2C communication not available (bus not initialized)")
             elif CONFIG.get('arduino'):
                 self.robot_link = ArduinoComm(CONFIG['arduino'])
                 self.comm_mode = 'serial'
@@ -195,6 +223,13 @@ class RobotController:
                 try:
                     if self.sim7600e.connect():
                         logger.info("SIM7600E module connected")
+                        try:
+                            if self.sim7600e.check_internet():
+                                logger.info("SIM7600E network registered (internet path available)")
+                            else:
+                                logger.warning("SIM7600E not registered / internet not ready")
+                        except Exception as exc:
+                            logger.debug("SIM7600E internet check failed: %s", exc)
                         # Wait for GPS lock
                         logger.info("Waiting for GPS lock...")
                         for attempt in range(5):
@@ -231,8 +266,12 @@ class RobotController:
                     if self.comm_mode == 'serial':
                         self.robot_link.start()
                     elif self.comm_mode == 'i2c':
-                        if not self.robot_link.ping():
-                            logger.warning("Mega did not acknowledge I2C ping")
+                        # Only attempt I2C ping when the I2C bus is actually available.
+                        if not getattr(self.robot_link, 'bus', None):
+                            logger.warning("Skipping I2C ping (I2C bus not available)")
+                        else:
+                            if not self.robot_link.ping():
+                                logger.warning("Mega did not acknowledge I2C ping")
                 except Exception as e:
                     logger.warning(f"Failed to start navigation link: {e}")
             

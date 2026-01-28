@@ -5,6 +5,12 @@ echo "Starting Robot Control System..."
 
 cd "$(dirname "$0")/../raspberry_pi"
 
+# Prefer a project venv if present (recommended on the Pi)
+PYTHON_BIN="python3"
+if [ -x "../.venv/bin/python" ]; then
+    PYTHON_BIN="../.venv/bin/python"
+fi
+
 # Check if config exists
 if [ ! -f "config.json" ]; then
     echo "Error: config.json not found!"
@@ -21,4 +27,4 @@ fi
 
 # Start main control loop
 echo "Starting robot control system..."
-python3 main.py
+"$PYTHON_BIN" main.py
