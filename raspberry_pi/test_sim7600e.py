@@ -16,32 +16,58 @@ def find_sim7600e():
                   '/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyACM2',
                   '/dev/serial0', '/dev/ttyAMA0']
     
-    print("Scanning for SIM7600E...")
+    print("Scanning for SIM7600E (this may take a minute)...\n")
     permission_error_ports = []
+    found_ports = []
     
     for port in candidates:
         if not os.path.exists(port):
             continue
         print(f"  Trying {port}...", end=' ', flush=True)
         try:
-            ser = serial.Serial(port, 115200, timeout=2)
-            time.sleep(0.5)
+            # Short timeout to fail fast on unresponsive ports
+            ser = serial.Serial(port, 115200, timeout=0.5, write_timeout=0.5)
+            time.sleep(0.1)
+            
+            # Clear buffers
             ser.reset_input_buffer()
-            ser.write(b'AT\r\n')
-            time.sleep(0.5)
-            response = ser.read_all().decode('utf-8', errors='ignore')
+            ser.reset_output_buffer()
+            
+            # Send AT command with timeout
+            try:
+                ser.write(b'AT\r\n')
+                ser.flush()
+            except:
+                ser.close()
+                print("✗ Write timeout")
+                continue
+            
+            # Wait for response with timeout
+            start = time.time()
+            response = ''
+            while time.time() - start < 1.0:
+                if ser.in_waiting:
+                    response += ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
+                    if 'OK' in response:
+                        break
+                time.sleep(0.05)
+            
             ser.close()
             
             if 'OK' in response:
-                print(f"✓ FOUND!")
-                return port
+                print("✓ FOUND!")
+                found_ports.append(port)
             else:
-                print(f"✗ No AT response")
+                print("✗ No response")
         except PermissionError:
-            print(f"✗ Permission denied")
+            print("✗ Permission denied")
             permission_error_ports.append(port)
         except Exception as e:
             print(f"✗ {type(e).__name__}")
+    
+    if found_ports:
+        print(f"\n✓ Found {len(found_ports)} responsive port(s)")
+        return found_ports[0]
     
     print("\n❌ SIM7600E not found on any port!")
     
