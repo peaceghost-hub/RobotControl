@@ -258,10 +258,6 @@ class RobotController:
             status_thread.start()
             self.threads.append(status_thread)
             
-            # Start waypoint check loop
-            waypoint_thread = Thread(target=self.waypoint_loop, daemon=True)
-            waypoint_thread.start()
-            self.threads.append(waypoint_thread)
             # Start command polling loop
             command_thread = Thread(target=self.command_loop, daemon=True)
             command_thread.start()
