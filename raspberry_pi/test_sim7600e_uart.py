@@ -14,6 +14,7 @@ import serial
 import time
 import sys
 import os
+from typing import List, Optional
 
 
 DEFAULT_PORTS = ["/dev/serial0", "/dev/ttyAMA0", "/dev/ttyS0"]
@@ -71,7 +72,7 @@ def _open_serial(port: str, baudrate: int) -> serial.Serial:
         exclusive=True,
     )
 
-def test_basic_connection(ports: list[str], baudrate: int) -> serial.Serial | None:
+def test_basic_connection(ports: List[str], baudrate: int) -> Optional[serial.Serial]:
     """Test basic AT communication on one or more ports."""
     print("\n=== Testing UART Connection ===")
 
