@@ -47,6 +47,8 @@ class MQSensors:
                     'baseline': info.get('baseline', 0.0)
                 }
                 logger.info("MQ sensor enabled: %s on channel %s", name, info.get('channel', 0))
+            else:
+                logger.warning("MQ sensor %s NOT enabled (enabled=%s)", name, info.get('enabled', 'missing'))
 
     def _read_adc(self, channel: int) -> int:
         if self.ads is None:
@@ -74,9 +76,12 @@ class MQSensors:
 
     def read_all(self) -> Dict[str, float]:
         readings = {}
+        logger.debug("Reading %d MQ sensors: %s", len(self.sensors), list(self.sensors.keys()))
         for name in self.sensors.keys():
             try:
-                readings[name] = self.read_sensor(name)
+                value = self.read_sensor(name)
+                readings[name] = value
+                logger.debug("  %s = %s", name, value)
             except Exception as exc:
                 logger.error("Error reading MQ sensor %s: %s", name, exc)
                 readings[name] = None
