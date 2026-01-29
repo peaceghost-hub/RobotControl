@@ -393,6 +393,10 @@ class SIM7600EGPS:
         if not self.connected:
             return False
         
+        # Check if network is open
+        if not self._send_at_command('AT+NETOPEN?', '+NETOPEN: 0'):
+            return False
+        
         # Check network registration
         response = ''
         try:
@@ -415,9 +419,18 @@ class SIM7600EGPS:
                     parts = line.split(':')[1].split(',')
                     if len(parts) >= 2:
                         stat_str = parts[1].strip()
+                        # Remove non-numeric characters
+                        stat_str = ''.join(c for c in stat_str if c.isdigit() or c == '-')
                         try:
                             stat = int(stat_str)
                             return stat in [1, 5]  # 1=registered home, 5=registered roaming
+                        except ValueError:
+                            logger.error(f"Invalid stat value: '{stat_str}' from response: {response}")
+                            return False
+        except Exception as e:
+            logger.error(f"Error checking internet: {e}")
+        
+        return False
                         except ValueError:
                             logger.warning(f"Failed to parse CREG stat: '{stat_str}'")
                             return False

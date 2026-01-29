@@ -188,12 +188,19 @@ def test_internet(ser):
     resp = send_at(ser, 'AT+CPING="8.8.8.8",1,4,64,1000,10000', 15)
     print(resp)
     
-    if '+CPING:' in resp and 'reachable' in resp.lower():
-        print("✓ Internet connectivity confirmed!")
-        return True
-    else:
-        print("✗ Ping failed - check APN settings")
-        return False
+    # Check for successful ping responses
+    if '+CPING:' in resp:
+        lines = resp.split('\n')
+        ping_count = 0
+        for line in lines:
+            if line.strip().startswith('+CPING:') and ',8.8.8.8,' in line:
+                ping_count += 1
+        if ping_count > 0:
+            print("✓ Internet connectivity confirmed!")
+            return True
+    
+    print("✗ Ping failed - check APN settings")
+    return False
 
 def main():
     print("SIM7600E Connectivity Test")
