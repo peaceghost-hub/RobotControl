@@ -337,10 +337,10 @@ class RobotController:
                 
                 if success:
                     temp = sensor_data.get('temperature', 0)
-                    if temp is not None:
-                        logger.debug(f"Sensor data sent: Temp={temp:.1f}°C")
-                    else:
-                        logger.debug("Sensor data sent (no readings)")
+                    mq2 = sensor_data.get('mq2', 0)
+                    mq7 = sensor_data.get('mq7', 0)
+                    mq135 = sensor_data.get('mq135', 0)
+                    logger.info(f"Sensor data sent - Temp: {temp:.1f}°C, MQ2: {mq2}, MQ7: {mq7}, MQ135: {mq135}")
                 else:
                     logger.warning("Failed to send sensor data")
 
