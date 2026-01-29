@@ -148,9 +148,19 @@ void setup() {
 
   GPS_SERIAL.begin(GPS_BAUD);
 
+  // Initialize I2C as SLAVE first (address 0x08)
+  // This Arduino acts as BOTH:
+  //   - I2C SLAVE to Raspberry Pi (0x08)
+  //   - I2C MASTER to compass HMC5883L (0x1E)
+  // Wire library supports this dual role on Arduino Mega
   Wire.begin(I2C_ADDRESS);
   Wire.onReceive(onI2CReceive);
   Wire.onRequest(onI2CRequest);
+  
+  DEBUG_SERIAL.println(F("# I2C initialized:"));
+  DEBUG_SERIAL.print(F("#   - Slave to Pi at 0x"));
+  DEBUG_SERIAL.println(I2C_ADDRESS, HEX);
+  DEBUG_SERIAL.println(F("#   - Master to compass HMC5883L"));
 
   if (gps.begin(GPS_SERIAL)) {
     DEBUG_SERIAL.println(F("# GPS initialized"));
@@ -159,8 +169,10 @@ void setup() {
     beepPattern(3, 200, 100);  // Triple beep warning
   }
 
+  // Initialize compass (requires I2C master transactions)
+  // This is safe after Wire.begin(I2C_ADDRESS) - Arduino can be both slave and master
   if (compass.begin()) {
-    DEBUG_SERIAL.println(F("# Compass initialized"));
+    DEBUG_SERIAL.println(F("# Compass initialized at 0x1E"));
   } else {
     DEBUG_SERIAL.println(F("# WARNING: Compass init failed - navigation accuracy reduced"));
     beepPattern(3, 200, 100);  // Triple beep warning
@@ -192,22 +204,24 @@ void setup() {
   delay(3000);
   digitalWrite(BUZZER_PIN, LOW);
 
-  // Perform an I2C bus scan (Arduino side) to verify devices (e.g., compass at 0x1E)
-  DEBUG_SERIAL.println(F("# I2C scan (Arduino bus on SDA=20, SCL=21):"));
-  for (uint8_t address = 1; address < 127; address++) {
-    Wire.beginTransmission(address);
-    uint8_t error = Wire.endTransmission();
-    if (error == 0) {
-      DEBUG_SERIAL.print(F(" - Found I2C device at 0x"));
-      DEBUG_SERIAL.println(address, HEX);
-    }
-  }
+  // NOTE: I2C bus scan disabled - Arduino is configured as I2C SLAVE (0x08)
+  // Scanning the bus would switch to master mode and break slave functionality
+  // To scan I2C devices, run scan from Raspberry Pi: sudo i2cdetect -y 1
+  
+  DEBUG_SERIAL.println(F("# I2C slave mode active at address 0x08"));
+  DEBUG_SERIAL.println(F("# To verify I2C devices, run 'sudo i2cdetect -y 1' from Pi"));
 }
 
 // ========================== MAIN LOOP ======================================
 void loop() {
+  // Update all sensors and communication
+  // Note: compass.update() performs I2C master transactions to read HMC5883L
+  // This is safe because:
+  //   1. Arduino Wire library supports dual master/slave mode
+  //   2. These transactions happen in main loop, NOT in I2C slave callbacks
+  //   3. Slave callbacks (onI2CReceive/onI2CRequest) don't perform master transactions
   gps.update();
-  compass.update();
+  compass.update();          // I2C master read from compass (0x1E)
   obstacleAvoid.update();
   wireless.update();
 
@@ -296,6 +310,9 @@ void loop() {
 }
 
 // ========================== I2C HANDLING ===================================
+// IMPORTANT: These callbacks execute when Pi reads/writes to Arduino (slave mode)
+// DO NOT perform I2C master transactions (compass reads) inside these callbacks
+// All compass communication happens in main loop only
 void onI2CReceive(int bytes) {
   if (bytes <= 0) {
     return;
