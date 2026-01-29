@@ -256,12 +256,32 @@ function handleSensorUpdate(data) {
     // Update sensor displays
     updateElement('temperature', data.temperature ? `${data.temperature.toFixed(1)} °C` : '--');
     updateElement('humidity', data.humidity ? `${data.humidity.toFixed(1)} %` : '--');
-    updateElement('mq2', data.mq2 || '--');
-    updateElement('mq135', data.mq135 || '--');
-    updateElement('mq7', data.mq7 || '--');
     
-    // Update chart
-    updateSensorChart(data);
+    // Update MQ sensors with raw and PPM values
+    // MQ-2 (Smoke/LPG)
+    updateElement('mq2', data.mq2_raw || data.mq2 || '--');
+    updateElement('mq2-ppm', data.mq2_smoke_ppm ? `${data.mq2_smoke_ppm.toFixed(1)} ppm` : '-- ppm');
+    updateElement('mq2-raw', data.mq2_raw ? `(Raw: ${data.mq2_raw})` : '(Raw: --)');
+    
+    // MQ-135 (CO2)
+    updateElement('mq135', data.mq135_raw || data.mq135 || '--');
+    updateElement('mq135-ppm', data.mq135_co2_ppm ? `${data.mq135_co2_ppm.toFixed(1)} ppm` : '-- ppm');
+    updateElement('mq135-raw', data.mq135_raw ? `(Raw: ${data.mq135_raw})` : '(Raw: --)');
+    
+    // MQ-7 (CO)
+    updateElement('mq7', data.mq7_raw || data.mq7 || '--');
+    updateElement('mq7-ppm', data.mq7_co_ppm ? `${data.mq7_co_ppm.toFixed(1)} ppm` : '-- ppm');
+    updateElement('mq7-raw', data.mq7_raw ? `(Raw: ${data.mq7_raw})` : '(Raw: --)');
+    
+    // Update chart (use raw values for consistency)
+    const chartData = {
+        temperature: data.temperature,
+        humidity: data.humidity,
+        mq2: data.mq2_raw || data.mq2,
+        mq135: data.mq135_raw || data.mq135,
+        mq7: data.mq7_raw || data.mq7
+    };
+    updateSensorChart(chartData);
     
     // Check for alerts
     checkSensorAlerts(data);

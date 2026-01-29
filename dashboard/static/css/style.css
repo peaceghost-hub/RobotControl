@@ -332,6 +332,22 @@ body {
     font-weight: 700;
 }
 
+.sensor-ppm {
+    display: block;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--primary-color);
+    margin-top: 4px;
+}
+
+.sensor-raw {
+    display: block;
+    font-size: 11px;
+    opacity: 0.6;
+    margin-top: 2px;
+    font-family: 'Courier New', monospace;
+}
+
 .chart-container {
     height: 300px;
     margin-top: 20px;

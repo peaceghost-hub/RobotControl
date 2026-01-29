@@ -20,6 +20,12 @@ from threading import Lock
 import base64
 from typing import Optional
 import time
+import sys
+import os
+
+# Add parent directory to path for utils import
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from raspberry_pi.utils.gas_calibration import GasCalibration
 
 try:
     from flask import Flask, render_template, request, jsonify, Response, stream_with_context
@@ -440,25 +446,40 @@ def receive_sensor_data():
         data = request.get_json()
         logger.info(f"Received sensor data: {data}")
         
-        # Store in database
+        # Calculate PPM concentrations from raw ADC values
+        mq2_raw = data.get('mq2', 0) or 0
+        mq135_raw = data.get('mq135', 0) or 0
+        mq7_raw = data.get('mq7', 0) or 0
+        
+        gas_data = GasCalibration.get_all_concentrations(mq2_raw, mq135_raw, mq7_raw)
+        
+        # Merge raw data with calculated PPM values
+        enhanced_data = {
+            **data,  # Original data (raw values for cloud upload)
+            **gas_data  # Calculated PPM and voltage values
+        }
+        
+        # Store in database (raw values only)
         sensor_reading = SensorReading(
             timestamp=datetime.fromisoformat(data.get('timestamp', datetime.now().isoformat())),
             temperature=data.get('temperature'),
             humidity=data.get('humidity'),
-            mq2=data.get('mq2'),
-            mq135=data.get('mq135'),
-            mq7=data.get('mq7'),
+            mq2=mq2_raw,
+            mq135=mq135_raw,
+            mq7=mq7_raw,
             device_id=data.get('device_id', 'robot_01')
         )
         db.session.add(sensor_reading)
         db.session.commit()
         
-        # Update latest data
+        # Update latest data with enhanced values (raw + PPM)
         with thread_lock:
-            latest_data['sensors'] = data
+            latest_data['sensors'] = enhanced_data
         
-        # Broadcast to connected clients via WebSocket
-        socketio.emit('sensor_update', data, namespace='/realtime')
+        # Broadcast enhanced data to connected clients via WebSocket
+        socketio.emit('sensor_update', enhanced_data, namespace='/realtime')
+        
+        logger.debug(f"PPM values - Smoke: {gas_data['mq2_smoke_ppm']}, CO2: {gas_data['mq135_co2_ppm']}, CO: {gas_data['mq7_co_ppm']}")
         
         return jsonify({'status': 'success', 'message': 'Sensor data received'}), 200
         
