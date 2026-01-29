@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Setup PPP over UART for SIM7600E on Raspberry Pi
-# This script installs ppp and creates chat scripts to bring up a PPP link via /dev/ttyS0 or /dev/ttyUSB0.
+# Setup PPP for SIM7600E on Raspberry Pi (USB or UART)
+# This script installs ppp and creates chat scripts to bring up a PPP link.
 
 set -euo pipefail
 
@@ -12,7 +12,7 @@ sudo apt-get update && sudo apt-get install -y ppp
 
 sudo mkdir -p /etc/ppp/peers
 sudo tee /etc/ppp/peers/sim7600e >/dev/null <<EOF
-/devices ${DEVICE}
+${DEVICE}
 115200
 connect "/usr/sbin/chat -v -f /etc/ppp/chat-sim7600e"
 noauth
