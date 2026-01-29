@@ -149,26 +149,34 @@ def setup_data_connection(ser, apn):
         print("   ✓ GPRS attached")
     else:
         print(f"   ✗ Failed: {resp}")
+        return False
+    
+    # Activate PDP context
+    print("3. Activating PDP context...")
+    resp = send_at(ser, 'AT+CGACT=1,1', 5)
+    if 'OK' in resp:
+        print("   ✓ PDP activated")
+    else:
+        print(f"   ✗ Failed: {resp}")
+        return False
     
     # Check network open status
     resp = send_at(ser, 'AT+NETOPEN?', 1)
-    if 'Network opened' in resp:
-        print("3. Network already open")
+    if '+NETOPEN: 0' in resp:
+        print("4. Network already open")
         return True
     
     # Open network
-    print("3. Opening network connection...")
+    print("4. Opening network connection...")
     resp = send_at(ser, 'AT+NETOPEN', 15)
     if 'OK' in resp or '+NETOPEN: 0' in resp:
         print("   ✓ Network opened")
         return True
+    elif 'already opened' in resp.lower() or 'already open' in resp.lower():
+        print("   ✓ Network was already open")
+        return True
     else:
         print(f"   ⚠ Response: {resp}")
-        # Check if already open
-        resp = send_at(ser, 'AT+NETOPEN?', 1)
-        if 'opened' in resp:
-            print("   ✓ Network is open")
-            return True
         return False
 
 def test_internet(ser):

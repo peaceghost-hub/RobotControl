@@ -202,6 +202,10 @@ class SIM7600EGPS:
         # Attach to packet service
         self._send_at_command('AT+CGATT=1', 'OK', timeout=10)
 
+        # Activate PDP context
+        if not self._send_at_command('AT+CGACT=1,1', 'OK', timeout=10):
+            return False
+
         # Open network (SIMCom stack)
         # NETOPEN returns OK and then +NETOPEN: 0 on success.
         if not self._send_at_command('AT+NETOPEN', 'OK', timeout=10):
@@ -400,20 +404,23 @@ class SIM7600EGPS:
                 if self.serial.in_waiting:
                     response += self.serial.read(self.serial.in_waiting).decode(errors='ignore')
                     if 'OK' in response:
-                        # Parse: +CREG: <n>,<stat> where stat=1 (registered) or 5 (roaming)
-                        if '+CREG:' in response:
-                            creg_part = response.split('+CREG:')[1].split('\r')[0]
-                            parts = creg_part.split(',')
-                            if len(parts) >= 2:
-                                stat_str = parts[1].strip()
-                                try:
-                                    stat = int(stat_str)
-                                    return stat in [1, 5]
-                                except ValueError:
-                                    logger.warning(f"Failed to parse CREG stat: '{stat_str}'")
-                        return False
+                        break
                 time.sleep(0.05)
             
+            # Parse response: look for +CREG: line
+            for line in response.split('\n'):
+                line = line.strip()
+                if '+CREG:' in line:
+                    # Format: +CREG: <n>,<stat>[,<lac>,<ci>,<AcT>]
+                    parts = line.split(':')[1].split(',')
+                    if len(parts) >= 2:
+                        stat_str = parts[1].strip()
+                        try:
+                            stat = int(stat_str)
+                            return stat in [1, 5]  # 1=registered home, 5=registered roaming
+                        except ValueError:
+                            logger.warning(f"Failed to parse CREG stat: '{stat_str}'")
+                            return False
             return False
         except Exception as e:
             logger.error(f"Internet check error: {e}")
