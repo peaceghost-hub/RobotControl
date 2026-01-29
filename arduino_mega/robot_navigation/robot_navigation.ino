@@ -126,6 +126,8 @@ uint8_t readBatteryPercent();
 uint8_t readSignalQuality();
 
 void recoverI2CBus();
+bool isI2CBusStuck();
+void i2cReinitSlave();
 
 // ========================== LEGACY FUNCTION WRAPPERS ========================
 // For backward compatibility, maintain old function names that call new ones
@@ -166,6 +168,26 @@ void recoverI2CBus() {
   delayMicroseconds(5);
 }
 
+bool isI2CBusStuck() {
+  // Check hardware I2C pins on Mega: SDA=20, SCL=21
+  pinMode(SDA, INPUT_PULLUP);
+  pinMode(SCL, INPUT_PULLUP);
+  // Bus is considered stuck if either SDA or SCL held LOW
+  return (digitalRead(SDA) == LOW) || (digitalRead(SCL) == LOW);
+}
+
+void i2cReinitSlave() {
+  // Fully reset Wire/TWI and re-enter slave mode
+  Wire.end();
+  recoverI2CBus();
+  Wire.begin(I2C_ADDRESS);
+  Wire.onReceive(onI2CReceive);
+  Wire.onRequest(onI2CRequest);
+  // Debug note
+  DEBUG_SERIAL.println(F("# I2C watchdog: bus recovered and slave reinitialized"));
+}
+
+
 // ========================== SETUP ==========================================
 void setup() {
   pinMode(BUZZER_PIN, OUTPUT);
@@ -193,19 +215,10 @@ void setup() {
   // Recover I2C bus before initializing Wire (in case SDA/SCL are stuck)
   recoverI2CBus();
 
-  // Initialize I2C as SLAVE first (address 0x08)
-  // This Arduino acts as BOTH:
-  //   - I2C SLAVE to Raspberry Pi (0x08)
-  //   - I2C MASTER to compass HMC5883L (0x1E)
-  // Wire library supports this dual role on Arduino Mega
+  // Initialize I2C as SLAVE to Raspberry Pi
   Wire.begin(I2C_ADDRESS);
   Wire.onReceive(onI2CReceive);
   Wire.onRequest(onI2CRequest);
-  
-  DEBUG_SERIAL.println(F("# I2C initialized:"));
-  DEBUG_SERIAL.print(F("#   - Slave to Pi at 0x"));
-  DEBUG_SERIAL.println(I2C_ADDRESS, HEX);
-  DEBUG_SERIAL.println(F("#   - Master to compass (HMC5883L or QMC5883L)"));
 
   if (gps.begin(GPS_SERIAL)) {
     DEBUG_SERIAL.println(F("# GPS initialized"));
@@ -214,14 +227,21 @@ void setup() {
     beepPattern(3, 200, 100);  // Triple beep warning
   }
 
-  // Initialize compass (requires I2C master transactions)
-  // This is safe after Wire.begin(I2C_ADDRESS) - Arduino can be both slave and master
+  // Initialize compass (software I2C pins)
   if (compass.begin()) {
-    DEBUG_SERIAL.println(F("# Compass initialized"));
+    DEBUG_SERIAL.print(F("# Compass initialized: "));
+    DEBUG_SERIAL.print(compass.getTypeName());
+    DEBUG_SERIAL.print(F(" @ 0x"));
+    DEBUG_SERIAL.println(compass.getAddress(), HEX);
   } else {
     DEBUG_SERIAL.println(F("# WARNING: Compass init failed - navigation accuracy reduced"));
     beepPattern(3, 200, 100);  // Triple beep warning
   }
+
+  DEBUG_SERIAL.println(F("# I2C initialized:"));
+  DEBUG_SERIAL.print(F("#   - Slave to Pi at 0x"));
+  DEBUG_SERIAL.println(I2C_ADDRESS, HEX);
+  DEBUG_SERIAL.println(F("#   - Compass on software I2C pins"));
 
   motors.begin();
   obstacleAvoid.begin();
@@ -236,6 +256,9 @@ void setup() {
   if (wireless.begin()) {
     DEBUG_SERIAL.print(F("# Wireless initialized: "));
     DEBUG_SERIAL.println(wireless.getProtocolName());
+    // Send explicit handshake/hello to speed up connection indication
+    sendWirelessReady();
+    wireless.sendString("HELLO,MEGA_ROBOT");
   } else {
     DEBUG_SERIAL.println(F("# WARNING: Wireless init failed - I2C manual control only"));
     beepPattern(3, 200, 100);
@@ -244,10 +267,10 @@ void setup() {
   DEBUG_SERIAL.println(F("# Note: System continues with any component failures - graceful degradation enabled"));
   DEBUG_SERIAL.println(F("# Awaiting I2C and wireless handshakes..."));
 
-  // Continuous startup beep for 3 seconds as requested
-  digitalWrite(BUZZER_PIN, HIGH);
+  // Continuous startup beep for 3 seconds (audible tone)
+  tone(BUZZER_PIN, 2000);
   delay(3000);
-  digitalWrite(BUZZER_PIN, LOW);
+  noTone(BUZZER_PIN);
 
   // NOTE: I2C bus scan disabled - Arduino is configured as I2C SLAVE (0x08)
   // Scanning the bus would switch to master mode and break slave functionality
@@ -296,8 +319,17 @@ void loop() {
   lastI2C = lastI2CActivityMs;
   interrupts();
 
+  // I2C bus watchdog: if bus appears stuck, reinitialize slave
+  static unsigned long lastI2CWatchdog = 0;
+  if (millis() - lastI2CWatchdog > 100) {
+    lastI2CWatchdog = millis();
+    if (isI2CBusStuck() && !i2cBusy) {
+      i2cReinitSlave();
+    }
+  }
+
   if (!i2cBusy && (millis() - lastI2C) > 5) {
-    compass.update();          // I2C master read from compass (0x1E / 0x2C)
+    compass.update();          // Software I2C read from compass
   }
   obstacleAvoid.update();
   wireless.update();
@@ -377,6 +409,22 @@ void loop() {
     DEBUG_SERIAL.println(wireless.isConnected() ? F("OK") : F("OFFLINE"));
   }
 
+  // Wireless connection state change log
+  static bool lastWirelessConnected = false;
+  bool nowConnected = wireless.isConnected();
+  if (nowConnected != lastWirelessConnected) {
+    DEBUG_SERIAL.print(F("# Wireless ("));
+    DEBUG_SERIAL.print(wireless.getProtocolName());
+    DEBUG_SERIAL.print(F(") "));
+    DEBUG_SERIAL.println(nowConnected ? F("CONNECTED") : F("DISCONNECTED"));
+    if (nowConnected) {
+      // On connect, emit handshake and hello so remotes see activity immediately
+      sendWirelessReady();
+      wireless.sendString("HELLO,MEGA_ROBOT");
+    }
+    lastWirelessConnected = nowConnected;
+  }
+
   if (manualOverride && (millis() - lastManualCommand > MANUAL_TIMEOUT)) {
     exitManualMode(true);
   }
@@ -421,11 +469,23 @@ void onI2CReceive(int bytes) {
 void onI2CRequest() {
   i2cCallbackActive = true;
   lastI2CActivityMs = millis();
-  Wire.write(responseBuffer, responseLength);
+  // Guard against invalid buffer/length
+  if (responseLength > 0 && responseLength <= sizeof(responseBuffer)) {
+    Wire.write(responseBuffer, responseLength);
+  } else {
+    // Send a single 0 byte to avoid bus hang if length invalid
+    uint8_t zero = 0;
+    Wire.write(&zero, 1);
+  }
   i2cCallbackActive = false;
 }
 
 void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
+  // Debug: log incoming command and length
+  DEBUG_SERIAL.print(F("# I2C cmd: 0x"));
+  DEBUG_SERIAL.print(command, HEX);
+  DEBUG_SERIAL.print(F(" len="));
+  DEBUG_SERIAL.println(length);
   switch (command) {
     case CMD_PING:
       markI2CHandshake();
@@ -476,10 +536,22 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
       break;
 
     case CMD_WAYPOINT_PACKET:
-      if (length >= sizeof(WaypointPacket)) {
+      // Avoid struct padding issues: parse fields explicitly (LE)
+      if (length >= 11) {
         WaypointPacket packet;
-        memcpy(&packet, payload, sizeof(WaypointPacket));
+        packet.id = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
+        packet.seq = payload[2];
+        memcpy(&packet.latitude, &payload[3], sizeof(float));
+        memcpy(&packet.longitude, &payload[7], sizeof(float));
         storePendingWaypoint(packet);
+        DEBUG_SERIAL.print(F("# Waypoint recv id="));
+        DEBUG_SERIAL.print(packet.id);
+        DEBUG_SERIAL.print(F(" seq="));
+        DEBUG_SERIAL.print(packet.seq);
+        DEBUG_SERIAL.print(F(" lat="));
+        DEBUG_SERIAL.print(packet.latitude, 6);
+        DEBUG_SERIAL.print(F(" lon="));
+        DEBUG_SERIAL.println(packet.longitude, 6);
         prepareAck();
       } else {
         prepareError(ERR_PACKET_SIZE);
@@ -503,15 +575,18 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
       break;
 
     case CMD_REQUEST_GPS:
+      DEBUG_SERIAL.println(F("# I2C: GPS request"));
       prepareGpsResponse();
       break;
 
     case CMD_REQUEST_STATUS:
+      DEBUG_SERIAL.println(F("# I2C: STATUS request"));
       prepareStatusResponse();
       break;
 
     case CMD_HEARTBEAT:
       lastHeartbeat = millis();
+      DEBUG_SERIAL.println(F("# I2C: HEARTBEAT"));
       prepareAck();
       break;
 
@@ -528,6 +603,14 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
         
         // Update navigation with Pi's GPS data
         navigation.updateGpsData(lat, lon, speed, heading);
+        DEBUG_SERIAL.print(F("# I2C: Pi GPS lat="));
+        DEBUG_SERIAL.print(lat, 6);
+        DEBUG_SERIAL.print(F(" lon="));
+        DEBUG_SERIAL.print(lon, 6);
+        DEBUG_SERIAL.print(F(" spd="));
+        DEBUG_SERIAL.print(speed, 2);
+        DEBUG_SERIAL.print(F(" hdg="));
+        DEBUG_SERIAL.println(heading, 1);
         
         // If compass is not responding, fallback to GPS-only navigation
         if (!compass.isValid()) {
@@ -876,6 +959,8 @@ void sendWirelessReady() {
   msg.type = MSG_TYPE_HANDSHAKE;
   msg.length = 0;
   wireless.send(msg);
+  // Also emit a human-readable hello string for transparent receivers
+  wireless.sendString("HELLO,MEGA_ROBOT");
   
   markWirelessHandshake();
 }
@@ -971,9 +1056,9 @@ uint8_t readSignalQuality() {
 
 void beepPattern(uint8_t pulses, uint16_t onMs, uint16_t offMs) {
   for (uint8_t i = 0; i < pulses; i++) {
-    digitalWrite(BUZZER_PIN, HIGH);
+    tone(BUZZER_PIN, 2000);
     delay(onMs);
-    digitalWrite(BUZZER_PIN, LOW);
+    noTone(BUZZER_PIN);
     if (i < pulses - 1) {
       delay(offMs);
     }

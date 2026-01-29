@@ -20,6 +20,8 @@ struct PendingWaypoint;
 #define DEBUG_SERIAL   Serial
 #define GPS_SERIAL     Serial1     // RX1 (19), TX1 (18)
 #define BUZZER_PIN     34
+// Audible tone frequency for passive buzzer (Hz)
+#define BUZZER_FREQ    2000
 
 // ==================== WIRELESS PROTOCOL SELECTION ====================
 // Uncomment ONE of these to select wireless protocol:
@@ -33,6 +35,12 @@ struct PendingWaypoint;
 const uint32_t DEBUG_BAUD = 115200;
 const uint32_t GPS_BAUD = 9600;
 const uint8_t I2C_ADDRESS = 0x08;
+
+// Compass I2C (software bus to avoid conflicts with Pi I2C)
+// Wire the compass to these pins instead of SDA/SCL (20/21)
+#define COMPASS_USE_SOFT_I2C 1
+#define COMPASS_SDA_PIN 40
+#define COMPASS_SCL_PIN 41
 
 // Wireless protocol serial port baud rates
 #ifdef WIRELESS_PROTOCOL_ZIGBEE

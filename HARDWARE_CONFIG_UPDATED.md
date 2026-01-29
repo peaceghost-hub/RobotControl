@@ -8,12 +8,13 @@
 - **Raspberry Pi GPIO 3 (SCL)** ↔ **Arduino Mega Pin 21 (SCL)** + **ADS1115 SCL**
 - **Pull-up resistors:** 4.7kΩ on both SDA and SCL lines to 3.3V
 - **Common Ground:** Pi GND ↔ Mega GND ↔ ADS1115 GND
+ - **Bus Separation:** Compass moved OFF the Pi I2C bus; connected to Mega via software I2C on pins 40 (SDA) and 41 (SCL)
 
 ### 2. Arduino Mega (I2C Address: 0x08)
 - **Function:** Navigation controller
 - **Features:**
-  - GPS waypoint navigation (NEO-6M)
-  - Compass heading (HMC5883L)
+    - GPS waypoint navigation (NEO-6M)
+    - Compass heading (QMC5883L/HMC5883L) via software I2C (Mega pins 40/41)
   - Motor control (L298N dual H-bridge)
   - Obstacle avoidance (HC-SR04 on servo)
   - Multi-protocol wireless (ZigBee/LoRa/BLE for manual override)
@@ -93,6 +94,7 @@ python3 raspberry_pi/main.py
 **Expected Output:**
 - ✓ I2C communication with Mega (address 0x08)
 - ✓ ADS1115 reading MQ sensors (address 0x48)
+- ✓ Compass isolated on Mega (software I2C pins 40/41)
 - ✓ DHT11 reading temperature & humidity
 - ✓ Sensor data uploading to dashboard API
 
@@ -124,4 +126,4 @@ The dashboard will show:
 - **Next:** Configure serial console settings and retest when needed
 
 ## ✅ System Ready!
-All I2C devices detected and configured. You can now start the robot controller!
+Pi I2C bus shows only 0x08 (Mega) and 0x48 (ADS1115). Compass is isolated on Mega’s software I2C. You can now start the robot controller!

@@ -335,14 +335,22 @@ HC-05 Module (on Serial3):
   Baud: 38400 (HC-05) or 9600 (HM-10)
 ```
 
-#### I2C Devices (Raspberry Pi Connection)
+#### I2C Devices and Bus Separation
 
 ```
-HMC5883L Compass + NEO-6M GPS (via Raspberry Pi I2C):
-  Arduino Mega → Raspberry Pi
-    Pin 20 (SDA) ──→ GPIO 2 (I2C SDA)
-    Pin 21 (SCL) ──→ GPIO 3 (I2C SCL)
-    GND ──────────→ GND
+Primary I2C (Raspberry Pi Bus 1):
+  Raspberry Pi ↔ Arduino Mega (SLAVE) ↔ ADS1115
+    Pi GPIO 2 (SDA)  ──→ Mega Pin 20 (SDA)
+    Pi GPIO 3 (SCL)  ──→ Mega Pin 21 (SCL)
+    ADS1115 SDA/SCL  ──→ Pi GPIO 2/3
+    Pull-ups: 4.7kΩ to 3.3V on SDA/SCL
+    Devices: 0x08 (Mega), 0x48 (ADS1115)
+
+Secondary I2C (Compass on Mega - Software I2C):
+  Compass (QMC5883L/HMC5883L) ↔ Arduino Mega (MASTER)
+    Compass SDA ──→ Mega Pin 40 (software SDA)
+    Compass SCL ──→ Mega Pin 41 (software SCL)
+    NOTE: Compass is NOT on the Raspberry Pi I2C bus.
 
 GPS Module (direct Serial1):
   NEO-6M → Arduino Mega Serial1
@@ -350,6 +358,11 @@ GPS Module (direct Serial1):
     RX → Pin 19 (Serial1 TX)
     Baud: 9600
 ```
+
+Why bus separation?
+- Prevents the Mega from ever performing master transactions on the Pi bus.
+- Eliminates the “ACK-all-addresses” failure mode when the bus gets stuck.
+- Keeps Pi bus stable with only 0x08 (Mega) and 0x48 (ADS1115) visible.
 
 ### 4. Software Configuration
 
@@ -364,6 +377,11 @@ Update `globals.h` to select your wireless protocol:
 // Obstacle detection thresholds
 #define OBSTACLE_THRESHOLD 20       // cm (HC-SR04)
 #define KY032_DETECTION_THRESHOLD 600  // ADC value (KY-032)
+
+// Compass bus (software I2C on Mega)
+#define COMPASS_USE_SOFT_I2C 1
+#define COMPASS_SDA_PIN 40
+#define COMPASS_SCL_PIN 41
 ```
 
 ### 5. Upload to Arduino Mega

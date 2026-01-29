@@ -150,7 +150,10 @@ class SIM7600EGPS:
             time.sleep(1)
 
             # Basic SIM readiness
-            self._send_at_command('AT+CPIN?', 'OK')
+            if not self._send_at_command('AT+CPIN?', 'READY'):
+                logger.warning("SIM card not ready or requires PIN")
+            else:
+                logger.info("SIM card ready")
 
             # Bring up data session if enabled
             if self.data_enabled:
@@ -206,9 +209,11 @@ class SIM7600EGPS:
             self._send_at_command('AT+NETCLOSE', 'OK', timeout=5)
             if not self._send_at_command('AT+NETOPEN', 'OK', timeout=10):
                 return False
+        
+        time.sleep(2)  # Allow network to stabilize
 
         # Query IP address
-        self._send_at_command('AT+IPADDR', 'OK', timeout=5)
+        self._send_at_command('AT+IPADDR', '+IPADDR:', timeout=5)
 
         # Final sanity: registration check used as "internet ready" proxy
         return self.check_internet()
@@ -258,7 +263,7 @@ class SIM7600EGPS:
         if not self._send_at_command('AT+CGNSPWR=1', 'OK'):
             return False
         
-        time.sleep(2)  # Allow GPS to initialize
+        time.sleep(3)  # Allow GPS to initialize
         
         # Enable GNSS positioning
         if not self._send_at_command('AT+CGPS=1', 'OK'):
@@ -397,9 +402,16 @@ class SIM7600EGPS:
                     if 'OK' in response:
                         # Parse: +CREG: <n>,<stat> where stat=1 (registered) or 5 (roaming)
                         if '+CREG:' in response:
-                            parts = response.split('+CREG:')[1].split(',')
-                            stat = int(parts[1].strip())
-                            return stat in [1, 5]
+                            creg_part = response.split('+CREG:')[1].split('\r')[0]
+                            parts = creg_part.split(',')
+                            if len(parts) >= 2:
+                                stat_str = parts[1].strip()
+                                try:
+                                    stat = int(stat_str)
+                                    return stat in [1, 5]
+                                except ValueError:
+                                    logger.warning(f"Failed to parse CREG stat: '{stat_str}'")
+                        return False
                 time.sleep(0.05)
             
             return False

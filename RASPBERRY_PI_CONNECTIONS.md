@@ -41,6 +41,8 @@ This document provides the complete pin connection reference for your Raspberry 
 | **ADS1115 ADC** | Pin 2 (5V) | Pin 6 (GND) | Pin 3 (GPIO 2) | Pin 5 (GPIO 3) | 0x48 | ADDR pin to GND |
 | **Arduino Mega** | - | Common GND | Pin 3 (GPIO 2) | Pin 5 (GPIO 3) | 0x08 | I2C slave on Mega SDA/SCL (20/21) |
 
+Note: Compass (QMC5883L/HMC5883L) is isolated from the Pi I2C bus and connected to Mega via software I2C on pins 40 (SDA) and 41 (SCL).
+
 ### Digital Sensors
 
 | Sensor | VCC | GND | Data Pin | GPIO | Pin # | Notes |
