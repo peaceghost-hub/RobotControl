@@ -67,6 +67,10 @@ bool i2cHandshakeComplete = false;
 bool wirelessHandshakeComplete = false;
 bool lineFollowEnabled = false;
 
+// Track I2C activity to avoid master transactions during slave callbacks
+volatile bool i2cCallbackActive = false;
+volatile unsigned long lastI2CActivityMs = 0;
+
 unsigned long lastStatusUpdate = 0;
 unsigned long lastWirelessGps = 0;
 unsigned long lastManualCommand = 0;
@@ -160,7 +164,7 @@ void setup() {
   DEBUG_SERIAL.println(F("# I2C initialized:"));
   DEBUG_SERIAL.print(F("#   - Slave to Pi at 0x"));
   DEBUG_SERIAL.println(I2C_ADDRESS, HEX);
-  DEBUG_SERIAL.println(F("#   - Master to compass HMC5883L"));
+  DEBUG_SERIAL.println(F("#   - Master to compass (HMC5883L or QMC5883L)"));
 
   if (gps.begin(GPS_SERIAL)) {
     DEBUG_SERIAL.println(F("# GPS initialized"));
@@ -172,7 +176,7 @@ void setup() {
   // Initialize compass (requires I2C master transactions)
   // This is safe after Wire.begin(I2C_ADDRESS) - Arduino can be both slave and master
   if (compass.begin()) {
-    DEBUG_SERIAL.println(F("# Compass initialized at 0x1E"));
+    DEBUG_SERIAL.println(F("# Compass initialized"));
   } else {
     DEBUG_SERIAL.println(F("# WARNING: Compass init failed - navigation accuracy reduced"));
     beepPattern(3, 200, 100);  // Triple beep warning
@@ -221,7 +225,18 @@ void loop() {
   //   2. These transactions happen in main loop, NOT in I2C slave callbacks
   //   3. Slave callbacks (onI2CReceive/onI2CRequest) don't perform master transactions
   gps.update();
-  compass.update();          // I2C master read from compass (0x1E)
+
+  // Avoid I2C master transactions if Pi just accessed the slave interface
+  bool i2cBusy = false;
+  unsigned long lastI2C = 0;
+  noInterrupts();
+  i2cBusy = i2cCallbackActive;
+  lastI2C = lastI2CActivityMs;
+  interrupts();
+
+  if (!i2cBusy && (millis() - lastI2C) > 5) {
+    compass.update();          // I2C master read from compass (0x1E / 0x2C)
+  }
   obstacleAvoid.update();
   wireless.update();
 
@@ -314,7 +329,10 @@ void loop() {
 // DO NOT perform I2C master transactions (compass reads) inside these callbacks
 // All compass communication happens in main loop only
 void onI2CReceive(int bytes) {
+  i2cCallbackActive = true;
+  lastI2CActivityMs = millis();
   if (bytes <= 0) {
+    i2cCallbackActive = false;
     return;
   }
 
@@ -329,10 +347,14 @@ void onI2CReceive(int bytes) {
   }
 
   handleI2CCommand(command, payload, length);
+  i2cCallbackActive = false;
 }
 
 void onI2CRequest() {
+  i2cCallbackActive = true;
+  lastI2CActivityMs = millis();
   Wire.write(responseBuffer, responseLength);
+  i2cCallbackActive = false;
 }
 
 void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {

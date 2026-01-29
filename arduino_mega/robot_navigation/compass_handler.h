@@ -27,6 +27,18 @@ public:
     void calibrate();
 
 private:
+    enum CompassType {
+        COMPASS_NONE,
+        COMPASS_HMC5883L,
+        COMPASS_QMC5883L
+    };
+
+    bool beginHmc();
+    bool beginQmc(uint8_t address);
+    bool readQmcRaw(int16_t& x, int16_t& y, int16_t& z);
+
+    CompassType compassType;
+    uint8_t qmcAddress;
     Adafruit_HMC5883_Unified compass;
     sensors_event_t event;
     float heading;
