@@ -160,9 +160,9 @@ def test_all_channels(address):
             
             # Map to expected sensors from config.json
             sensor_map = {
-                0: "MQ-135 (Air Quality)",
-                1: "MQ-7 (CO)",
-                2: "Reserved/Unused",
+                0: "MQ-2 (Smoke/LPG)",
+                1: "MQ-135 (Air Quality)",
+                2: "MQ-7 (CO)",
                 3: "Reserved/Unused"
             }
             
@@ -188,9 +188,9 @@ SDA                 →   Pin 3 (GPIO 2, SDA)
 ADDR                →   GND (for address 0x48)
 
 Analog Inputs (from config.json):
-A0                  ←   MQ-135 AOUT (Air Quality)
-A1                  ←   MQ-7 AOUT (Carbon Monoxide)
-A2                  ←   Reserved
+A0                  ←   MQ-2 AOUT (Smoke/LPG)
+A1                  ←   MQ-135 AOUT (Air Quality)
+A2                  ←   MQ-7 AOUT (Carbon Monoxide)
 A3                  ←   Reserved
 
 Notes:
