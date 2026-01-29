@@ -431,13 +431,6 @@ class SIM7600EGPS:
             logger.error(f"Error checking internet: {e}")
         
         return False
-                        except ValueError:
-                            logger.warning(f"Failed to parse CREG stat: '{stat_str}'")
-                            return False
-            return False
-        except Exception as e:
-            logger.error(f"Internet check error: {e}")
-            return False
     
     def get_signal_strength(self) -> int:
         """Get signal strength in dBm (-100 to -30 typical range)"""
