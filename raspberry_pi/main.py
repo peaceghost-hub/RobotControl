@@ -328,7 +328,7 @@ class RobotController:
                 sensor_data['device_id'] = self.device_id
                 
                 # Replace None values with 0 for numeric fields
-                for key in ['temperature', 'humidity', 'mq7', 'mq135']:
+                for key in ['temperature', 'humidity', 'mq2', 'mq7', 'mq135']:
                     if sensor_data.get(key) is None:
                         sensor_data[key] = 0
                 

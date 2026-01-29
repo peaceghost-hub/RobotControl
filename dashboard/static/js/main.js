@@ -411,10 +411,24 @@ function initCharts() {
                     tension: 0.4
                 },
                 {
+                    label: 'MQ-2 (Smoke/LPG)',
+                    data: [],
+                    borderColor: 'rgb(251, 191, 36)',
+                    backgroundColor: 'rgba(251, 191, 36, 0.1)',
+                    tension: 0.4
+                },
+                {
                     label: 'MQ-135 (CO2)',
                     data: [],
                     borderColor: 'rgb(16, 185, 129)',
                     backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                    tension: 0.4
+                },
+                {
+                    label: 'MQ-7 (CO)',
+                    data: [],
+                    borderColor: 'rgb(168, 85, 247)',
+                    backgroundColor: 'rgba(168, 85, 247, 0.1)',
                     tension: 0.4
                 }
             ]
@@ -452,7 +466,9 @@ function updateSensorChart(data) {
     chart.data.labels.push(time);
     chart.data.datasets[0].data.push(data.temperature || 0);
     chart.data.datasets[1].data.push(data.humidity || 0);
-    chart.data.datasets[2].data.push(data.mq135 || 0);
+    chart.data.datasets[2].data.push(data.mq2 || 0);
+    chart.data.datasets[3].data.push(data.mq135 || 0);
+    chart.data.datasets[4].data.push(data.mq7 || 0);
     
     // Keep only last N points
     if (chart.data.labels.length > CONFIG.chartDataPoints) {
