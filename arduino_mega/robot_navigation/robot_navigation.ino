@@ -71,6 +71,12 @@ bool lineFollowEnabled = false;
 volatile bool i2cCallbackActive = false;
 volatile unsigned long lastI2CActivityMs = 0;
 
+// Defer I2C command handling out of interrupt context
+volatile bool i2cCommandPending = false;
+volatile uint8_t i2cPendingCommand = 0;
+volatile uint8_t i2cPendingLength = 0;
+uint8_t i2cPendingPayload[32];
+
 unsigned long lastStatusUpdate = 0;
 unsigned long lastWirelessGps = 0;
 unsigned long lastManualCommand = 0;
@@ -119,6 +125,8 @@ void checkReadyTone();
 uint8_t readBatteryPercent();
 uint8_t readSignalQuality();
 
+void recoverI2CBus();
+
 // ========================== LEGACY FUNCTION WRAPPERS ========================
 // For backward compatibility, maintain old function names that call new ones
 void handleZigbee() { handleWireless(); }
@@ -127,6 +135,36 @@ void sendZigbeeGps() { sendWirelessGps(); }
 void sendZigbeeStatus() { sendWirelessStatus(); }
 void sendZigbeeReady() { sendWirelessReady(); }
 void markZigbeeHandshake() { markWirelessHandshake(); }
+
+// ========================== I2C BUS RECOVERY ==============================
+// Releases a stuck I2C bus by toggling SCL and issuing a STOP condition.
+// This prevents the Mega from ACKing all addresses after a bus lock.
+void recoverI2CBus() {
+  // Ensure pull-ups are enabled
+  pinMode(SCL, INPUT_PULLUP);
+  pinMode(SDA, INPUT_PULLUP);
+  delay(5);
+
+  // If SDA is stuck low, clock SCL to free the bus
+  if (digitalRead(SDA) == LOW) {
+    for (uint8_t i = 0; i < 9; i++) {
+      pinMode(SCL, OUTPUT);
+      digitalWrite(SCL, LOW);
+      delayMicroseconds(5);
+      pinMode(SCL, INPUT_PULLUP);
+      delayMicroseconds(5);
+    }
+  }
+
+  // Issue STOP condition: SDA low -> SCL high -> SDA high
+  pinMode(SDA, OUTPUT);
+  digitalWrite(SDA, LOW);
+  delayMicroseconds(5);
+  pinMode(SCL, INPUT_PULLUP);
+  delayMicroseconds(5);
+  pinMode(SDA, INPUT_PULLUP);
+  delayMicroseconds(5);
+}
 
 // ========================== SETUP ==========================================
 void setup() {
@@ -151,6 +189,9 @@ void setup() {
   #endif
 
   GPS_SERIAL.begin(GPS_BAUD);
+
+  // Recover I2C bus before initializing Wire (in case SDA/SCL are stuck)
+  recoverI2CBus();
 
   // Initialize I2C as SLAVE first (address 0x08)
   // This Arduino acts as BOTH:
@@ -225,6 +266,27 @@ void loop() {
   //   2. These transactions happen in main loop, NOT in I2C slave callbacks
   //   3. Slave callbacks (onI2CReceive/onI2CRequest) don't perform master transactions
   gps.update();
+
+  // Process any pending I2C command from Pi (deferred from ISR)
+  if (i2cCommandPending) {
+    uint8_t command = 0;
+    uint8_t length = 0;
+    uint8_t payload[32];
+
+    noInterrupts();
+    command = i2cPendingCommand;
+    length = i2cPendingLength;
+    if (length > 32) {
+      length = 32;
+    }
+    for (uint8_t i = 0; i < length; i++) {
+      payload[i] = i2cPendingPayload[i];
+    }
+    i2cCommandPending = false;
+    interrupts();
+
+    handleI2CCommand(command, payload, length);
+  }
 
   // Avoid I2C master transactions if Pi just accessed the slave interface
   bool i2cBusy = false;
@@ -338,15 +400,21 @@ void onI2CReceive(int bytes) {
 
   uint8_t command = Wire.read();
   uint8_t length = bytes - 1;
-  uint8_t payload[32];
+  if (length > 32) {
+    length = 32;
+  }
 
-  for (int i = 0; i < length && i < 32; i++) {
+  for (uint8_t i = 0; i < length; i++) {
     if (Wire.available()) {
-      payload[i] = Wire.read();
+      i2cPendingPayload[i] = Wire.read();
+    } else {
+      i2cPendingPayload[i] = 0;
     }
   }
 
-  handleI2CCommand(command, payload, length);
+  i2cPendingCommand = command;
+  i2cPendingLength = length;
+  i2cCommandPending = true;
   i2cCallbackActive = false;
 }
 
