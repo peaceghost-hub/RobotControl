@@ -77,6 +77,7 @@ const uint8_t CMD_REQUEST_OBSTACLE= 'O';  // New: request obstacle flag/distance
 const uint8_t CMD_HEARTBEAT       = 'H';
 // Enhanced feature commands
 const uint8_t CMD_SEND_GPS        = 'F';  // Pi -> Mega GPS forwarding
+const uint8_t CMD_SEND_HEADING    = 'D';  // Pi -> Mega heading forwarding
 const uint8_t CMD_WAYPOINT_COMPLETED = 'Y';  // Mega -> Pi: waypoint reached
 const uint8_t CMD_RETURN_TO_START = 'B';
 const uint8_t CMD_MANUAL_OVERRIDE = 'V';

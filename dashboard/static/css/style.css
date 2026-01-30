@@ -1024,6 +1024,25 @@ tr:hover {
     display: none;
 }
 
+.obstacle-notification {
+    position: absolute;
+    bottom: 60px; /* Above waypoint notification */
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--danger-color);
+    color: white;
+    padding: 12px 20px;
+    border-radius: 8px;
+    box-shadow: var(--shadow-lg);
+    z-index: 1000;
+    font-weight: 500;
+    animation: slideUp 0.3s ease-out;
+}
+
+.obstacle-notification.hidden {
+    display: none;
+}
+
 @keyframes slideUp {
     from {
         transform: translateX(-50%) translateY(100%);

@@ -1585,6 +1585,20 @@ function handleRobotEvent(event) {
     addLog(level, msg);
     showToast(level, 'Obstacle detected', msg);
 
+    // Show obstacle notification panel for OBSTACLE_DETECTED events
+    if (type === 'OBSTACLE_DETECTED') {
+        const notification = document.getElementById('obstacle-notification');
+        const message = document.getElementById('obstacle-message');
+        const distance = payload.distance_cm || payload.distance || 'unknown';
+        message.textContent = `🚨 Obstacle detected at ${distance}cm`;
+        notification.classList.remove('hidden');
+        
+        // Auto-hide after 5 seconds
+        setTimeout(() => {
+            notification.classList.add('hidden');
+        }, 5000);
+    }
+
     // Map visual indicator
     if (typeof window.showObstacleIndicator === 'function') {
         const dist = (payload.distance_cm !== undefined) ? Number(payload.distance_cm) : (payload.distance !== undefined ? Number(payload.distance) : NaN);

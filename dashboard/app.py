@@ -958,36 +958,73 @@ def get_sensor_control_status():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/status', methods=['GET'])
+@app.route('/api/status', methods=['GET', 'POST'])
 def get_status():
-    """Get current robot status"""
+    """Get or update current robot status"""
     try:
-        device_id = request.args.get('device_id', 'robot_01')
-        status = RobotStatus.query.filter_by(device_id=device_id).first()
+        if request.method == 'POST':
+            # Handle status update
+            data = request.get_json()
+            if not data:
+                return jsonify({'status': 'error', 'message': 'No data provided'}), 400
+            
+            device_id = data.get('device_id', 'robot_01')
+            
+            # Update or create status record
+            status = RobotStatus.query.filter_by(device_id=device_id).first()
+            if not status:
+                status = RobotStatus(device_id=device_id)
+                db.session.add(status)
+            
+            # Update status fields
+            status.online = data.get('online', True)
+            status.battery_level = data.get('battery', 0)
+            status.signal_strength = data.get('signal_strength', 0)
+            status.system_info = json.dumps(data.get('system_info', {}))
+            status.last_update = datetime.utcnow()
+            
+            db.session.commit()
+            
+            # Emit WebSocket update
+            socketio.emit('status_update', {
+                'device_id': device_id,
+                'online': status.online,
+                'battery': status.battery_level,
+                'signal_strength': status.signal_strength,
+                'last_update': status.last_update.isoformat(),
+                'system_info': json.loads(status.system_info) if status.system_info else {}
+            })
+            
+            return jsonify({'status': 'success'}), 200
         
-        if not status:
-            return jsonify({
-                'status': 'success',
-                'data': {
-                    'online': False,
-                    'battery': 0,
-                    'last_update': None
-                }
-            }), 200
-        
-        data = {
-            'online': status.online,
-            'battery': status.battery_level,
-            'signal_strength': status.signal_strength,
-            'last_update': status.last_update.isoformat() if status.last_update else None,
-            'system_info': json.loads(status.system_info) if status.system_info else {},
-            'fallback_active': backup_state.get('active', False)
-        }
-        
-        return jsonify({'status': 'success', 'data': data}), 200
+        else:
+            # Handle GET request (existing logic)
+            device_id = request.args.get('device_id', 'robot_01')
+            status = RobotStatus.query.filter_by(device_id=device_id).first()
+            
+            if not status:
+                return jsonify({
+                    'status': 'success',
+                    'data': {
+                        'online': False,
+                        'battery': 0,
+                        'last_update': None
+                    }
+                }), 200
+            
+            data = {
+                'online': status.online,
+                'battery': status.battery_level,
+                'signal_strength': status.signal_strength,
+                'last_update': status.last_update.isoformat() if status.last_update else None,
+                'system_info': json.loads(status.system_info) if status.system_info else {},
+                'fallback_active': backup_state.get('active', False)
+            }
+            
+            return jsonify({'status': 'success', 'data': data}), 200
         
     except Exception as e:
-        logger.error(f"Error retrieving status: {str(e)}")
+        logger.error(f"Error handling status: {str(e)}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
