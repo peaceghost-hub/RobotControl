@@ -128,13 +128,13 @@ class RobotController:
         except Exception as e:
             logger.warning(f"Sensor Manager not available: {e}")
         
-        # Compass (HMC5883L on I2C) - TEMPORARILY DISABLED FOR I2C TESTING
+        # Compass (HMC5883L on I2C)
         self.compass = None
-        # try:
-        #     self.compass = Compass()
-        #     logger.info("Compass initialized")
-        # except Exception as e:
-        #     logger.warning(f"Compass not available: {e}")
+        try:
+            self.compass = Compass()
+            logger.info("Compass initialized")
+        except Exception as e:
+            logger.warning(f"Compass not available: {e}")
         
         # GSM Module (optional - legacy) and/or SIM7600E (preferred)
         # Support older configs that put SIM7600E settings under "gsm" by using module_type.
@@ -333,16 +333,16 @@ class RobotController:
                 sensor_data = self.sensor_manager.read_all() if self.sensor_manager else {}
                 
                 # Read compass
-                # if self.compass:
-                #     try:
-                #         heading = self.compass.read_heading()
-                #         sensor_data['heading'] = heading
-                #         # Send heading to Mega
-                #         import struct
-                #         self.robot_link._exchange(ord('D'), struct.pack('f', heading))
-                #     except Exception as e:
-                #         logger.debug(f"Compass read failed: {e}")
-                #         sensor_data['heading'] = 0
+                if self.compass:
+                    try:
+                        heading = self.compass.read_heading()
+                        sensor_data['heading'] = heading
+                        # Send heading to Mega
+                        import struct
+                        self.robot_link._exchange(ord('D'), struct.pack('f', heading))
+                    except Exception as e:
+                        logger.debug(f"Compass read failed: {e}")
+                        sensor_data['heading'] = 0
                 
                 # Add timestamp and device ID
                 sensor_data['timestamp'] = datetime.now().isoformat()

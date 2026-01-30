@@ -13,17 +13,33 @@ logger = logging.getLogger('compass')
 class Compass:
     """HMC5883L magnetometer for heading"""
     
-    def __init__(self, bus=1, address=0x0C):
+    def __init__(self, bus=1):
         self.bus = smbus2.SMBus(bus)
-        self.address = address
+        self.address = None
         self.declination = 0  # Magnetic declination in radians
+        
+        # Try both possible addresses for HMC5883L
+        possible_addresses = [0x0C, 0x2C]
+        
+        for addr in possible_addresses:
+            try:
+                # Test if device responds at this address
+                self.bus.read_byte_data(addr, 0x00)
+                self.address = addr
+                logger.info(f"Compass found at address 0x{addr:02X}")
+                break
+            except Exception:
+                continue
+        
+        if self.address is None:
+            raise Exception("Compass not found at addresses 0x0C or 0x2C")
         
         try:
             # Initialize HMC5883L
             self.bus.write_byte_data(self.address, 0x00, 0x70)  # 8-average, 15Hz, normal
             self.bus.write_byte_data(self.address, 0x01, 0xA0)  # Gain=5
             self.bus.write_byte_data(self.address, 0x02, 0x00)  # Continuous mode
-            logger.info(f"Compass initialized at 0x{address:02X}")
+            logger.info(f"Compass initialized at 0x{self.address:02X}")
         except Exception as e:
             logger.error(f"Failed to initialize compass: {e}")
             raise
