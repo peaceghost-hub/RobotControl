@@ -53,16 +53,7 @@ class Compass:
 
         try:
             if self.chip == 'QMC5883L':
-                # QMC5883L basic setup (continuous mode).
-                # Mirror the Arduino firmware init exactly for maximum compatibility:
-                #   - write 0x0B (SET/RESET) = 0x01
-                #   - write 0x09 (CONTROL)   = 0x1D
-                # Avoid writing CONTROL2 (0x0A) during init because some clones interpret
-                # it differently and can get stuck returning constant bytes.
-                self._write_reg(0x09, 0x00)  # standby
-                self._write_reg(0x0B, 0x01)  # Set/Reset period
-                self._write_reg(0x09, 0x1D)  # OSR=512, RNG=2G, ODR=100Hz, MODE=Continuous
-                time.sleep(0.05)
+                self._qmc_init(mode=0x1D)
 
                 # Best-effort readback for debugging
                 try:
@@ -94,6 +85,35 @@ class Compass:
         except Exception as e:
             logger.error(f"Failed to initialize compass at 0x{self.address:02X}: {e}")
             raise
+
+    def _qmc_init(self, mode: int = 0x1D) -> None:
+        """Initialize QMC5883L.
+
+        The Arduino firmware uses:
+          0x0B = 0x01 (SET/RESET)
+          0x09 = 0x1D (OSR=512, RNG=2G, ODR=100Hz, Continuous)
+
+        Some clones are sensitive to CONTROL2 writes, so we keep init minimal.
+        """
+        self._write_reg(0x09, 0x00)  # standby
+        time.sleep(0.01)
+        self._write_reg(0x0B, 0x01)  # set/reset period
+        self._write_reg(0x09, mode & 0xFF)
+        time.sleep(0.05)
+
+    def _qmc_soft_reset(self) -> None:
+        """Best-effort QMC soft reset.
+
+        Not all variants support it; when unsupported it may NACK.
+        """
+        self._write_reg(0x09, 0x00)  # standby
+        time.sleep(0.005)
+        self._write_reg(0x0A, 0x80)  # soft reset
+        time.sleep(0.01)
+        try:
+            self._write_reg(0x0A, 0x00)
+        except Exception:
+            pass
 
     def _write_reg(self, reg: int, value: int) -> None:
         self.bus.write_byte_data(self.address, reg & 0xFF, value & 0xFF)
@@ -188,18 +208,41 @@ class Compass:
                     ' '.join(f"{b:02X}" for b in data),
                 )
 
+                # Dump key QMC regs at WARNING level so it shows up without
+                # requiring logging configuration.
+                if self.chip == 'QMC5883L':
+                    try:
+                        status = self._read_reg(0x06)
+                    except Exception:
+                        status = None
+                    try:
+                        ctrl = self._read_reg(0x09)
+                    except Exception:
+                        ctrl = None
+                    try:
+                        ctrl2 = self._read_reg(0x0A)
+                    except Exception:
+                        ctrl2 = None
+                    try:
+                        setrst = self._read_reg(0x0B)
+                    except Exception:
+                        setrst = None
+                    logger.warning(
+                        "QMC regs @0x%02X: STATUS(0x06)=%s CTRL(0x09)=%s CTRL2(0x0A)=%s SETRST(0x0B)=%s",
+                        self.address,
+                        f"0x{status:02X}" if isinstance(status, int) else "?",
+                        f"0x{ctrl:02X}" if isinstance(ctrl, int) else "?",
+                        f"0x{ctrl2:02X}" if isinstance(ctrl2, int) else "?",
+                        f"0x{setrst:02X}" if isinstance(setrst, int) else "?",
+                    )
+
                 # One-time recovery attempt: soft reset + re-init (some parts need it,
                 # some parts break if we do it repeatedly).
                 if self.chip == 'QMC5883L' and not self._qmc_recovered_once:
                     self._qmc_recovered_once = True
                     try:
-                        self._write_reg(0x09, 0x00)  # standby
-                        self._write_reg(0x0A, 0x80)  # soft reset (best-effort)
-                        time.sleep(0.01)
-                        self._write_reg(0x0A, 0x00)
-                        self._write_reg(0x0B, 0x01)
-                        self._write_reg(0x09, 0x1D)
-                        time.sleep(0.05)
+                        self._qmc_soft_reset()
+                        self._qmc_init(mode=0x1D)
                         # Try an immediate re-read; if it works we'll return it.
                         data2 = self._read_bytes(0x00, 6)
                         if data2 not in ([0, 0, 0, 0, 0, 0], [255, 255, 255, 255, 255, 255], [0x80, 0x00, 0x00, 0x00, 0x00, 0x00]):
