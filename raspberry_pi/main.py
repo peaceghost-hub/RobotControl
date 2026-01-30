@@ -513,10 +513,14 @@ class RobotController:
                 success = self.api_client.send_status(status_data)
 
                 if success:
-                    logger.debug(f"Status sent: Battery={status_data['battery']:.1f}%")
+                    logger.info(f"Status sent successfully: Battery={status_data['battery']:.1f}%, Online={status_data['online']}")
+                else:
+                    logger.error(f"Failed to send status update to dashboard")
 
             except Exception as e:
                 logger.error(f"Error in status loop: {e}")
+                import traceback
+                logger.error(f"Status loop traceback: {traceback.format_exc()}")
 
             # Wait before next update
             shutdown_event.wait(self.status_interval)
