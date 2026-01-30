@@ -1,9 +1,16 @@
-"""
-Compass Sensor (HMC5883L) for Raspberry Pi
-Connected to I2C bus for heading data
+"""Compass (magnetometer) driver.
+
+Supports HMC5883L and QMC5883L.
+
+Note: some QMC5883L variants do not behave correctly with SMBus block reads;
+they require a plain I2C combined write(register) + read(bytes) transaction.
 """
 
-import smbus2
+try:
+    from smbus2 import SMBus, i2c_msg
+except Exception:  # pragma: no cover
+    from smbus import SMBus  # type: ignore
+    i2c_msg = None
 import math
 import time
 import logging
@@ -19,7 +26,7 @@ class Compass:
     """
     
     def __init__(self, bus=1):
-        self.bus = smbus2.SMBus(bus)
+        self.bus = SMBus(bus)
         self.address = None
         self.declination = 0  # Magnetic declination in radians
         self.chip = None  # 'HMC5883L' | 'QMC5883L'
@@ -46,36 +53,75 @@ class Compass:
         try:
             if self.chip == 'QMC5883L':
                 # QMC5883L basic setup (continuous mode)
-                # 0x0A: Control 2 (soft reset on many QMC variants)
+                # Match the Arduino init sequence, with a cautious soft reset.
+                # Put into standby, then reset (if supported), then configure.
+                self._write_reg(0x09, 0x00)  # standby
                 try:
-                    self.bus.write_byte_data(self.address, 0x0A, 0x80)
+                    # Control2: soft reset (many QMC variants). Some chips don't support it.
+                    self._write_reg(0x0A, 0x80)
                     time.sleep(0.01)
+                    # Some variants don't auto-clear reset; clear it.
+                    self._write_reg(0x0A, 0x00)
                 except Exception:
-                    # Not all variants implement this register; ignore.
                     pass
 
                 # 0x0B: Set/Reset period
-                self.bus.write_byte_data(self.address, 0x0B, 0x01)
+                self._write_reg(0x0B, 0x01)
                 # 0x09: Control (OSR=512, RNG=2G, ODR=100Hz, MODE=Continuous)
-                self.bus.write_byte_data(self.address, 0x09, 0x1D)
+                self._write_reg(0x09, 0x1D)
+                time.sleep(0.02)
 
                 # Best-effort readback for debugging
                 try:
-                    ctrl = self.bus.read_byte_data(self.address, 0x09)
-                    setrst = self.bus.read_byte_data(self.address, 0x0B)
-                    logger.info("QMC5883L regs: CTRL(0x09)=0x%02X SETRST(0x0B)=0x%02X", ctrl, setrst)
+                    ctrl = self._read_reg(0x09)
+                    setrst = self._read_reg(0x0B)
+                    ctrl2 = None
+                    try:
+                        ctrl2 = self._read_reg(0x0A)
+                    except Exception:
+                        pass
+                    if ctrl2 is None:
+                        logger.info("QMC5883L regs: CTRL(0x09)=0x%02X SETRST(0x0B)=0x%02X", ctrl, setrst)
+                    else:
+                        logger.info(
+                            "QMC5883L regs: CTRL(0x09)=0x%02X CTRL2(0x0A)=0x%02X SETRST(0x0B)=0x%02X",
+                            ctrl,
+                            ctrl2,
+                            setrst,
+                        )
                 except Exception:
                     pass
             else:
                 # HMC5883L setup
-                self.bus.write_byte_data(self.address, 0x00, 0x70)  # 8-average, 15Hz, normal
-                self.bus.write_byte_data(self.address, 0x01, 0x20)  # Gain 1.3 (matches Arduino handler)
-                self.bus.write_byte_data(self.address, 0x02, 0x00)  # Continuous mode
+                self._write_reg(0x00, 0x70)  # 8-average, 15Hz, normal
+                self._write_reg(0x01, 0x20)  # Gain 1.3 (matches Arduino handler)
+                self._write_reg(0x02, 0x00)  # Continuous mode
 
             logger.info(f"Compass initialized at 0x{self.address:02X} as {self.chip}")
         except Exception as e:
             logger.error(f"Failed to initialize compass at 0x{self.address:02X}: {e}")
             raise
+
+    def _write_reg(self, reg: int, value: int) -> None:
+        self.bus.write_byte_data(self.address, reg & 0xFF, value & 0xFF)
+
+    def _read_reg(self, reg: int) -> int:
+        return int(self.bus.read_byte_data(self.address, reg & 0xFF))
+
+    def _read_bytes(self, reg: int, length: int) -> list[int]:
+        """Read bytes starting at `reg`.
+
+        Prefer a raw I2C combined transaction (write register pointer then read),
+        because some QMC variants don't support SMBus block read semantics.
+        """
+        if i2c_msg is not None:
+            write = i2c_msg.write(self.address, [reg & 0xFF])
+            read = i2c_msg.read(self.address, length)
+            self.bus.i2c_rdwr(write, read)
+            return list(read)
+
+        # Fallback: SMBus block read.
+        return list(self.bus.read_i2c_block_data(self.address, reg & 0xFF, length))
 
     def _detect_chip_type(self, addr: int) -> str:
         """Attempt to detect HMC5883L vs QMC5883L.
@@ -107,7 +153,7 @@ class Compass:
                 data = None
                 for _ in range(5):
                     try:
-                        status = self.bus.read_byte_data(self.address, 0x06)
+                        status = self._read_reg(0x06)
                     except Exception:
                         status = 0
 
@@ -117,7 +163,7 @@ class Compass:
                         logger.warning("QMC5883L overflow (status=0x%02X)", status)
 
                     if drdy or status == 0:
-                        data = self.bus.read_i2c_block_data(self.address, 0x00, 6)
+                        data = self._read_bytes(0x00, 6)
                         break
                     time.sleep(0.01)
 
@@ -125,7 +171,7 @@ class Compass:
                     return 0, 0, 0
             else:
                 # HMC5883L data starts at 0x03: X_MSB, X_LSB, Z_MSB, Z_LSB, Y_MSB, Y_LSB
-                data = self.bus.read_i2c_block_data(self.address, 0x03, 6)
+                data = self._read_bytes(0x03, 6)
 
             # If the bus returned all 0x00 or all 0xFF, treat as invalid read.
             if data == [0, 0, 0, 0, 0, 0] or data == [255, 255, 255, 255, 255, 255]:
