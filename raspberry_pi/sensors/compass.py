@@ -30,6 +30,7 @@ class Compass:
         self.address = None
         self.declination = 0  # Magnetic declination in radians
         self.chip = None  # 'HMC5883L' | 'QMC5883L'
+        self._qmc_recovered_once = False
         
         # Try likely addresses (some modules vary / use different breakouts)
         possible_addresses = [0x2C, 0x0D, 0x0C, 0x1E]
@@ -52,24 +53,16 @@ class Compass:
 
         try:
             if self.chip == 'QMC5883L':
-                # QMC5883L basic setup (continuous mode)
-                # Match the Arduino init sequence, with a cautious soft reset.
-                # Put into standby, then reset (if supported), then configure.
+                # QMC5883L basic setup (continuous mode).
+                # Mirror the Arduino firmware init exactly for maximum compatibility:
+                #   - write 0x0B (SET/RESET) = 0x01
+                #   - write 0x09 (CONTROL)   = 0x1D
+                # Avoid writing CONTROL2 (0x0A) during init because some clones interpret
+                # it differently and can get stuck returning constant bytes.
                 self._write_reg(0x09, 0x00)  # standby
-                try:
-                    # Control2: soft reset (many QMC variants). Some chips don't support it.
-                    self._write_reg(0x0A, 0x80)
-                    time.sleep(0.01)
-                    # Some variants don't auto-clear reset; clear it.
-                    self._write_reg(0x0A, 0x00)
-                except Exception:
-                    pass
-
-                # 0x0B: Set/Reset period
-                self._write_reg(0x0B, 0x01)
-                # 0x09: Control (OSR=512, RNG=2G, ODR=100Hz, MODE=Continuous)
-                self._write_reg(0x09, 0x1D)
-                time.sleep(0.02)
+                self._write_reg(0x0B, 0x01)  # Set/Reset period
+                self._write_reg(0x09, 0x1D)  # OSR=512, RNG=2G, ODR=100Hz, MODE=Continuous
+                time.sleep(0.05)
 
                 # Best-effort readback for debugging
                 try:
@@ -120,8 +113,13 @@ class Compass:
             self.bus.i2c_rdwr(write, read)
             return list(read)
 
-        # Fallback: SMBus block read.
-        return list(self.bus.read_i2c_block_data(self.address, reg & 0xFF, length))
+        # Fallback: avoid SMBus *block* read semantics (they break on some QMC clones).
+        # Read one byte at a time via SMBus byte-data reads.
+        out: list[int] = []
+        base = reg & 0xFF
+        for i in range(length):
+            out.append(int(self.bus.read_byte_data(self.address, (base + i) & 0xFF)))
+        return out
 
     def _detect_chip_type(self, addr: int) -> str:
         """Attempt to detect HMC5883L vs QMC5883L.
@@ -184,8 +182,34 @@ class Compass:
 
             # Some broken reads show a constant 0x80 followed by zeros; treat as invalid.
             if data == [0x80, 0x00, 0x00, 0x00, 0x00, 0x00]:
-                logger.warning("Compass returned constant pattern at 0x%02X: %s", self.address, ' '.join(f"{b:02X}" for b in data))
-                return 0, 0, 0
+                logger.warning(
+                    "Compass returned constant pattern at 0x%02X: %s",
+                    self.address,
+                    ' '.join(f"{b:02X}" for b in data),
+                )
+
+                # One-time recovery attempt: soft reset + re-init (some parts need it,
+                # some parts break if we do it repeatedly).
+                if self.chip == 'QMC5883L' and not self._qmc_recovered_once:
+                    self._qmc_recovered_once = True
+                    try:
+                        self._write_reg(0x09, 0x00)  # standby
+                        self._write_reg(0x0A, 0x80)  # soft reset (best-effort)
+                        time.sleep(0.01)
+                        self._write_reg(0x0A, 0x00)
+                        self._write_reg(0x0B, 0x01)
+                        self._write_reg(0x09, 0x1D)
+                        time.sleep(0.05)
+                        # Try an immediate re-read; if it works we'll return it.
+                        data2 = self._read_bytes(0x00, 6)
+                        if data2 not in ([0, 0, 0, 0, 0, 0], [255, 255, 255, 255, 255, 255], [0x80, 0x00, 0x00, 0x00, 0x00, 0x00]):
+                            data = data2
+                        else:
+                            return 0, 0, 0
+                    except Exception:
+                        return 0, 0, 0
+                else:
+                    return 0, 0, 0
 
             if self.chip == 'QMC5883L':
                 x = (data[1] << 8) | data[0]
