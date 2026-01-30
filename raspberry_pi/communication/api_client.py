@@ -149,6 +149,20 @@ class DashboardAPI:
             return response.get('data', [])
         return None
     
+    def complete_waypoint(self, waypoint_id: int) -> bool:
+        """
+        Mark a waypoint as completed
+        
+        Args:
+            waypoint_id: ID of the waypoint to mark as completed
+            
+        Returns:
+            bool: True if successful
+        """
+        endpoint = f"/api/waypoints/{waypoint_id}/complete"
+        response = self._make_request('POST', endpoint, {})
+        return response is not None and response.get('status') == 'success'
+    
     def fetch_pending_commands(self) -> Optional[List[Dict]]:
         """
         Fetch pending commands from dashboard

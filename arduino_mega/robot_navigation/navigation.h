@@ -54,6 +54,10 @@ private:
     bool inAvoidanceMode;
     unsigned long lastPositionSave;
     
+    // Waypoint completion tracking
+    bool waypointJustCompleted;
+    int lastCompletedWaypointId;
+    
 public:
     Navigation();
     void begin(GPSHandler* g, CompassHandler* c, MotorControl* m, ObstacleAvoidance* o);
@@ -69,6 +73,11 @@ public:
     void pause();
     void update();
     bool isComplete();
+    
+    // Waypoint completion tracking
+    bool isWaypointJustCompleted();
+    int getLastCompletedWaypointId();
+    void clearWaypointCompletionFlag();
 
     // Compass fallback & GPS-only navigation
     void setUseCompass(bool enabled);

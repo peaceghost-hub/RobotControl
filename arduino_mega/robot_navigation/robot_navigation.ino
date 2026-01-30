@@ -775,7 +775,15 @@ void prepareStatusResponse() {
   responseBuffer[4] = navigation.getWaypointCount();
   responseBuffer[5] = readBatteryPercent();
   responseBuffer[6] = readSignalQuality();
-  responseLength = 7;
+  responseBuffer[7] = navigation.getCurrentWaypointIndex();  // Current waypoint being navigated to
+  responseBuffer[8] = navigation.isWaypointJustCompleted() ? 1 : 0;  // Flag for recent completion
+  
+  // Clear the completion flag after reporting it
+  if (navigation.isWaypointJustCompleted()) {
+    navigation.clearWaypointCompletionFlag();
+  }
+  
+  responseLength = 9;
 }
 
 // ========================== WAYPOINT HANDLING ==============================

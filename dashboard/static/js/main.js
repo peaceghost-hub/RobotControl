@@ -97,6 +97,9 @@ function initDashboard() {
     // Load initial data
     loadInitialData();
     
+    // Initialize sensor control
+    initSensorControl();
+    
     updateControlIndicators();
     updateBackupIndicators();
 
@@ -216,6 +219,16 @@ function connectWebSocket() {
     // Robot events (e.g., obstacle detected)
     socket.on('robot_event', (event) => {
         handleRobotEvent(event);
+    });
+    
+    // Sensor data control events
+    socket.on('sensor_control', (data) => {
+        handleSensorControl(data);
+    });
+    
+    // Waypoint completion events
+    socket.on('waypoint_completed', (data) => {
+        handleWaypointCompletion(data);
     });
 }
 
@@ -402,6 +415,116 @@ function handleCameraFrame(data) {
  */
 function handleWaypointUpdate(data) {
     loadWaypoints();
+}
+
+/**
+ * Handle Sensor Control Events
+ */
+function handleSensorControl(data) {
+    const pauseBtn = document.getElementById('sensor-pause-btn');
+    const startBtn = document.getElementById('sensor-start-btn');
+    const stopBtn = document.getElementById('sensor-stop-btn');
+    
+    if (data.action === 'pause') {
+        pauseBtn.disabled = true;
+        startBtn.disabled = false;
+        stopBtn.disabled = false;
+        addLog('info', 'Sensor data collection paused');
+    } else if (data.action === 'start') {
+        pauseBtn.disabled = false;
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        addLog('info', 'Sensor data collection started');
+    } else if (data.action === 'stop') {
+        pauseBtn.disabled = false;
+        startBtn.disabled = true;
+        stopBtn.disabled = true;
+        addLog('warning', 'Sensor data collection stopped');
+    }
+    
+    // Update button states
+    updateSensorControlButtons(data.enabled);
+}
+
+/**
+ * Handle Waypoint Completion Events
+ */
+function handleWaypointCompletion(data) {
+    const notification = document.getElementById('waypoint-notification');
+    const message = document.getElementById('waypoint-message');
+    
+    message.textContent = data.message;
+    notification.classList.remove('hidden');
+    
+    // Auto-hide after 10 seconds
+    setTimeout(() => {
+        notification.classList.add('hidden');
+    }, 10000);
+    
+    addLog('success', data.message);
+    
+    // Reload waypoints to update the map
+    loadWaypoints();
+}
+
+/**
+ * Control Sensor Data Collection
+ */
+function controlSensorData(action) {
+    fetch(`${CONFIG.apiBaseUrl}/api/sensor_data/control`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ action: action })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'success') {
+            addLog('info', data.message);
+        } else {
+            addLog('error', `Failed to ${action} sensor data: ${data.message}`);
+        }
+    })
+    .catch(error => {
+        addLog('error', `Error controlling sensor data: ${error.message}`);
+    });
+}
+
+/**
+ * Update Sensor Control Button States
+ */
+function updateSensorControlButtons(enabled) {
+    const pauseBtn = document.getElementById('sensor-pause-btn');
+    const startBtn = document.getElementById('sensor-start-btn');
+    const stopBtn = document.getElementById('sensor-stop-btn');
+    
+    if (enabled) {
+        pauseBtn.disabled = false;
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+    } else {
+        pauseBtn.disabled = true;
+        startBtn.disabled = false;
+        stopBtn.disabled = false;
+    }
+}
+
+/**
+ * Initialize Sensor Control State
+ */
+function initSensorControl() {
+    // Get initial sensor control status
+    fetch(`${CONFIG.apiBaseUrl}/api/sensor_data/control`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                updateSensorControlButtons(data.enabled);
+            }
+        })
+        .catch(error => {
+            console.warn('Failed to get sensor control status:', error);
+        });
 }
 
 /**
@@ -1243,6 +1366,11 @@ function setupEventListeners() {
     
     // Export data
     document.getElementById('export-data-btn').addEventListener('click', exportSensorData);
+    
+    // Sensor control buttons
+    document.getElementById('sensor-pause-btn').addEventListener('click', () => controlSensorData('pause'));
+    document.getElementById('sensor-start-btn').addEventListener('click', () => controlSensorData('start'));
+    document.getElementById('sensor-stop-btn').addEventListener('click', () => controlSensorData('stop'));
 
     // Navigation commands
     const navStartBtn = document.getElementById('nav-start-btn');

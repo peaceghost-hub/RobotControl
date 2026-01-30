@@ -33,12 +33,12 @@ function initMap() {
 
     L.tileLayer(tileUrl, tileOptions).addTo(map);
     
-    // Create robot marker (custom icon)
+    // Create robot marker (blue dot)
     const robotIcon = L.divIcon({
         className: 'robot-marker',
-        html: '<div class="robot-marker-body">🤖</div>',
-        iconSize: [30, 30],
-        iconAnchor: [15, 15]
+        html: '<div class="robot-marker-body" style="background-color: #3b82f6; border: 2px solid white; box-shadow: 0 0 10px rgba(59, 130, 246, 0.5);"></div>',
+        iconSize: [16, 16],
+        iconAnchor: [8, 8]
     });
     
     robotMarker = L.marker([0, 0], { icon: robotIcon }).addTo(map);
@@ -163,6 +163,14 @@ function updateMapWaypoints(waypoints) {
     waypointMarkers.forEach(marker => map.removeLayer(marker));
     waypointMarkers = [];
     
+    // Clear existing pathway lines
+    if (window.robotToWaypointLine) {
+        map.removeLayer(window.robotToWaypointLine);
+    }
+    if (window.waypointPathLine) {
+        map.removeLayer(window.waypointPathLine);
+    }
+    
     // Add new waypoint markers
     waypoints.forEach((wp, index) => {
         const waypointIcon = L.divIcon({
@@ -198,15 +206,31 @@ function updateMapWaypoints(waypoints) {
         waypointMarkers.push(marker);
     });
     
-    // Draw line between waypoints
-    if (waypoints.length > 1) {
-        const waypointCoords = waypoints.map(wp => [wp.latitude, wp.longitude]);
-        L.polyline(waypointCoords, {
-            color: 'red',
-            weight: 2,
-            opacity: 0.5,
-            dashArray: '10, 10'
+    // Draw pathway from robot to first waypoint and between waypoints
+    if (waypoints.length > 0 && robotMarker) {
+        const robotPos = robotMarker.getLatLng();
+        const firstWaypoint = waypoints[0];
+        
+        // Line from robot to first waypoint (blue solid line)
+        window.robotToWaypointLine = L.polyline([
+            [robotPos.lat, robotPos.lng],
+            [firstWaypoint.latitude, firstWaypoint.longitude]
+        ], {
+            color: '#3b82f6',
+            weight: 3,
+            opacity: 0.8
         }).addTo(map);
+        
+        // Line connecting waypoints (red dashed line)
+        if (waypoints.length > 1) {
+            const waypointCoords = waypoints.map(wp => [wp.latitude, wp.longitude]);
+            window.waypointPathLine = L.polyline(waypointCoords, {
+                color: '#ef4444',
+                weight: 2,
+                opacity: 0.7,
+                dashArray: '10, 10'
+            }).addTo(map);
+        }
     }
     
     // Fit bounds to show all waypoints and robot

@@ -109,6 +109,9 @@
                 </div>
                 <div class="panel-content">
                     <div id="map" class="map-container"></div>
+                    <div id="waypoint-notification" class="waypoint-notification hidden">
+                        <span id="waypoint-message"></span>
+                    </div>
                     <div class="gps-info">
                         <div class="gps-item">
                             <span class="gps-label">Latitude:</span>
@@ -273,6 +276,11 @@
             <div class="panel-header overlay-header">
                 <h2>🌡️ Environmental Sensors</h2>
                 <div class="overlay-actions">
+                    <div class="sensor-controls">
+                        <button id="sensor-pause-btn" class="btn btn-small">⏸ Pause</button>
+                        <button id="sensor-start-btn" class="btn btn-small">▶ Start</button>
+                        <button id="sensor-stop-btn" class="btn btn-small danger">⏹ Stop</button>
+                    </div>
                     <button id="export-data-btn" class="btn btn-small">Export</button>
                     <button class="btn btn-small overlay-close" data-overlay-target="sensors">✖</button>
                 </div>

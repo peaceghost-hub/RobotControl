@@ -35,6 +35,7 @@ class I2CComm:
     CMD_REQUEST_STATUS = ord('U')
     CMD_REQUEST_OBSTACLE = ord('O')   # New: Request obstacle flag/distance
     CMD_HEARTBEAT = ord('H')
+    CMD_WAYPOINT_COMPLETED = ord('Y')  # Mega -> Pi: waypoint reached
     CMD_SEND_GPS = ord('F')          # New: Send GPS from Pi to Mega (for fallback/broadcast)
     CMD_SEND_HEADING = ord('D')      # New: Send heading from Pi to Mega
     CMD_RETURN_TO_START = ord('B')   # New: Return to starting position
@@ -50,7 +51,7 @@ class I2CComm:
     RESP_ERROR = 0xFF
 
     GPS_PAYLOAD_LEN = 1 + (4 * 4) + 1  # valid flag + floats + satellites
-    STATUS_PAYLOAD_LEN = 6  # mode, navActive, manualOverride, waypointCount, battery, signal
+    STATUS_PAYLOAD_LEN = 8  # mode, navActive, manualOverride, waypointCount, battery, signal, currentWaypoint, waypointCompleted
 
     def __init__(self, config: Dict[str, Any]):
         self.address = config.get('mega_address', 0x08)
@@ -301,13 +302,17 @@ class I2CComm:
         waypoint_count = payload[3]
         battery = payload[4]
         signal = payload[5]
+        current_waypoint = payload[6] if len(payload) > 6 else 0
+        waypoint_completed = bool(payload[7]) if len(payload) > 7 else False
         return {
             "mode": "AUTO" if mode == 0 else "MANUAL",
             "navigation_active": nav_active,
             "manual_override": manual_override,
             "waypoint_count": waypoint_count,
             "battery_percent": battery,
-            "signal_quality": signal
+            "signal_quality": signal,
+            "current_waypoint_index": current_waypoint,
+            "waypoint_just_completed": waypoint_completed
         }
 
     def _is_ack(self, resp: Optional[bytes]) -> bool:

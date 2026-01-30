@@ -442,7 +442,13 @@ def receive_sensor_data():
         "device_id": "robot_01"
     }
     """
+    global sensor_data_enabled
+    
     try:
+        # Check if sensor data collection is enabled
+        if not sensor_data_enabled:
+            return jsonify({'status': 'paused', 'message': 'Sensor data collection is currently paused'}), 200
+        
         data = request.get_json()
         logger.info(f"Received sensor data: {data}")
         
@@ -785,26 +791,50 @@ def add_waypoint():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/waypoints/<int:waypoint_id>', methods=['DELETE'])
-def delete_waypoint(waypoint_id):
-    """Delete a specific waypoint"""
+@app.route('/api/waypoints/<int:waypoint_id>/complete', methods=['POST'])
+def complete_waypoint(waypoint_id):
+    """Mark a waypoint as completed"""
     try:
         waypoint = Waypoint.query.get(waypoint_id)
         if not waypoint:
             return jsonify({'status': 'error', 'message': 'Waypoint not found'}), 404
         
-        db.session.delete(waypoint)
+        waypoint.completed = True
+        waypoint.completed_at = datetime.now()
         db.session.commit()
         
-        socketio.emit('waypoint_update', {
-            'action': 'deleted',
-            'waypoint_id': waypoint_id
+        # Check if this is the last waypoint
+        remaining_waypoints = Waypoint.query.filter_by(
+            device_id=waypoint.device_id, 
+            completed=False
+        ).order_by(Waypoint.sequence).first()
+        
+        message = f"Waypoint #{waypoint.sequence} reached"
+        if not remaining_waypoints:
+            message += ". This is your destination - start measuring if needed."
+        else:
+            message += ". This is not your destination - proceeding to next waypoint."
+        
+        # Broadcast waypoint completion
+        socketio.emit('waypoint_completed', {
+            'waypoint_id': waypoint_id,
+            'sequence': waypoint.sequence,
+            'message': message,
+            'is_final': remaining_waypoints is None
         }, namespace='/realtime')
         
-        return jsonify({'status': 'success', 'message': 'Waypoint deleted'}), 200
+        return jsonify({
+            'status': 'success', 
+            'message': message,
+            'waypoint': {
+                'id': waypoint.id,
+                'sequence': waypoint.sequence,
+                'completed': True
+            }
+        }), 200
         
     except Exception as e:
-        logger.error(f"Error deleting waypoint: {str(e)}")
+        logger.error(f"Error completing waypoint: {str(e)}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
@@ -828,10 +858,57 @@ def clear_waypoints():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-# ============= ROBOT STATUS =============
+# Global sensor data control
+sensor_data_enabled = True
 
-@app.route('/api/status', methods=['POST'])
-def update_status():
+@app.route('/api/sensor_data/control', methods=['POST'])
+def control_sensor_data():
+    """Control sensor data collection (pause/start/stop)"""
+    global sensor_data_enabled
+    
+    try:
+        data = request.get_json()
+        action = data.get('action')  # 'pause', 'start', 'stop'
+        
+        if action not in ['pause', 'start', 'stop']:
+            return jsonify({'status': 'error', 'message': 'Invalid action. Use: pause, start, stop'}), 400
+        
+        if action == 'pause':
+            sensor_data_enabled = False
+            message = 'Sensor data collection paused'
+        elif action == 'start':
+            sensor_data_enabled = True
+            message = 'Sensor data collection started'
+        elif action == 'stop':
+            sensor_data_enabled = False
+            message = 'Sensor data collection stopped'
+        
+        # Broadcast the control change
+        socketio.emit('sensor_control', {
+            'action': action,
+            'enabled': sensor_data_enabled,
+            'message': message
+        }, namespace='/realtime')
+        
+        return jsonify({
+            'status': 'success',
+            'action': action,
+            'enabled': sensor_data_enabled,
+            'message': message
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error controlling sensor data: {str(e)}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/sensor_data/control', methods=['GET'])
+def get_sensor_control_status():
+    """Get current sensor data control status"""
+    return jsonify({
+        'status': 'success',
+        'enabled': sensor_data_enabled
+    }), 200
     """
     Update robot status
     Expected JSON format:

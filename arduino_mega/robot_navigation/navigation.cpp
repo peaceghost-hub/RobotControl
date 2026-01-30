@@ -22,6 +22,8 @@ Navigation::Navigation() {
     returningToStart = false;
     useCompass = true;
     lastPositionSave = 0;
+    waypointJustCompleted = false;
+    lastCompletedWaypointId = -1;
 }
 
 void Navigation::begin(GPSHandler* g, CompassHandler* c, MotorControl* m, ObstacleAvoidance* o) {
@@ -137,6 +139,17 @@ void Navigation::navigateToWaypoint() {
         Serial.print(F("# Waypoint "));
         Serial.print(currentWaypointIndex + 1);
         Serial.println(F(" reached!"));
+        
+        // Set completion flag for status reporting
+        waypointJustCompleted = true;
+        lastCompletedWaypointId = current.id;
+        
+        // Send waypoint completion to Pi
+        Wire.beginTransmission(I2C_ADDRESS);
+        Wire.write(CMD_WAYPOINT_COMPLETED);
+        Wire.write((uint8_t)(current.id >> 8));   // High byte of waypoint ID
+        Wire.write((uint8_t)(current.id & 0xFF)); // Low byte of waypoint ID
+        Wire.endTransmission();
         
         currentWaypointIndex++;
         
@@ -350,4 +363,18 @@ void Navigation::handleReturnNavigation() {
     float bearing = calculateBearing(lat, lon, target.latitude, target.longitude);
     float heading = compass->getHeading();
     motors->adjustForHeading(heading, bearing);
+}
+
+// Waypoint completion tracking methods
+bool Navigation::isWaypointJustCompleted() {
+    return waypointJustCompleted;
+}
+
+int Navigation::getLastCompletedWaypointId() {
+    return lastCompletedWaypointId;
+}
+
+void Navigation::clearWaypointCompletionFlag() {
+    waypointJustCompleted = false;
+    lastCompletedWaypointId = -1;
 }

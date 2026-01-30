@@ -459,6 +459,28 @@ class RobotController:
                     nav_status = self.robot_link.request_status()
                     if nav_status:
                         status_data['navigation'] = nav_status
+                        
+                        # Check for waypoint completion
+                        if nav_status.get('waypoint_just_completed', False):
+                            try:
+                                # Get current waypoints to find the one that was completed
+                                waypoints = self.api_client.get_waypoints()
+                                if waypoints:
+                                    # The current waypoint index tells us which waypoint was just completed
+                                    current_idx = nav_status.get('current_waypoint_index', 0)
+                                    if current_idx > 0 and current_idx <= len(waypoints):
+                                        # Find the waypoint with sequence = current_idx
+                                        completed_waypoint = None
+                                        for wp in waypoints:
+                                            if wp.get('sequence') == current_idx:
+                                                completed_waypoint = wp
+                                                break
+                                        
+                                        if completed_waypoint:
+                                            self.api_client.complete_waypoint(completed_waypoint['id'])
+                                            logger.info(f"Waypoint {completed_waypoint['id']} (sequence {current_idx}) marked as completed")
+                            except Exception as exc:
+                                logger.error(f"Failed to complete waypoint: {exc}")
 
                     # Poll obstacle status and notify dashboard
                     try:

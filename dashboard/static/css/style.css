@@ -543,14 +543,18 @@ tr:hover {
 }
 
 .robot-marker-body {
-    font-size: 24px;
-    text-align: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background-color: #3b82f6;
+    border: 2px solid white;
+    box-shadow: 0 0 10px rgba(59, 130, 246, 0.5);
     transition: transform 0.2s ease;
 }
 
 .leaflet-marker-icon.robot-marker.backup-mode .robot-marker-body {
-    color: var(--warning-color);
-    filter: drop-shadow(0 0 6px rgba(245, 158, 11, 0.6));
+    background-color: var(--warning-color);
+    box-shadow: 0 0 10px rgba(245, 158, 11, 0.6);
 }
 
 .map-container.backup-active {
@@ -998,6 +1002,49 @@ tr:hover {
         grid-column: span 6;
     }
     .bottom-left, .bottom-right { grid-column: span 6; }
+}
+
+/* Waypoint Notification */
+.waypoint-notification {
+    position: absolute;
+    bottom: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--success-color);
+    color: white;
+    padding: 12px 20px;
+    border-radius: 8px;
+    box-shadow: var(--shadow-lg);
+    z-index: 1000;
+    font-weight: 500;
+    animation: slideUp 0.3s ease-out;
+}
+
+.waypoint-notification.hidden {
+    display: none;
+}
+
+@keyframes slideUp {
+    from {
+        transform: translateX(-50%) translateY(100%);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(-50%) translateY(0);
+        opacity: 1;
+    }
+}
+
+/* Sensor Controls */
+.sensor-controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.sensor-controls .btn {
+    padding: 4px 8px;
+    font-size: 12px;
 }
 
 @media (max-width: 768px) {
