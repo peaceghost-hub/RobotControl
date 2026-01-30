@@ -13,7 +13,7 @@ logger = logging.getLogger('compass')
 class Compass:
     """HMC5883L magnetometer for heading"""
     
-    def __init__(self, bus=1, address=0x1E):
+    def __init__(self, bus=1, address=0x0C):
         self.bus = smbus2.SMBus(bus)
         self.address = address
         self.declination = 0  # Magnetic declination in radians
