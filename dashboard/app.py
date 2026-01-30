@@ -993,7 +993,7 @@ def get_status():
                 'signal_strength': status.signal_strength,
                 'last_update': status.last_update.isoformat(),
                 'system_info': json.loads(status.system_info) if status.system_info else {}
-            })
+            }, namespace='/realtime')
             
             return jsonify({'status': 'success'}), 200
         

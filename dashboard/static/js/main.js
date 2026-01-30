@@ -323,17 +323,21 @@ function handleGPSUpdate(data) {
     updateBackupIndicators();
     updateControlIndicators();
     
+    const lat = payload.latitude !== undefined ? Number(payload.latitude) : NaN;
+    const lon = payload.longitude !== undefined ? Number(payload.longitude) : NaN;
+    const hasValidFix = Number.isFinite(lat) && Number.isFinite(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
+
     // Update GPS displays
-    updateElement('gps-lat', payload.latitude !== undefined ? Number(payload.latitude).toFixed(6) : '--');
-    updateElement('gps-lon', payload.longitude !== undefined ? Number(payload.longitude).toFixed(6) : '--');
+    updateElement('gps-lat', hasValidFix ? lat.toFixed(6) : '--');
+    updateElement('gps-lon', hasValidFix ? lon.toFixed(6) : '--');
     updateElement('gps-heading', payload.heading !== undefined ? `${Number(payload.heading).toFixed(1)}°` : '--');
     updateElement('gps-speed', payload.speed !== undefined ? `${Number(payload.speed).toFixed(2)} m/s` : '--');
     updateElement('gps-satellites', payload.satellites !== undefined ? `${payload.satellites}` : '--');
     updateElement('gps-source', source === 'backup' ? 'Backup (ZigBee)' : 'Primary (Pi)');
-    
-    // Update map
-    if (window.updateRobotPosition) {
-        window.updateRobotPosition(payload.latitude, payload.longitude, payload.heading, source);
+
+    // Update map only when coordinates are valid
+    if (hasValidFix && window.updateRobotPosition) {
+        window.updateRobotPosition(lat, lon, payload.heading, source);
     }
 }
 
