@@ -87,6 +87,9 @@ int manualSpeed = 180;
 String wirelessBuffer;
 ControlMode controlMode = MODE_AUTO;
 
+// Heading received from Pi (since compass moved to Pi)
+float piHeading = 0.0;
+
 // Wireless compatibility: map old zigbee names to wireless
 #define zigbeeHandshakeComplete wirelessHandshakeComplete
 #define lastZigbeeGps lastWirelessGps
@@ -227,21 +230,13 @@ void setup() {
     beepPattern(3, 200, 100);  // Triple beep warning
   }
 
-  // Initialize compass (software I2C pins)
-  if (compass.begin()) {
-    DEBUG_SERIAL.print(F("# Compass initialized: "));
-    DEBUG_SERIAL.print(compass.getTypeName());
-    DEBUG_SERIAL.print(F(" @ 0x"));
-    DEBUG_SERIAL.println(compass.getAddress(), HEX);
-  } else {
-    DEBUG_SERIAL.println(F("# WARNING: Compass init failed - navigation accuracy reduced"));
-    beepPattern(3, 200, 100);  // Triple beep warning
-  }
+  // Compass moved to Pi - no initialization needed here
+  DEBUG_SERIAL.println(F("# Compass: Moved to Pi for I2C compatibility"));
 
   DEBUG_SERIAL.println(F("# I2C initialized:"));
   DEBUG_SERIAL.print(F("#   - Slave to Pi at 0x"));
   DEBUG_SERIAL.println(I2C_ADDRESS, HEX);
-  DEBUG_SERIAL.println(F("#   - Compass on software I2C pins"));
+  DEBUG_SERIAL.println(F("#   - Compass moved to Pi"));
 
   motors.begin();
   obstacleAvoid.begin();
@@ -624,6 +619,18 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
         prepareError(ERR_PACKET_SIZE);
       }
       break;
+
+    case CMD_SEND_HEADING:
+      // Pi sending compass heading
+      if (length >= 4) {
+        memcpy(&piHeading, &payload[0], sizeof(float));
+        DEBUG_SERIAL.print(F("# I2C: Pi heading "));
+        DEBUG_SERIAL.println(piHeading, 1);
+        prepareAck();
+      } else {
+        prepareError(ERR_PACKET_SIZE);
+      }
+      break;
     
     case CMD_RETURN_TO_START:
       // Navigate back to starting position
@@ -749,7 +756,7 @@ void prepareGpsResponse() {
   float latitude = gps.getLatitude();
   float longitude = gps.getLongitude();
   float speed = gps.getSpeed();
-  float heading = compass.getHeading();
+  float heading = piHeading;  // Heading from Pi's compass
   uint8_t satellites = gps.getSatellites();
 
   memcpy(&responseBuffer[2], &latitude, sizeof(float));

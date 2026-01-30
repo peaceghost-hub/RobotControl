@@ -39,8 +39,8 @@ const uint8_t I2C_ADDRESS = 0x08;
 // Compass I2C (software bus to avoid conflicts with Pi I2C)
 // Wire the compass to these pins instead of SDA/SCL (20/21)
 #define COMPASS_USE_SOFT_I2C 1
-#define COMPASS_SDA_PIN 40
-#define COMPASS_SCL_PIN 41
+#define COMPASS_SDA_PIN 44
+#define COMPASS_SCL_PIN 45
 
 // Wireless protocol serial port baud rates
 #ifdef WIRELESS_PROTOCOL_ZIGBEE
@@ -63,25 +63,25 @@ const uint8_t I2C_ADDRESS = 0x08;
 #endif
 
 // I2C Protocol
-const uint8_t CMD_PING            = 0x01;
-const uint8_t CMD_NAV_START       = 0x02;
-const uint8_t CMD_NAV_STOP        = 0x03;
-const uint8_t CMD_NAV_PAUSE       = 0x04;
-const uint8_t CMD_NAV_RESUME      = 0x05;
-const uint8_t CMD_WAYPOINT_CLEAR  = 0x10;
-const uint8_t CMD_WAYPOINT_PACKET = 0x11;
-const uint8_t CMD_WAYPOINT_COMMIT = 0x12;
-const uint8_t CMD_REQUEST_GPS     = 0x20;
-const uint8_t CMD_REQUEST_STATUS  = 0x21;
-const uint8_t CMD_REQUEST_OBSTACLE= 0x22;  // New: request obstacle flag/distance
-const uint8_t CMD_HEARTBEAT       = 0x30;
+const uint8_t CMD_PING            = 'P';
+const uint8_t CMD_NAV_START       = 'S';
+const uint8_t CMD_NAV_STOP        = 'T';
+const uint8_t CMD_NAV_PAUSE       = 'A';
+const uint8_t CMD_NAV_RESUME      = 'R';
+const uint8_t CMD_WAYPOINT_CLEAR  = 'C';
+const uint8_t CMD_WAYPOINT_PACKET = 'W';
+const uint8_t CMD_WAYPOINT_COMMIT = 'M';
+const uint8_t CMD_REQUEST_GPS     = 'G';
+const uint8_t CMD_REQUEST_STATUS  = 'U';
+const uint8_t CMD_REQUEST_OBSTACLE= 'O';  // New: request obstacle flag/distance
+const uint8_t CMD_HEARTBEAT       = 'H';
 // Enhanced feature commands
-const uint8_t CMD_SEND_GPS        = 0x40;  // Pi -> Mega GPS forwarding
-const uint8_t CMD_RETURN_TO_START = 0x50;
-const uint8_t CMD_MANUAL_OVERRIDE = 0x60;
-const uint8_t CMD_EMERGENCY_STOP  = 0x70;
-const uint8_t CMD_WIRELESS_BROADCAST = 0x80;
-const uint8_t CMD_FOLLOW_LINE     = 0x90;  // Enable/disable line follower mode
+const uint8_t CMD_SEND_GPS        = 'F';  // Pi -> Mega GPS forwarding
+const uint8_t CMD_RETURN_TO_START = 'B';
+const uint8_t CMD_MANUAL_OVERRIDE = 'V';
+const uint8_t CMD_EMERGENCY_STOP  = 'E';
+const uint8_t CMD_WIRELESS_BROADCAST = 'Z';
+const uint8_t CMD_FOLLOW_LINE     = 'L';  // Enable/disable line follower mode
 
 const uint8_t RESP_ACK    = 0x80;
 const uint8_t RESP_GPS    = 0x81;
