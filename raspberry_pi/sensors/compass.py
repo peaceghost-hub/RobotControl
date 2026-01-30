@@ -46,10 +46,26 @@ class Compass:
         try:
             if self.chip == 'QMC5883L':
                 # QMC5883L basic setup (continuous mode)
+                # 0x0A: Control 2 (soft reset on many QMC variants)
+                try:
+                    self.bus.write_byte_data(self.address, 0x0A, 0x80)
+                    time.sleep(0.01)
+                except Exception:
+                    # Not all variants implement this register; ignore.
+                    pass
+
                 # 0x0B: Set/Reset period
                 self.bus.write_byte_data(self.address, 0x0B, 0x01)
                 # 0x09: Control (OSR=512, RNG=2G, ODR=100Hz, MODE=Continuous)
                 self.bus.write_byte_data(self.address, 0x09, 0x1D)
+
+                # Best-effort readback for debugging
+                try:
+                    ctrl = self.bus.read_byte_data(self.address, 0x09)
+                    setrst = self.bus.read_byte_data(self.address, 0x0B)
+                    logger.info("QMC5883L regs: CTRL(0x09)=0x%02X SETRST(0x0B)=0x%02X", ctrl, setrst)
+                except Exception:
+                    pass
             else:
                 # HMC5883L setup
                 self.bus.write_byte_data(self.address, 0x00, 0x70)  # 8-average, 15Hz, normal
@@ -85,8 +101,28 @@ class Compass:
         """Read raw magnetometer data"""
         try:
             if self.chip == 'QMC5883L':
-                # QMC5883L data starts at 0x00: X_L, X_H, Y_L, Y_H, Z_L, Z_H
-                data = self.bus.read_i2c_block_data(self.address, 0x00, 6)
+                # QMC5883L status at 0x06: DRDY(0), OVL(1), DOR(2)
+                # Data starts at 0x00: X_L, X_H, Y_L, Y_H, Z_L, Z_H
+                # Retry a few times if data not ready.
+                data = None
+                for _ in range(5):
+                    try:
+                        status = self.bus.read_byte_data(self.address, 0x06)
+                    except Exception:
+                        status = 0
+
+                    drdy = bool(status & 0x01)
+                    ovl = bool(status & 0x02)
+                    if ovl:
+                        logger.warning("QMC5883L overflow (status=0x%02X)", status)
+
+                    if drdy or status == 0:
+                        data = self.bus.read_i2c_block_data(self.address, 0x00, 6)
+                        break
+                    time.sleep(0.01)
+
+                if data is None:
+                    return 0, 0, 0
             else:
                 # HMC5883L data starts at 0x03: X_MSB, X_LSB, Z_MSB, Z_LSB, Y_MSB, Y_LSB
                 data = self.bus.read_i2c_block_data(self.address, 0x03, 6)
@@ -98,6 +134,11 @@ class Compass:
                     self.address,
                     ' '.join(f"{b:02X}" for b in data),
                 )
+                return 0, 0, 0
+
+            # Some broken reads show a constant 0x80 followed by zeros; treat as invalid.
+            if data == [0x80, 0x00, 0x00, 0x00, 0x00, 0x00]:
+                logger.warning("Compass returned constant pattern at 0x%02X: %s", self.address, ' '.join(f"{b:02X}" for b in data))
                 return 0, 0, 0
 
             if self.chip == 'QMC5883L':
