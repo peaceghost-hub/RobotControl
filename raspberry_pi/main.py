@@ -339,7 +339,9 @@ class RobotController:
                         sensor_data['heading'] = heading
                         # Send heading to Mega
                         import struct
-                        self.robot_link._exchange(ord('D'), struct.pack('f', heading))
+                        resp = self.robot_link._exchange(ord('D'), struct.pack('<f', float(heading)), expect=2)
+                        if not resp or resp[0] != getattr(self.robot_link, 'RESP_ACK', 0x80):
+                            logger.debug("Mega did not ACK heading update")
                     except Exception as e:
                         logger.debug(f"Compass read failed: {e}")
                         sensor_data['heading'] = 0
@@ -403,13 +405,13 @@ class RobotController:
                     gps_data = self.robot_link.request_gps_data()
                 
                 if gps_data and gps_data.get('latitude') is not None and gps_data.get('longitude') is not None:
-                    # Add compass heading
-                    # if self.compass:
-                    #     try:
-                    #         gps_data['heading'] = self.compass.read_heading()
-                    #     except Exception as e:
-                    #         logger.debug(f"Compass read failed: {e}")
-                    #         gps_data['heading'] = 0
+                    # Add compass heading (Pi-side) so the dashboard shows heading even when GPS is stationary.
+                    if self.compass:
+                        try:
+                            gps_data['heading'] = float(self.compass.read_heading())
+                        except Exception as e:
+                            logger.debug(f"Compass read failed: {e}")
+                            gps_data['heading'] = 0.0
                     
                     # Add timestamp and device ID
                     gps_data['timestamp'] = datetime.now().isoformat()

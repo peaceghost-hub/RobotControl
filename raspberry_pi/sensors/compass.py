@@ -18,8 +18,9 @@ class Compass:
         self.address = None
         self.declination = 0  # Magnetic declination in radians
         
-        # Try both possible addresses for HMC5883L
-        possible_addresses = [0x0C, 0x2C]
+        # Try likely addresses (some modules vary / use different breakouts)
+        # Keep 0x0C/0x2C for your current wiring, but include common defaults too.
+        possible_addresses = [0x0C, 0x2C, 0x1E, 0x0D]
         
         for addr in possible_addresses:
             try:
@@ -32,7 +33,7 @@ class Compass:
                 continue
         
         if self.address is None:
-            raise Exception("Compass not found at addresses 0x0C or 0x2C")
+            raise Exception("Compass not found on I2C (tried 0x0C, 0x2C, 0x1E, 0x0D)")
         
         try:
             # Initialize HMC5883L
@@ -48,6 +49,16 @@ class Compass:
         """Read raw magnetometer data"""
         try:
             data = self.bus.read_i2c_block_data(self.address, 0x03, 6)
+
+            # If the bus returned all 0x00 or all 0xFF, treat as invalid read.
+            if data == [0, 0, 0, 0, 0, 0] or data == [255, 255, 255, 255, 255, 255]:
+                logger.warning(
+                    "Compass returned invalid raw bytes at 0x%02X: %s",
+                    self.address,
+                    ' '.join(f"{b:02X}" for b in data),
+                )
+                return 0, 0, 0
+
             x = (data[0] << 8) | data[1]
             z = (data[2] << 8) | data[3]
             y = (data[4] << 8) | data[5]
