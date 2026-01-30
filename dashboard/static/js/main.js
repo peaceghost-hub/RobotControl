@@ -19,6 +19,9 @@ const CONFIG = {
     socketNamespace: '/realtime',
     updateInterval: 1000, // ms
     chartDataPoints: 50,
+    // How long we can go without receiving a status_update before marking the device offline.
+    // Must be > the Pi status interval; default keeps the UI stable.
+    deviceOfflineTimeoutSec: Number(DASHBOARD_CONFIG.deviceOfflineTimeoutSec || 30),
     apiBaseUrl: DASHBOARD_CONFIG.apiBaseUrl || window.location.origin,
     deviceId: DASHBOARD_CONFIG.deviceId || 'robot_01',
     supportedDevices: (DASHBOARD_CONFIG.supportedDevices || ['robot_01']).filter(Boolean),
@@ -41,6 +44,7 @@ const state = {
     connected: false,
     lastStatusUpdate: null,
     statusCheckInterval: null,
+    connectionLostLogged: false,
     latestData: {
         sensors: {},
         gps: {},
@@ -168,7 +172,7 @@ function connectWebSocket() {
         console.log('WebSocket disconnected');
         state.connected = false;
         updateConnectionStatus('websocket', false);
-        updateConnectionStatus('device', false); // Also set device to offline if WebSocket disconnects
+        // Don't force the device indicator offline here; it's driven by status_update heartbeat.
         addLog('warning', 'Disconnected from server');
     });
     
@@ -347,6 +351,7 @@ function handleGPSUpdate(data) {
 function handleStatusUpdate(data) {
     // Track when we received this status update
     state.lastStatusUpdate = new Date();
+    state.connectionLostLogged = false;
     state.latestData.status = data;
     
     // Update device connection status
@@ -1278,24 +1283,26 @@ function updateControlIndicators() {
  * Check if the robot is still connected by verifying the last status update time
  */
 function checkRobotStatus() {
-    if (!state.latestData.status || !state.latestData.status.last_update) {
-        // No status received yet
-        return;
-    }
-    
-    const now = new Date();
-    const lastUpdate = new Date(state.latestData.status.last_update);
-    const secondsSinceUpdate = (now - lastUpdate) / 1000;
-    
-    // If no update in the last 10 seconds and currently marked as online, mark as offline
-    if (secondsSinceUpdate > 10 && state.latestData.status.online) {
-        const statusUpdate = {
-            ...state.latestData.status,
-            online: false,
-            last_update: now.toISOString()
-        };
-        handleStatusUpdate(statusUpdate);
-        addLog('warning', 'Robot connection lost - no recent status updates');
+    if (!state.lastStatusUpdate || !state.latestData.status) return;
+
+    const secondsSinceReceive = (Date.now() - state.lastStatusUpdate.getTime()) / 1000;
+    const timeoutSec = Number.isFinite(CONFIG.deviceOfflineTimeoutSec) ? CONFIG.deviceOfflineTimeoutSec : 30;
+
+    // If we haven't RECEIVED a status update recently, mark offline once.
+    if (secondsSinceReceive > timeoutSec) {
+        if (state.latestData.status.online) {
+            handleStatusUpdate({
+                ...state.latestData.status,
+                online: false
+            });
+        } else {
+            updateConnectionStatus('device', false);
+        }
+
+        if (!state.connectionLostLogged) {
+            addLog('warning', `Robot connection lost - no status updates for ${Math.round(secondsSinceReceive)}s`);
+            state.connectionLostLogged = true;
+        }
     }
 }
 
