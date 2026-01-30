@@ -23,24 +23,25 @@ class I2CComm:
     """High level I2C protocol wrapper for Mega navigation board"""
 
     # Command opcodes sent to Mega
-    CMD_PING = 0x01
-    CMD_NAV_START = 0x02
-    CMD_NAV_STOP = 0x03
-    CMD_NAV_PAUSE = 0x04
-    CMD_NAV_RESUME = 0x05
-    CMD_WAYPOINT_CLEAR = 0x10
-    CMD_WAYPOINT_PACKET = 0x11
-    CMD_WAYPOINT_COMMIT = 0x12
-    CMD_REQUEST_GPS = 0x20
-    CMD_REQUEST_STATUS = 0x21
-    CMD_REQUEST_OBSTACLE = 0x22   # New: Request obstacle flag/distance
-    CMD_HEARTBEAT = 0x30
-    CMD_SEND_GPS = 0x40          # New: Send GPS from Pi to Mega (for fallback/broadcast)
-    CMD_RETURN_TO_START = 0x50   # New: Return to starting position
-    CMD_MANUAL_OVERRIDE = 0x60   # New: Manual control signal with joystick data
-    CMD_EMERGENCY_STOP = 0x70    # New: Emergency stop
-    CMD_WIRELESS_BROADCAST = 0x80 # New: Broadcast position via wireless
-    CMD_FOLLOW_LINE = 0x90        # New: Enable/disable line follower
+    CMD_PING = ord('P')
+    CMD_NAV_START = ord('S')
+    CMD_NAV_STOP = ord('T')
+    CMD_NAV_PAUSE = ord('A')
+    CMD_NAV_RESUME = ord('R')
+    CMD_WAYPOINT_CLEAR = ord('C')
+    CMD_WAYPOINT_PACKET = ord('W')
+    CMD_WAYPOINT_COMMIT = ord('M')
+    CMD_REQUEST_GPS = ord('G')
+    CMD_REQUEST_STATUS = ord('U')
+    CMD_REQUEST_OBSTACLE = ord('O')   # New: Request obstacle flag/distance
+    CMD_HEARTBEAT = ord('H')
+    CMD_SEND_GPS = ord('F')          # New: Send GPS from Pi to Mega (for fallback/broadcast)
+    CMD_SEND_HEADING = ord('D')      # New: Send heading from Pi to Mega
+    CMD_RETURN_TO_START = ord('B')   # New: Return to starting position
+    CMD_MANUAL_OVERRIDE = ord('V')   # New: Manual control signal with joystick data
+    CMD_EMERGENCY_STOP = ord('E')    # New: Emergency stop
+    CMD_WIRELESS_BROADCAST = ord('Z') # New: Broadcast position via wireless
+    CMD_FOLLOW_LINE = ord('L')        # New: Enable/disable line follower
 
     # Response opcodes returned by Mega
     RESP_ACK = 0x80

@@ -339,7 +339,7 @@ class RobotController:
                 #         sensor_data['heading'] = heading
                 #         # Send heading to Mega
                 #         import struct
-                #         self.i2c_comm.send_command('D', struct.pack('f', heading))
+                        self.robot_link._exchange(ord('D'), struct.pack('f', heading))
                 #     except Exception as e:
                 #         logger.debug(f"Compass read failed: {e}")
                 #         sensor_data['heading'] = 0
