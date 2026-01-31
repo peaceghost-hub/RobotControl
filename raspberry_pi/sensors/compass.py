@@ -11,6 +11,10 @@ try:
 except Exception:  # pragma: no cover
     from smbus import SMBus  # type: ignore
     i2c_msg = None
+import os
+import fcntl
+import ctypes
+import struct
 import math
 import time
 import logging
@@ -27,13 +31,32 @@ class Compass:
     
     def __init__(self, bus=1):
         self.bus = SMBus(bus)
+        self._bus_num = bus
+        self._raw_i2c_fd: int | None = None
         self.address = None
         self.declination = 0  # Magnetic declination in radians
         self.chip = None  # 'HMC5883L' | 'QMC5883L'
         self._qmc_recovered_once = False
+
+        # Best-effort: obtain an fd for raw I2C_RDWR ioctls (needed when smbus2
+        # isn't installed but we still want a combined write(reg)+read(bytes)).
+        try:
+            fd = getattr(self.bus, "fd", None)
+            if isinstance(fd, int) and fd >= 0:
+                self._raw_i2c_fd = fd
+        except Exception:
+            pass
+
+        if self._raw_i2c_fd is None:
+            try:
+                self._raw_i2c_fd = os.open(f"/dev/i2c-{bus}", os.O_RDWR)
+            except Exception:
+                self._raw_i2c_fd = None
         
         # Try likely addresses (some modules vary / use different breakouts)
-        possible_addresses = [0x2C, 0x0D, 0x0C, 0x1E]
+        # Prefer the most common QMC address (0x0D) first; 0x2C is unusual and some
+        # unrelated devices can ACK there.
+        possible_addresses = [0x0D, 0x0C, 0x2C, 0x1E]
         
         for addr in possible_addresses:
             try:
@@ -53,7 +76,7 @@ class Compass:
 
         try:
             if self.chip == 'QMC5883L':
-                self._qmc_init(mode=0x1D)
+                self._qmc_init(mode=0x01)
 
                 # Best-effort readback for debugging
                 try:
@@ -82,6 +105,31 @@ class Compass:
                 self._write_reg(0x02, 0x00)  # Continuous mode
 
             logger.info(f"Compass initialized at 0x{self.address:02X} as {self.chip}")
+
+            # Post-init validation: if we can't enter continuous mode or never produce
+            # non-zero samples, treat it as unavailable (prevents a stuck 0° heading).
+            if self.chip == 'QMC5883L':
+                try:
+                    ctrl = self._read_reg(0x09)
+                except Exception:
+                    ctrl = None
+
+                if isinstance(ctrl, int) and (ctrl & 0x03) != 0x01:
+                    raise Exception(
+                        f"QMC at 0x{self.address:02X} refuses continuous mode: CTRL(0x09)=0x{ctrl:02X}"
+                    )
+
+                ok = False
+                for _ in range(8):
+                    x, y, z = self.read_raw()
+                    if (x, y, z) != (0, 0, 0):
+                        ok = True
+                        break
+                    time.sleep(0.02)
+                if not ok:
+                    raise Exception(
+                        f"QMC at 0x{self.address:02X} produced no valid samples (constant/zero data)"
+                    )
         except Exception as e:
             logger.error(f"Failed to initialize compass at 0x{self.address:02X}: {e}")
             raise
@@ -100,6 +148,41 @@ class Compass:
         self._write_reg(0x0B, 0x01)  # set/reset period
         self._write_reg(0x09, mode & 0xFF)
         time.sleep(0.05)
+
+        # Ensure the chip actually entered continuous mode (MODE bits should be 0b01).
+        # Some devices will ACK these registers but mask out the mode bits entirely.
+        try:
+            ctrl = self._read_reg(0x09)
+        except Exception:
+            ctrl = None
+
+        if isinstance(ctrl, int) and (ctrl & 0x03) != 0x01:
+            # Try to force MODE=continuous while keeping upper bits the device reports.
+            candidates: list[int] = []
+            candidates.append((ctrl & 0xFC) | 0x01)
+            # Common known-good values used in the wild.
+            candidates.extend([0x1D, 0x19, 0x11, 0x09, 0x01])
+
+            for val in candidates:
+                try:
+                    self._write_reg(0x09, val & 0xFF)
+                    time.sleep(0.02)
+                    rb = self._read_reg(0x09)
+                    if (rb & 0x03) == 0x01:
+                        logger.warning(
+                            "QMC init: CONTROL(0x09) needed adjustment (was 0x%02X, now 0x%02X)",
+                            ctrl,
+                            rb,
+                        )
+                        break
+                except Exception:
+                    continue
+            else:
+                logger.warning(
+                    "QMC init: device at 0x%02X refuses continuous mode (CTRL(0x09)=0x%02X). It may not be a QMC5883L.",
+                    self.address,
+                    ctrl,
+                )
 
     def _qmc_soft_reset(self) -> None:
         """Best-effort QMC soft reset.
@@ -133,6 +216,14 @@ class Compass:
             self.bus.i2c_rdwr(write, read)
             return list(read)
 
+        # Fallback 1: use Linux I2C_RDWR ioctl to perform a proper combined
+        # transaction even without smbus2.
+        if self._raw_i2c_fd is not None:
+            try:
+                return self._i2c_rdwr_ioctl(reg & 0xFF, length)
+            except Exception:
+                pass
+
         # Fallback: avoid SMBus *block* read semantics (they break on some QMC clones).
         # Read one byte at a time via SMBus byte-data reads.
         out: list[int] = []
@@ -140,6 +231,45 @@ class Compass:
         for i in range(length):
             out.append(int(self.bus.read_byte_data(self.address, (base + i) & 0xFF)))
         return out
+
+    def _i2c_rdwr_ioctl(self, reg: int, length: int) -> list[int]:
+        """Combined I2C write(reg)+read(length) via Linux I2C_RDWR ioctl."""
+
+        # Constants from linux/i2c-dev.h
+        I2C_RDWR = 0x0707
+        I2C_M_RD = 0x0001
+
+        class _I2CMsg(ctypes.Structure):
+            _fields_ = [
+                ("addr", ctypes.c_uint16),
+                ("flags", ctypes.c_uint16),
+                ("len", ctypes.c_uint16),
+                ("buf", ctypes.c_void_p),
+            ]
+
+        class _I2CRdwrIoctlData(ctypes.Structure):
+            _fields_ = [("msgs", ctypes.POINTER(_I2CMsg)), ("nmsgs", ctypes.c_uint32)]
+
+        if self.address is None:
+            raise RuntimeError("Compass address not set")
+
+        wbuf = (ctypes.c_uint8 * 1)(reg & 0xFF)
+        rbuf = (ctypes.c_uint8 * length)()
+
+        msgs = (_I2CMsg * 2)()
+        msgs[0].addr = self.address
+        msgs[0].flags = 0
+        msgs[0].len = 1
+        msgs[0].buf = ctypes.cast(wbuf, ctypes.c_void_p)
+
+        msgs[1].addr = self.address
+        msgs[1].flags = I2C_M_RD
+        msgs[1].len = length
+        msgs[1].buf = ctypes.cast(rbuf, ctypes.c_void_p)
+
+        ioctl_data = _I2CRdwrIoctlData(msgs=msgs, nmsgs=2)
+        fcntl.ioctl(self._raw_i2c_fd, I2C_RDWR, ioctl_data)
+        return [int(b) for b in rbuf]
 
     def _detect_chip_type(self, addr: int) -> str:
         """Attempt to detect HMC5883L vs QMC5883L.
