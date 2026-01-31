@@ -25,7 +25,7 @@ struct PendingWaypoint;
 
 // ==================== WIRELESS PROTOCOL SELECTION ====================
 // Uncomment ONE of these to select wireless protocol:
-#define WIRELESS_PROTOCOL_ZIGBEE     // Uses Serial2 (RX2=17, TX2=16), 57600 baud
+#define WIRELESS_PROTOCOL_ZIGBEE     // Uses Serial2 (RX2=17, TX2=16), transparent UART
 // #define WIRELESS_PROTOCOL_LORA    // Uses SPI + pins 9(CS) & 8(RST), long range
 // #define WIRELESS_PROTOCOL_BLE     // Uses Serial3 (RX3=15, TX3=14), 38400 baud HC-05 / 9600 HM-10
 
@@ -45,7 +45,7 @@ const uint8_t I2C_ADDRESS = 0x08;
 // Wireless protocol serial port baud rates
 #ifdef WIRELESS_PROTOCOL_ZIGBEE
   #define WIRELESS_SERIAL Serial2
-  const uint32_t WIRELESS_BAUD = 57600;
+  const uint32_t WIRELESS_BAUD = 9600;
 #elif defined(WIRELESS_PROTOCOL_BLE)
   #define WIRELESS_SERIAL Serial3
   const uint32_t WIRELESS_BAUD = 38400;  // HC-05: change to 9600 or set via AT mode
@@ -59,7 +59,7 @@ const uint8_t I2C_ADDRESS = 0x08;
 // Legacy compatibility (maps to selected protocol)
 #ifdef WIRELESS_PROTOCOL_ZIGBEE
   #define ZIGBEE_SERIAL Serial2
-  const uint32_t ZIGBEE_BAUD = 57600;
+  const uint32_t ZIGBEE_BAUD = 9600;
 #endif
 
 // I2C Protocol

@@ -206,7 +206,9 @@ void setup() {
   
   // Display selected wireless protocol
   #ifdef WIRELESS_PROTOCOL_ZIGBEE
-    DEBUG_SERIAL.println(F("# Wireless: ZigBee (XBee) on Serial2 @ 57600 baud"));
+    DEBUG_SERIAL.print(F("# Wireless: ZigBee (UART Transparent) on Serial2 @ "));
+    DEBUG_SERIAL.print(ZIGBEE_BAUD);
+    DEBUG_SERIAL.println(F(" baud"));
   #elif defined(WIRELESS_PROTOCOL_LORA)
     DEBUG_SERIAL.println(F("# Wireless: LoRa (SX1276/RFM95W) on SPI"));
   #elif defined(WIRELESS_PROTOCOL_BLE)
@@ -830,6 +832,9 @@ void handleWireless() {
       char cmdStr[65];
       memcpy(cmdStr, msg.data, msg.length);
       cmdStr[msg.length] = '\0';
+
+      DEBUG_SERIAL.print(F("# Wireless RX: "));
+      DEBUG_SERIAL.println(cmdStr);
       processWirelessMessage(String(cmdStr));
     }
   }

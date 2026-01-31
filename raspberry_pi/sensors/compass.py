@@ -32,6 +32,7 @@ class Compass:
         self._bus_num = bus
         self.address = None
         self.chip = None
+        self._qmc_variant = None  # "L" for 5883L, "P" for 5883P
         self._qmc_recovered_once = False
 
         # declination stored in radians
@@ -65,7 +66,7 @@ class Compass:
 
         self.chip = self._detect_chip_type(self.address)
 
-        if self.chip == "QMC5883L":
+        if self.chip in ("QMC5883L", "QMC5883P"):
             self._qmc_init()
         else:
             # classic HMC configuration
@@ -86,7 +87,21 @@ class Compass:
         except Exception:
             pass
 
-        if addr in (0x0D, 0x0C, 0x2C):
+        if addr in (0x0D, 0x0C):
+            self._qmc_variant = "L"
+            return "QMC5883L"
+
+        if addr in (0x2C, 0x2A):
+            try:
+                chip_id = self.bus.read_byte_data(addr, 0x00)
+            except Exception:
+                chip_id = None
+
+            if chip_id == 0x80 or addr == 0x2A:
+                self._qmc_variant = "P"
+                return "QMC5883P"
+
+            self._qmc_variant = "L"
             return "QMC5883L"
         return "HMC5883L"
 
@@ -152,6 +167,21 @@ class Compass:
     # QMC init and soft reset
     # --------------------------------------------------------------
     def _qmc_init(self):
+        if self.chip == "QMC5883P" or self._qmc_variant == "P":
+            # QMC5883P register map per QST datasheet
+            self._write_reg(0x0A, 0x00)  # suspend
+            time.sleep(0.005)
+            try:
+                self._write_reg(0x29, 0x06)  # axis sign config (recommended)
+            except Exception:
+                pass
+            self._write_reg(0x0B, 0x08)  # set/reset on, 8G range
+            time.sleep(0.001)
+            self._write_reg(0x0A, 0xC3)  # continuous mode, 200Hz ODR, OSR defaults
+            time.sleep(0.01)
+            return
+
+        # Legacy QMC5883L/clone sequence
         self._write_reg(0x09, 0x00)
         time.sleep(0.01)
         self._write_reg(0x0B, 0x01)
@@ -163,11 +193,18 @@ class Compass:
     # --------------------------------------------------------------
     def read_raw(self):
         try:
-            if self.chip == "QMC5883L":
-                status = self._read_reg(0x06)
-                if status & 0x01 == 0:  # not ready
-                    time.sleep(0.01)
-                data = self._read_bytes(0x00, 6)
+            if self.chip in ("QMC5883L", "QMC5883P"):
+                if self._qmc_variant == "P" or self.chip == "QMC5883P":
+                    status = self._read_reg(0x09)
+                    if status & 0x01 == 0:
+                        time.sleep(0.01)
+                    data = self._read_bytes(0x01, 6)
+                else:
+                    status = self._read_reg(0x06)
+                    if status & 0x01 == 0:  # not ready
+                        time.sleep(0.01)
+                    data = self._read_bytes(0x00, 6)
+
                 x = (data[1] << 8) | data[0]
                 y = (data[3] << 8) | data[2]
                 z = (data[5] << 8) | data[4]

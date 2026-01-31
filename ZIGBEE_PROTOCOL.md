@@ -5,7 +5,7 @@ XBee/ZigBee modules on Serial2 (pins 16/17) provide wireless communication betwe
 - **Arduino Mega** (robot navigation controller)
 - **Arduino Uno** (handheld remote controller)
 
-Baud Rate: **57600** (recommended default in this repo; configurable on the module)
+Baud Rate: **9600** (common default for transparent CC2530 modules; configurable on the module)
 
 ## Message Format
 All messages are ASCII strings terminated with newline (`\n`).

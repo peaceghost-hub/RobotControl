@@ -19,7 +19,7 @@
 // ZigBee serial on pins 2 (RX) and 3 (TX)
 static const uint8_t ZIGBEE_RX_PIN = 2;
 static const uint8_t ZIGBEE_TX_PIN = 3;
-static const long ZIGBEE_BAUD = 57600; // Must match the Mega's ZIGBEE_BAUD
+static const long ZIGBEE_BAUD = 9600; // Must match the Mega's ZIGBEE_BAUD
 
 SoftwareSerial zigbee(ZIGBEE_RX_PIN, ZIGBEE_TX_PIN); // RX, TX
 
@@ -75,6 +75,7 @@ void setup() {
 void loop() {
 	// Periodic PING until READY seen
 	if (!readySeen && (millis() - lastPingMs >= PING_INTERVAL_MS)) {
+		Serial.println(F("[UNO] TX PING"));
 		zigbee.println(F("PING"));
 		lastPingMs = millis();
 	}
@@ -83,11 +84,14 @@ void loop() {
 	static String line;
 	while (zigbee.available()) {
 		char c = zigbee.read();
-		Serial.write(c);
-		lastRxMillis = millis();
+
 		if (c == '\n') {
 			line.trim();
 			if (line.length() > 0) {
+				// Only consider the link alive when we receive a well-formed ASCII line.
+				lastRxMillis = millis();
+				Serial.print(F("[UNO] RX "));
+				Serial.println(line);
 				if (line.equalsIgnoreCase("READY")) {
 					readySeen = true;
 					Serial.println(F("[UNO] READY received"));
@@ -95,7 +99,10 @@ void loop() {
 			}
 			line = "";
 		} else if (c != '\r') {
-			line += c;
+			// Keep only printable ASCII to avoid garbage due to baud mismatch/noise.
+			if (c >= 32 && c <= 126) {
+				line += c;
+			}
 			if (line.length() > 96) {
 				line.remove(0, line.length() - 64);
 			}
@@ -161,25 +168,35 @@ void loop() {
 
 		// Only send when changes occur to reduce spam.
 		if (dir != lastDir || abs(speed - lastSpeed) >= 10) {
+			Serial.print(F("[UNO] TX "));
 			switch (dir) {
 				case DIR_FWD:
+					Serial.print(F("MCTL,FORWARD,"));
+					Serial.println(speed);
 					zigbee.print(F("MCTL,FORWARD,"));
 					zigbee.println(speed);
 					break;
 				case DIR_BACK:
+					Serial.print(F("MCTL,BACKWARD,"));
+					Serial.println(speed);
 					zigbee.print(F("MCTL,BACKWARD,"));
 					zigbee.println(speed);
 					break;
 				case DIR_LEFT:
+					Serial.print(F("MCTL,LEFT,"));
+					Serial.println(speed);
 					zigbee.print(F("MCTL,LEFT,"));
 					zigbee.println(speed);
 					break;
 				case DIR_RIGHT:
+					Serial.print(F("MCTL,RIGHT,"));
+					Serial.println(speed);
 					zigbee.print(F("MCTL,RIGHT,"));
 					zigbee.println(speed);
 					break;
 				case DIR_STOP:
 				default:
+					Serial.println(F("MCTL,STOP"));
 					zigbee.println(F("MCTL,STOP"));
 					break;
 			}

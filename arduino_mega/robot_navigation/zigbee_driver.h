@@ -25,14 +25,14 @@ class ZigBeeDriver : public WirelessInterface {
 private:
   HardwareSerial& serial;
   bool connected;
-  uint32_t lastPacketTime;
+  uint32_t lastRxTime;
   String rxLine;
 
   static const uint32_t CONNECT_TIMEOUT = 5000;
   
 public:
   ZigBeeDriver(HardwareSerial& serialPort = Serial2) 
-    : serial(serialPort), connected(false), lastPacketTime(0), rxLine("") {}
+    : serial(serialPort), connected(false), lastRxTime(0), rxLine("") {}
 
   bool begin() override {
     serial.begin(ZIGBEE_BAUD);
@@ -49,7 +49,7 @@ public:
     while (!connected && (millis() - start) < CONNECT_TIMEOUT) {
       if (serial.available()) {
         connected = true;
-        lastPacketTime = millis();
+        lastRxTime = millis();
         break;
       }
       delay(10);
@@ -67,8 +67,6 @@ public:
     }
     serial.write('\n');
     serial.flush();
-    lastPacketTime = millis();
-    connected = true;
     return true;
   }
 
@@ -92,7 +90,7 @@ public:
         }
 
         rxLine = "";
-        lastPacketTime = millis();
+        lastRxTime = millis();
         connected = true;
         return true;
       }
@@ -110,8 +108,8 @@ public:
   }
 
   bool isConnected() const override {
-    // Consider connected if we saw any RX in the last 10 seconds.
-    return connected && (millis() - lastPacketTime < 10000);
+    // Consider connected only if we saw RX recently.
+    return connected && (millis() - lastRxTime < 10000);
   }
 
   int8_t getRSSI() const override {
@@ -125,7 +123,7 @@ public:
 
   void update() override {
     // Check for disconnection timeout
-    if ((millis() - lastPacketTime) > 15000) {
+    if ((millis() - lastRxTime) > 15000) {
       connected = false;
     }
   }
