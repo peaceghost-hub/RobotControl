@@ -2,175 +2,115 @@
 #define ZIGBEE_DRIVER_H
 
 #include <Arduino.h>
+#include "globals.h"
 #include "wireless_interface.h"
 
 /**
- * ZigBee Driver for XBee modules
- * Supports Series 1 and Series 2 modules
- * Default baud: 57600
- * 
+ * ZigBee Driver (Transparent UART)
+ *
+ * This driver is for CC2530/CC2591 "transparent serial" ZigBee modules and
+ * similar UART bridges. It is NOT XBee API mode.
+ *
+ * Message format: newline-delimited ASCII frames ("...\n").
+ * Incoming lines are delivered to the application as MSG_TYPE_COMMAND with
+ * msg.data containing the ASCII text (no trailing CR/LF).
+ *
  * Hardware connections (Arduino Mega):
- *   RX2 (pin 17) ← DOUT (Module TX)
- *   TX2 (pin 16) → DIN (Module RX)
+ *   RX2 (pin 17) ← Module TX
+ *   TX2 (pin 16) → Module RX
  *   GND ← GND
- *   3.3V ← VCC (with LDO regulator recommended)
+ *   3.3V ← VCC (3.3V recommended; many modules are NOT 5V tolerant)
  */
 class ZigBeeDriver : public WirelessInterface {
 private:
   HardwareSerial& serial;
   bool connected;
   uint32_t lastPacketTime;
-  uint8_t packetBuffer[96];  // XBee API mode buffer
-  uint8_t bufferPos;
-  uint8_t expectedLength;
-  
-  static const uint32_t BAUD_RATE = 57600;
+  String rxLine;
+
   static const uint32_t CONNECT_TIMEOUT = 5000;
-  static const uint32_t PACKET_TIMEOUT = 100;
-  
-  // XBee API frame types
-  static const uint8_t API_START_DELIMITER = 0x7E;
-  static const uint8_t API_TRANSMIT_REQUEST = 0x10;
-  static const uint8_t API_TRANSMIT_STATUS = 0x89;
-  static const uint8_t API_RECEIVE_PACKET = 0x90;
-  static const uint8_t API_REMOTE_COMMAND = 0x97;
   
 public:
   ZigBeeDriver(HardwareSerial& serialPort = Serial2) 
-    : serial(serialPort), connected(false), lastPacketTime(0), 
-      bufferPos(0), expectedLength(0) {}
+    : serial(serialPort), connected(false), lastPacketTime(0), rxLine("") {}
 
   bool begin() override {
-    serial.begin(BAUD_RATE);
+    serial.begin(ZIGBEE_BAUD);
     delay(100);
     
     // Clear any pending data
     while (serial.available()) {
       serial.read();
     }
-    
-    // Send AT command to check module (non-API mode compatibility)
-    // In API mode, module responds with frame
+
+    // Transparent UART modules are often silent until the peer transmits.
+    // We'll consider it "connected" after receiving any byte.
     unsigned long start = millis();
-    
     while (!connected && (millis() - start) < CONNECT_TIMEOUT) {
-      // Check for any response indicating module is alive
       if (serial.available()) {
-        uint8_t b = serial.read();
-        if (b == API_START_DELIMITER || (b >= 32 && b <= 126)) {
-          connected = true;
-          lastPacketTime = millis();
-          break;
-        }
+        connected = true;
+        lastPacketTime = millis();
+        break;
       }
       delay(10);
     }
-    
-    return connected;
+
+    // If silent, still allow TX; the remote will usually transmit first (PING).
+    return true;
   }
 
   bool send(const WirelessMessage& msg) override {
-    if (!connected) return false;
-
-    // Build XBee API frame: [Start][Length][Type][Data][Checksum]
-    uint8_t frame[96];
-    frame[0] = API_START_DELIMITER;
-    
-    // Frame length: type(1) + frame_id(1) + dest_addr(8) + options(1) + data
-    uint8_t payload_len = msg.length + 11;
-    frame[1] = (payload_len >> 8) & 0xFF;  // Length MSB
-    frame[2] = payload_len & 0xFF;         // Length LSB
-    
-    frame[3] = API_TRANSMIT_REQUEST;  // Frame type
-    frame[4] = 0x01;                  // Frame ID
-    frame[5] = 0x00; frame[6] = 0x00; // Dest 64-bit addr (broadcast)
-    frame[7] = 0x00; frame[8] = 0x00;
-    frame[9] = 0xFF; frame[10] = 0xFF;
-    frame[11] = 0xFF; frame[12] = 0xFE;
-    frame[13] = 0x00;                 // Options (no ACK)
-    
-    // Copy message data
-    memcpy(&frame[14], msg.data, msg.length);
-    
-    // Calculate checksum: sum of all bytes after length
-    uint8_t checksum = 0;
-    for (int i = 3; i < (14 + msg.length); i++) {
-      checksum += frame[i];
+    // For transparent UART, treat payload as raw bytes and terminate with newline.
+    // Application code already sends ASCII frames (e.g. MCTL,...).
+    if (msg.length > 0) {
+      serial.write(msg.data, msg.length);
     }
-    checksum = 0xFF - checksum;
-    frame[14 + msg.length] = checksum;
-    
-    // Send entire frame
-    serial.write(frame, 15 + msg.length);
+    serial.write('\n');
     serial.flush();
-    
     lastPacketTime = millis();
+    connected = true;
     return true;
   }
 
   bool receive(WirelessMessage& msg) override {
-    if (!connected) return false;
-
     while (serial.available()) {
-      uint8_t b = serial.read();
-      
-      // Look for API start delimiter
-      if (b == API_START_DELIMITER) {
-        bufferPos = 0;
-        packetBuffer[bufferPos++] = b;
-        expectedLength = 0;
+      char c = (char)serial.read();
+
+      if (c == '\r') {
         continue;
       }
-      
-      if (bufferPos == 0) {
-        // Waiting for start delimiter
-        continue;
-      }
-      
-      packetBuffer[bufferPos++] = b;
-      
-      // Check for complete frame length header
-      if (bufferPos == 3) {
-        expectedLength = ((packetBuffer[1] << 8) | packetBuffer[2]) + 4;
-      }
-      
-      // Check if complete frame received
-      if (bufferPos >= expectedLength && expectedLength > 0) {
-        // Parse frame
-        if (packetBuffer[3] == API_RECEIVE_PACKET) {
-          // Extract data from receive packet frame
-          // Frame: [Start][Len_MSB][Len_LSB][Type][Src_Addr64(8)][Src_Addr16(2)][Options][RSSI][Data...][Checksum]
-          uint8_t data_start = 14;  // Skip header and source info
-          uint8_t data_len = expectedLength - data_start - 1;  // -1 for checksum
-          
-          if (data_len > 0 && data_len <= 64) {
-            msg.type = packetBuffer[3];
-            msg.length = data_len;
-            memcpy(msg.data, &packetBuffer[data_start], data_len);
-            
-            lastPacketTime = millis();
-            bufferPos = 0;
-            expectedLength = 0;
-            return true;
-          }
+
+      if (c == '\n') {
+        if (rxLine.length() == 0) {
+          continue;
         }
-        
-        bufferPos = 0;
-        expectedLength = 0;
+
+        msg.type = MSG_TYPE_COMMAND;
+        msg.length = (rxLine.length() > 64) ? 64 : rxLine.length();
+        for (uint8_t i = 0; i < msg.length; i++) {
+          msg.data[i] = (uint8_t)rxLine[i];
+        }
+
+        rxLine = "";
+        lastPacketTime = millis();
+        connected = true;
+        return true;
       }
-      
-      // Prevent buffer overflow
-      if (bufferPos >= 96) {
-        bufferPos = 0;
-        expectedLength = 0;
+
+      if (c >= 32 && c <= 126) {
+        rxLine += c;
+        if (rxLine.length() > 80) {
+          // Prevent unbounded growth; keep tail.
+          rxLine.remove(0, rxLine.length() - 60);
+        }
       }
     }
-    
+
     return false;
   }
 
   bool isConnected() const override {
-    // Consider connected if received packet in last 10 seconds
+    // Consider connected if we saw any RX in the last 10 seconds.
     return connected && (millis() - lastPacketTime < 10000);
   }
 
@@ -180,7 +120,7 @@ public:
   }
 
   const char* getProtocolName() const override {
-    return "ZigBee (XBee)";
+    return "ZigBee (UART Transparent)";
   }
 
   void update() override {

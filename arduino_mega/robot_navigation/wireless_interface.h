@@ -3,10 +3,8 @@
 
 #include <Arduino.h>
 
-// Wireless protocol selection - uncomment ONE of these
-#define WIRELESS_PROTOCOL_ZIGBEE    // XBee module (57600 baud)
-// #define WIRELESS_PROTOCOL_LORA   // SX1276/RFM95W LoRa module
-// #define WIRELESS_PROTOCOL_BLE    // HC-05/HM-10 Bluetooth module
+// Wireless protocol selection is defined in globals.h
+// (WIRELESS_PROTOCOL_ZIGBEE / WIRELESS_PROTOCOL_LORA / WIRELESS_PROTOCOL_BLE)
 
 // Message structure for all protocols
 struct WirelessMessage {

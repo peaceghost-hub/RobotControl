@@ -845,6 +845,19 @@ void processWirelessMessage(const String& message) {
 
   lastManualCommand = millis();
 
+  // Handshake / queries
+  if (command == "PING") {
+    // Remote is probing link health
+    sendWirelessReady();
+    sendWirelessStatus();
+    return;
+  }
+
+  if (command == "STATUS?") {
+    sendWirelessStatus();
+    return;
+  }
+
   if (command.startsWith("MCTL,FORWARD")) {
     enterManualMode();
     int speed = 200;
@@ -897,7 +910,7 @@ void processWirelessMessage(const String& message) {
     enterManualMode();
     DEBUG_SERIAL.println(F("# Entering manual mode"));
   } 
-  else if (command == "AUTO" || command == "RELEASE") {
+  else if (command == "AUTO" || command == "RELEASE" || command == "MCTL,AUTO" || command == "MCTL,RELEASE") {
     exitManualMode(true);
     DEBUG_SERIAL.println(F("# Exiting manual mode"));
   }
@@ -921,6 +934,24 @@ void sendWirelessGps() {
   if (!wireless.isConnected()) {
     return;
   }
+
+#ifdef WIRELESS_PROTOCOL_ZIGBEE
+  // ZigBee (transparent UART): send human-readable CSV
+  if (!gps.isValid()) {
+    wireless.sendString("GPS,,,,,0");
+    return;
+  }
+
+  char line[96];
+  const float lat = gps.getLatitude();
+  const float lon = gps.getLongitude();
+  const float speed = gps.getSpeed();
+  const float heading = compass.getHeading();
+  const int sats = (int)gps.getSatellites();
+  snprintf(line, sizeof(line), "GPS,%.6f,%.6f,%.2f,%.1f,%d", lat, lon, speed, heading, sats);
+  wireless.sendString(line);
+  return;
+#endif
 
   WirelessMessage msg;
   msg.type = MSG_TYPE_GPS;
@@ -952,6 +983,25 @@ void sendWirelessStatus() {
     return;
   }
 
+#ifdef WIRELESS_PROTOCOL_ZIGBEE
+  // ZigBee (transparent UART): send STATUS,<mode>,<nav_state>
+  const bool hasGps = gps.isValid();
+  const bool navDone = navigation.isComplete();
+  const bool navRun = navigationActive;
+
+  const char* modeStr = (controlMode == MODE_MANUAL) ? "MANUAL" : "AUTO";
+  const char* stateStr = navRun ? "RUN" : (navDone ? "DONE" : "IDLE");
+  if (!hasGps && navRun && controlMode == MODE_AUTO) {
+    modeStr = "NO_GPS";
+    stateStr = "WAITING";
+  }
+
+  char line[48];
+  snprintf(line, sizeof(line), "STATUS,%s,%s", modeStr, stateStr);
+  wireless.sendString(line);
+  return;
+#endif
+
   WirelessMessage msg;
   msg.type = MSG_TYPE_STATUS;
   msg.data[0] = (controlMode == MODE_AUTO) ? 0 : 1;
@@ -970,6 +1020,14 @@ void sendWirelessReady() {
     return;
   }
 
+#ifdef WIRELESS_PROTOCOL_ZIGBEE
+  // ZigBee (transparent UART): explicit READY keyword for remotes
+  wireless.sendString("READY");
+  wireless.sendString("HELLO,MEGA_ROBOT");
+  markWirelessHandshake();
+  return;
+#endif
+
   WirelessMessage msg;
   msg.type = MSG_TYPE_HANDSHAKE;
   msg.length = 0;
@@ -984,6 +1042,13 @@ void sendWirelessObstacleAlert(int distance) {
   if (!wireless.isConnected()) {
     return;
   }
+
+#ifdef WIRELESS_PROTOCOL_ZIGBEE
+  char line[40];
+  snprintf(line, sizeof(line), "OBSTACLE,%d,FRONT", distance);
+  wireless.sendString(line);
+  return;
+#endif
 
   WirelessMessage msg;
   msg.type = MSG_TYPE_OBSTACLE;
