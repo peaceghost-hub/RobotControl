@@ -302,6 +302,11 @@ function handleSensorUpdate(data) {
     
     // Check for alerts
     checkSensorAlerts(data);
+
+    // Allow compass heading from sensor payloads to update the UI even without GPS fixes.
+    if (data.heading !== undefined && data.heading !== null) {
+        applyHeadingUpdate(data.heading, 'primary');
+    }
 }
 
 /**
@@ -334,7 +339,9 @@ function handleGPSUpdate(data) {
     // Update GPS displays
     updateElement('gps-lat', hasValidFix ? lat.toFixed(6) : '--');
     updateElement('gps-lon', hasValidFix ? lon.toFixed(6) : '--');
-    updateElement('gps-heading', payload.heading !== undefined ? `${Number(payload.heading).toFixed(1)}°` : '--');
+    if (!applyHeadingUpdate(payload.heading, source)) {
+        updateElement('gps-heading', '--');
+    }
     updateElement('gps-speed', payload.speed !== undefined ? `${Number(payload.speed).toFixed(2)} m/s` : '--');
     updateElement('gps-satellites', payload.satellites !== undefined ? `${payload.satellites}` : '--');
     updateElement('gps-source', source === 'backup' ? 'Backup (ZigBee)' : 'Primary (Pi)');
@@ -1318,6 +1325,40 @@ function updateElement(id, content) {
             element.textContent = content;
         }
     }
+}
+
+/**
+ * Update heading UI from any data source (GPS, sensors, backup link).
+ */
+function applyHeadingUpdate(value, source = 'primary') {
+    if (value === undefined || value === null) {
+        return false;
+    }
+
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+        return false;
+    }
+
+    updateElement('gps-heading', `${numeric.toFixed(1)}°`);
+
+    // Keep backup heading label in sync even when only primary data is available.
+    updateElement('backup-heading', `${numeric.toFixed(1)}°`);
+
+    if (!state.latestData.gps) {
+        state.latestData.gps = {};
+    }
+    state.latestData.gps.heading = numeric;
+    state.latestData.gps.headingSource = source;
+
+    const lat = Number(state.latestData.gps.latitude);
+    const lon = Number(state.latestData.gps.longitude);
+    const hasFix = Number.isFinite(lat) && Number.isFinite(lon);
+    if (hasFix && typeof window.updateRobotPosition === 'function') {
+        const markerSource = state.latestData.gps.source || source;
+        window.updateRobotPosition(lat, lon, numeric, markerSource);
+    }
+    return true;
 }
 
 /**
