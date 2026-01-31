@@ -324,24 +324,32 @@ class RobotController:
         
         while not shutdown_event.is_set():
             try:
-                if not self.sensor_manager:
-                    logger.debug("Sensor manager not available, skipping")
-                    shutdown_event.wait(self.update_interval)
-                    continue
-                
-                # Read sensors
-                sensor_data = self.sensor_manager.read_all() if self.sensor_manager else {}
+                # Read sensors when available but do not skip the loop entirely if they are missing
+                sensor_data = {}
+                if self.sensor_manager:
+                    try:
+                        sensor_data = self.sensor_manager.read_all()
+                    except Exception as sensor_err:
+                        logger.debug(f"Sensor manager read failed: {sensor_err}")
+                else:
+                    logger.debug("Sensor manager not available; sending compass-only payload")
                 
                 # Read compass
                 if self.compass:
                     try:
                         heading = self.compass.read_heading()
                         sensor_data['heading'] = heading
-                        # Send heading to Mega
-                        import struct
-                        resp = self.robot_link._exchange(ord('D'), struct.pack('<f', float(heading)), expect=2)
-                        if not resp or resp[0] != getattr(self.robot_link, 'RESP_ACK', 0x80):
-                            logger.debug("Mega did not ACK heading update")
+                        if self.robot_link:
+                            import struct
+                            try:
+                                resp = self.robot_link._exchange(ord('D'), struct.pack('<f', float(heading)), expect=2)
+                                if not resp or resp[0] != getattr(self.robot_link, 'RESP_ACK', 0x80):
+                                    logger.debug("Mega did not ACK heading update")
+                            except Exception as comm_err:
+                                logger.debug(f"Heading forward failed: {comm_err}")
+                    except Exception as e:
+                        logger.debug(f"Compass read failed: {e}")
+                        sensor_data['heading'] = 0
                     except Exception as e:
                         logger.debug(f"Compass read failed: {e}")
                         sensor_data['heading'] = 0
