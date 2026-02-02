@@ -25,8 +25,8 @@ struct PendingWaypoint;
 
 // ==================== WIRELESS PROTOCOL SELECTION ====================
 // Uncomment ONE of these to select wireless protocol:
-#define WIRELESS_PROTOCOL_ZIGBEE     // Uses Serial2 (RX2=17, TX2=16), transparent UART
-// #define WIRELESS_PROTOCOL_LORA    // Uses SPI + pins 9(CS) & 8(RST), long range
+// #define WIRELESS_PROTOCOL_ZIGBEE     // Uses Serial2 (RX2=17, TX2=16), transparent UART
+#define WIRELESS_PROTOCOL_LORA    // Uses SPI + pins 9(CS) & 8(RST), long range
 // #define WIRELESS_PROTOCOL_BLE     // Uses Serial3 (RX3=15, TX3=14), 38400 baud HC-05 / 9600 HM-10
 
 // ======================================================================
@@ -51,9 +51,11 @@ const uint8_t I2C_ADDRESS = 0x08;
   const uint32_t WIRELESS_BAUD = 38400;  // HC-05: change to 9600 or set via AT mode
   // For HM-10, use 9600
 #elif defined(WIRELESS_PROTOCOL_LORA)
-  // LoRa uses SPI, no serial port needed
-  const uint8_t LORA_CS_PIN = 9;
-  const uint8_t LORA_RST_PIN = 8;
+  // LoRa UART module (E32/E220 etc) on Serial2
+  #define WIRELESS_SERIAL Serial2
+  const uint32_t WIRELESS_BAUD = 9600;
+  #define LORA_SERIAL Serial2
+  const uint32_t LORA_BAUD = 9600;
 #endif
 
 // Legacy compatibility (maps to selected protocol)
