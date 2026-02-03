@@ -775,46 +775,18 @@ class RobotController:
         return self.robot_link.send_waypoints(waypoints)
     
     def camera_loop(self):
-        """Capture and stream camera frames (optimized)"""
+        """Capture and stream camera frames (simple synchronous version)"""
         if not self.camera or not self.camera.enabled:
             logger.info("Camera not enabled; skipping camera loop")
             return
 
-        logger.info("Starting camera loop (live low-latency JPEG relay)...")
+        logger.info("Starting camera loop (simple JPEG relay)...")
         max_frame_bytes = int(CONFIG.get('camera', {}).get('max_frame_size', 2 * 1024 * 1024))
         fps = max(1, int(CONFIG.get('camera', {}).get('fps', 5)))
         base_url = self.api_client.base_url.rstrip('/') if getattr(self.api_client, 'base_url', None) else CONFIG.get('dashboard_api', {}).get('base_url', '').rstrip('/')
 
-        # Keep only the latest frame to avoid buffering/latency.
-        frame_lock = Lock()
-        latest_frame_bytes: Optional[bytes] = None
-        latest_frame_ts: Optional[str] = None
-
-        def on_frame(jpeg_bytes: bytes, timestamp_iso: str) -> None:
-            nonlocal latest_frame_bytes, latest_frame_ts
-            if not jpeg_bytes:
-                return
-            if len(jpeg_bytes) > max_frame_bytes:
-                logger.warning("Captured frame too large (%d bytes) - skipping", len(jpeg_bytes))
-                return
-            with frame_lock:
-                latest_frame_bytes = jpeg_bytes
-                latest_frame_ts = timestamp_iso
-
-        # Use background capture for steadier FPS.
-        background_ok = False
-        try:
-            if hasattr(self.camera, 'start_background_stream'):
-                self.camera.start_background_stream(on_frame, fps=fps)
-                background_ok = True
-            else:
-                logger.warning("Camera does not support background stream; falling back to single capture loop")
-        except Exception as exc:
-            logger.warning("Failed to start background camera stream: %s", exc)
-
-        # If background capture isn't available, we'll capture frames inline.
-        inline_interval = 1.0 / float(fps)
-        next_inline = time.time()
+        interval = 1.0 / float(fps)
+        next_capture = time.time()
 
         try:
             import requests
@@ -822,58 +794,38 @@ class RobotController:
             url = f"{base_url}/api/camera/frame_binary"
             headers = {'Content-Type': 'image/jpeg'}
 
-            last_sent_ts: Optional[str] = None
-            last_no_frame_log = time.time()
             while not shutdown_event.is_set():
-                # Inline capture fallback
-                if not background_ok and time.time() >= next_inline:
-                    next_inline = time.time() + inline_interval
+                if time.time() >= next_capture:
+                    next_capture = time.time() + interval
                     try:
                         jpeg = self.camera.capture_frame_jpeg()
-                        if jpeg:
-                            on_frame(jpeg, datetime.utcnow().isoformat())
-                    except Exception as exc:
-                        logger.debug("Inline camera capture failed: %s", exc)
-
-                to_send_bytes = None
-                to_send_ts = None
-                with frame_lock:
-                    to_send_bytes = latest_frame_bytes
-                    to_send_ts = latest_frame_ts
-
-                if to_send_bytes and to_send_ts and to_send_ts != last_sent_ts:
-                    try:
-                        params = {
-                            'device_id': self.device_id,
-                            'timestamp': to_send_ts
-                        }
-                        resp = session.post(
-                            url,
-                            params=params,
-                            data=to_send_bytes,
-                            headers=headers,
-                            timeout=(1.5, 2.5)
-                        )
-                        if resp.status_code in (200, 202):
-                            last_sent_ts = to_send_ts
+                        if jpeg and len(jpeg) <= max_frame_bytes:
+                            timestamp_iso = datetime.utcnow().isoformat()
+                            params = {
+                                'device_id': self.device_id,
+                                'timestamp': timestamp_iso
+                            }
+                            resp = session.post(
+                                url,
+                                params=params,
+                                data=jpeg,
+                                headers=headers,
+                                timeout=(1.5, 2.5)
+                            )
+                            if resp.status_code in (200, 202):
+                                logger.debug("Camera frame uploaded: %d bytes", len(jpeg))
+                            else:
+                                logger.debug("Camera upload failed: %s", resp.status_code)
+                        elif jpeg:
+                            logger.warning("Captured frame too large: %d bytes", len(jpeg))
                         else:
-                            logger.debug("Camera upload returned %s", resp.status_code)
+                            logger.debug("Camera capture returned None")
                     except Exception as exc:
-                        # Don't advance last_sent_ts; we'll keep trying with the newest frame.
-                        logger.debug("Failed to upload binary frame: %s", exc)
+                        logger.debug("Camera capture/upload failed: %s", exc)
 
-                if not to_send_bytes and (time.time() - last_no_frame_log) > 5:
-                    logger.warning("No camera frames available to send yet")
-                    last_no_frame_log = time.time()
-
-                # Small wait keeps CPU low and latency low.
                 shutdown_event.wait(0.01)
-        finally:
-            try:
-                if hasattr(self.camera, 'stop_background_stream'):
-                    self.camera.stop_background_stream()
-            except Exception:
-                pass
+        except Exception as exc:
+            logger.error("Camera loop error: %s", exc)
 
     def get_battery_level(self):
         """Get battery level (implement based on hardware)"""
