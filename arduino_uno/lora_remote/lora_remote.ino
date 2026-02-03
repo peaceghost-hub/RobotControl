@@ -49,8 +49,6 @@ static unsigned long lastPingMs = 0;
 enum MoveDir { DIR_STOP, DIR_FWD, DIR_BACK, DIR_LEFT, DIR_RIGHT };
 MoveDir lastDir = DIR_STOP;
 int lastSpeed = 0;
-bool readySeen = false;
-bool connected = false;
 
 void setup() {
   pinMode(LED_PIN, OUTPUT);

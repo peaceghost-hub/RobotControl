@@ -279,7 +279,15 @@ class RobotController:
                         if not getattr(self.robot_link, 'bus', None):
                             logger.warning("Skipping I2C ping (I2C bus not available)")
                         else:
-                            if not self.robot_link.ping():
+                            # Mega may be busy in Arduino setup() at boot (e.g., buzzer tone),
+                            # and it processes I2C commands in its main loop. Retry briefly.
+                            ping_ok = False
+                            for attempt in range(1, 11):  # ~5s total
+                                if self.robot_link.ping():
+                                    ping_ok = True
+                                    break
+                                time.sleep(0.5)
+                            if not ping_ok:
                                 logger.warning("Mega did not acknowledge I2C ping")
                 except Exception as e:
                     logger.warning(f"Failed to start navigation link: {e}")

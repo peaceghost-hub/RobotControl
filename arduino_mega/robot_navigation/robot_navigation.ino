@@ -210,7 +210,9 @@ void setup() {
     DEBUG_SERIAL.print(ZIGBEE_BAUD);
     DEBUG_SERIAL.println(F(" baud"));
   #elif defined(WIRELESS_PROTOCOL_LORA)
-    DEBUG_SERIAL.println(F("# Wireless: LoRa (SX1276/RFM95W) on SPI"));
+    DEBUG_SERIAL.print(F("# Wireless: LoRa (UART Transparent) on Serial2 @ "));
+    DEBUG_SERIAL.print(LORA_BAUD);
+    DEBUG_SERIAL.println(F(" baud"));
   #elif defined(WIRELESS_PROTOCOL_BLE)
     DEBUG_SERIAL.println(F("# Wireless: Bluetooth on Serial3 @ 38400 baud"));
   #endif

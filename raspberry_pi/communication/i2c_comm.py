@@ -70,6 +70,9 @@ class I2CComm:
                 logger.error("Failed to open I2C bus: %s", exc)
                 self.bus = None
 
+            # Manual drive tuning (values are sent as int8 to Mega: -128..127)
+            self._manual_speed = 120
+
     # ------------------------------------------------------------------
     # Low-level helpers
     # ------------------------------------------------------------------
@@ -109,8 +112,20 @@ class I2CComm:
             if expect == 0:
                 return b""
 
-            time.sleep(self.request_timeout)
-            resp = self._read(expect)
+            # Mega defers I2C command handling out of ISR (processed in its main loop).
+            # That means the first read can legitimately return zeros if the response
+            # buffer is not prepared yet. Poll briefly for a non-zero response.
+            deadline = time.time() + max(0.05, float(self.request_timeout))
+            resp = None
+            while time.time() < deadline:
+                time.sleep(0.02)
+                resp = self._read(expect)
+                if resp is None:
+                    continue
+                if len(resp) > 0 and resp[0] != 0:
+                    return resp
+
+            # Return the last read (even if zeros) so caller can log/debug.
             if resp is not None:
                 return resp
 
@@ -118,6 +133,25 @@ class I2CComm:
                 time.sleep(min(0.05, self.request_timeout))
 
         return None
+
+    @staticmethod
+    def _clamp_int8(value: int) -> int:
+        value = int(value)
+        if value > 127:
+            return 127
+        if value < -128:
+            return -128
+        return value
+
+    @staticmethod
+    def _scale_speed_to_int8(speed: int) -> int:
+        """Map a 0..255-ish speed into 0..127 for Mega int8 motor command."""
+        speed = int(speed)
+        if speed <= 0:
+            return 0
+        if speed >= 255:
+            return 127
+        return max(0, min(127, int(round(speed * 127 / 255))))
 
     # ------------------------------------------------------------------
     # Public operations
@@ -145,9 +179,25 @@ class I2CComm:
         if not waypoints:
             return True
 
-        if not self.clear_waypoints():
+        # Ensure link is alive (Mega can be busy during early boot).
+        try:
+            self.ping()
+        except Exception:
+            pass
+
+        cleared = False
+        for attempt in range(1, 6):
+            if self.clear_waypoints():
+                cleared = True
+                break
+            time.sleep(0.2)
+
+        if not cleared:
             logger.error("Failed to clear existing waypoints")
             return False
+
+        # Give Mega a moment to apply clear + stop motors + status update.
+        time.sleep(0.05)
 
         for wp in waypoints:
             payload = self._encode_waypoint_packet(wp)
@@ -216,12 +266,68 @@ class I2CComm:
         Returns:
             bool: True if accepted
         """
-        payload = struct.pack('<bbb', 
-                            int(left_motor) & 0xFF,
-                            int(right_motor) & 0xFF,
-                            1 if joystick_active else 0)
+        left = self._clamp_int8(left_motor)
+        right = self._clamp_int8(right_motor)
+        payload = struct.pack('<bbb', left, right, 1 if joystick_active else 0)
         resp = self._exchange(self.CMD_MANUAL_OVERRIDE, payload, expect=2)
         return self._is_ack(resp)
+
+    # ------------------------------------------------------------------
+    # Dashboard command helpers (used by raspberry_pi/main.py)
+    # ------------------------------------------------------------------
+    def manual_speed(self, speed: int) -> bool:
+        """Set the speed used by manual_drive (dashboard arrows)."""
+        self._manual_speed = int(speed)
+        return True
+
+    def manual_override(self, mode: str = 'hold') -> bool:
+        """Enable/disable manual override.
+
+        Mega exits manual mode via its timeout logic, so "release" is best-effort.
+        """
+        mode = str(mode or 'hold').strip().lower()
+
+        if mode in ('hold', 'on', 'enable', 'enabled'):
+            # Send a neutral command but with joystick_active=True to pause autonomy.
+            return self.send_manual_control(0, 0, joystick_active=True)
+
+        if mode in ('release', 'off', 'disable', 'disabled', 'auto'):
+            # Stop motors and allow Mega's manual timeout to return to AUTO.
+            ok = self.send_manual_control(0, 0, joystick_active=False)
+            # If autonomous nav was previously running, a resume may be desired.
+            # This can fail if there are no waypoints; treat that as non-fatal.
+            try:
+                self.resume_navigation()
+            except Exception:
+                pass
+            return ok
+
+        return False
+
+    def manual_drive(self, direction: str, speed: int = 180) -> bool:
+        """Drive robot in a direction using differential motor outputs.
+
+        This uses CMD_MANUAL_OVERRIDE on I2C, which the Mega interprets as signed int8.
+        """
+        direction = str(direction or '').strip().lower()
+        chosen_speed = speed if speed is not None else self._manual_speed
+        magnitude = self._scale_speed_to_int8(chosen_speed)
+
+        if direction in ('forward', 'fwd', 'up'):
+            left, right = magnitude, magnitude
+        elif direction in ('backward', 'back', 'rev', 'down'):
+            left, right = -magnitude, -magnitude
+        elif direction in ('left', 'turn_left'):
+            left, right = -magnitude, magnitude
+        elif direction in ('right', 'turn_right'):
+            left, right = magnitude, -magnitude
+        elif direction in ('stop', 'brake', ''):
+            left, right = 0, 0
+        else:
+            logger.warning("Unknown manual_drive direction: %s", direction)
+            return False
+
+        return self.send_manual_control(left, right, joystick_active=True)
     
     def emergency_stop(self) -> bool:
         """Send emergency stop command"""
