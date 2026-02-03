@@ -36,7 +36,7 @@
   ZigBeeDriver wireless;
 #elif defined(WIRELESS_PROTOCOL_LORA)
   #include "lora_driver.h"
-  LoRaDriver wireless(LORA_CS_PIN, LORA_RST_PIN);
+  LoRaDriver wireless(WIRELESS_SERIAL);
 #elif defined(WIRELESS_PROTOCOL_BLE)
   #include "bluetooth_driver.h"
   BluetoothDriver wireless;
