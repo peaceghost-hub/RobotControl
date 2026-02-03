@@ -11,6 +11,7 @@ import os
 import signal
 from datetime import datetime
 from threading import Thread, Event
+from threading import Lock
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -172,6 +173,13 @@ class RobotController:
         # Arduino Mega communication (optional)
         self.comm_mode = None
         self.robot_link = None
+
+        # Latched manual driving (dashboard arrows)
+        self._manual_drive_lock = Lock()
+        self._manual_drive_active = False
+        self._manual_drive_direction = 'stop'
+        self._manual_drive_speed = 180
+        self._manual_drive_thread = None
         try:
             if CONFIG.get('i2c'):
                 self.robot_link = I2CComm(CONFIG['i2c'])
@@ -630,8 +638,74 @@ class RobotController:
             logger.warning("Manual drive not supported by current comm link")
             return False
 
-        logger.info(f"Manual drive command: {direction} @ {speed}")
-        return self.robot_link.manual_drive(direction, speed)
+        # Latching behavior:
+        # - Click a direction: keeps moving until STOP is clicked.
+        # - Click the same direction again: toggles to STOP.
+        # - Click STOP: stops.
+        # This prevents Mega's manual timeout from stopping motion after ~1.5s.
+        requested = (direction or 'stop').strip().lower()
+        if requested in ('', 'none'):
+            requested = 'stop'
+
+        with self._manual_drive_lock:
+            if requested in ('stop', 'brake'):
+                self._manual_drive_active = False
+                self._manual_drive_direction = 'stop'
+                self._manual_drive_speed = speed
+                logger.info("Manual drive STOP (latched)")
+            else:
+                if self._manual_drive_active and requested == self._manual_drive_direction:
+                    # toggle off
+                    self._manual_drive_active = False
+                    self._manual_drive_direction = 'stop'
+                    self._manual_drive_speed = speed
+                    logger.info("Manual drive toggled OFF -> STOP")
+                else:
+                    self._manual_drive_active = True
+                    self._manual_drive_direction = requested
+                    self._manual_drive_speed = speed
+                    logger.info(f"Manual drive latched: {requested} @ {speed}")
+
+        # Start drive loop thread lazily
+        if not self._manual_drive_thread or not self._manual_drive_thread.is_alive():
+            self._manual_drive_thread = Thread(target=self._manual_drive_loop, daemon=True)
+            self._manual_drive_thread.start()
+
+        # Apply immediately (first command)
+        try:
+            return self._manual_drive_apply_once()
+        except Exception as exc:
+            logger.warning("Manual drive apply failed: %s", exc)
+            return False
+
+    def _manual_drive_apply_once(self) -> bool:
+        if not self.robot_link or not hasattr(self.robot_link, 'manual_drive'):
+            return False
+        with self._manual_drive_lock:
+            active = self._manual_drive_active
+            direction = self._manual_drive_direction
+            speed = self._manual_drive_speed
+
+        if not active:
+            # Stop command
+            return bool(self.robot_link.manual_drive('stop', speed))
+
+        return bool(self.robot_link.manual_drive(direction, speed))
+
+    def _manual_drive_loop(self) -> None:
+        """Continuously refresh manual-drive commands while latched active."""
+        # Refresh rate must be < Mega MANUAL_TIMEOUT (1500ms). Use ~5Hz.
+        while not shutdown_event.is_set():
+            try:
+                if self.robot_link and hasattr(self.robot_link, 'manual_drive'):
+                    with self._manual_drive_lock:
+                        active = self._manual_drive_active
+                    if active:
+                        self._manual_drive_apply_once()
+            except Exception as exc:
+                logger.debug("Manual drive loop error: %s", exc)
+
+            shutdown_event.wait(0.2)
 
     def _handle_manual_override(self, payload: dict) -> bool:
         mode = (payload or {}).get('mode', 'hold')
@@ -660,41 +734,79 @@ class RobotController:
             logger.info("Camera not enabled; skipping camera loop")
             return
 
-        logger.info("Starting camera loop (optimized JPEG capture)...")
+        logger.info("Starting camera loop (live low-latency JPEG relay)...")
         max_frame_bytes = int(CONFIG.get('camera', {}).get('max_frame_size', 2 * 1024 * 1024))
+        fps = max(1, int(CONFIG.get('camera', {}).get('fps', 5)))
         base_url = self.api_client.base_url.rstrip('/') if getattr(self.api_client, 'base_url', None) else CONFIG.get('dashboard_api', {}).get('base_url', '').rstrip('/')
 
-        while not shutdown_event.is_set():
-            try:
-                # Capture JPEG bytes directly
-                jpeg_bytes = self.camera.capture_frame_jpeg()
-                if not jpeg_bytes:
-                    logger.debug("No JPEG captured")
-                else:
-                    # Safety check on frame size
-                    if len(jpeg_bytes) > max_frame_bytes:
-                        logger.warning("Captured frame too large (%d bytes) - skipping", len(jpeg_bytes))
-                    else:
-                        # Send raw JPEG bytes to dashboard binary endpoint to avoid base64 overhead
-                        # POST binary data with Content-Type image/jpeg
-                        try:
-                            import requests
-                            url = f"{base_url}/api/camera/frame_binary"
-                            params = {
-                                'device_id': self.device_id,
-                                'timestamp': datetime.utcnow().isoformat()
-                            }
-                            headers = {'Content-Type': 'image/jpeg'}
-                            resp = requests.post(url, params=params, data=jpeg_bytes, headers=headers, timeout=5)
-                            if resp.status_code not in (200, 202):
-                                logger.debug("Server returned %s for frame upload", resp.status_code)
-                        except Exception as exc:
-                            logger.debug("Failed to upload binary frame: %s", exc)
-            except Exception as e:
-                logger.exception("Error in camera loop: %s", e)
+        # Keep only the latest frame to avoid buffering/latency.
+        frame_lock = Lock()
+        latest_frame_bytes: bytes | None = None
+        latest_frame_ts: str | None = None
 
-            # Sleep according to configured fps (respect shutdown_event)
-            shutdown_event.wait(1.0 / max(1, int(CONFIG.get('camera', {}).get('fps', 5))))
+        def on_frame(jpeg_bytes: bytes, timestamp_iso: str) -> None:
+            nonlocal latest_frame_bytes, latest_frame_ts
+            if not jpeg_bytes:
+                return
+            if len(jpeg_bytes) > max_frame_bytes:
+                logger.warning("Captured frame too large (%d bytes) - skipping", len(jpeg_bytes))
+                return
+            with frame_lock:
+                latest_frame_bytes = jpeg_bytes
+                latest_frame_ts = timestamp_iso
+
+        # Use background capture for steadier FPS.
+        try:
+            if hasattr(self.camera, 'start_background_stream'):
+                self.camera.start_background_stream(on_frame, fps=fps)
+            else:
+                logger.warning("Camera does not support background stream; falling back to single capture loop")
+        except Exception as exc:
+            logger.warning("Failed to start background camera stream: %s", exc)
+
+        try:
+            import requests
+            session = requests.Session()
+            url = f"{base_url}/api/camera/frame_binary"
+            headers = {'Content-Type': 'image/jpeg'}
+
+            last_sent_ts: str | None = None
+            while not shutdown_event.is_set():
+                to_send_bytes = None
+                to_send_ts = None
+                with frame_lock:
+                    to_send_bytes = latest_frame_bytes
+                    to_send_ts = latest_frame_ts
+
+                if to_send_bytes and to_send_ts and to_send_ts != last_sent_ts:
+                    try:
+                        params = {
+                            'device_id': self.device_id,
+                            'timestamp': to_send_ts
+                        }
+                        resp = session.post(
+                            url,
+                            params=params,
+                            data=to_send_bytes,
+                            headers=headers,
+                            timeout=(1.5, 2.5)
+                        )
+                        if resp.status_code in (200, 202):
+                            last_sent_ts = to_send_ts
+                        else:
+                            logger.debug("Camera upload returned %s", resp.status_code)
+                    except Exception as exc:
+                        # Don't advance last_sent_ts; we'll keep trying with the newest frame.
+                        logger.debug("Failed to upload binary frame: %s", exc)
+
+                # Small wait keeps CPU low and latency low.
+                shutdown_event.wait(0.01)
+        finally:
+            try:
+                if hasattr(self.camera, 'stop_background_stream'):
+                    self.camera.stop_background_stream()
+            except Exception:
+                pass
 
     def get_battery_level(self):
         """Get battery level (implement based on hardware)"""

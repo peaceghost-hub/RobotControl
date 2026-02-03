@@ -1283,7 +1283,14 @@ def mjpeg_stream():
             # small sleep to avoid busy-looping; respects server performance
             time.sleep(0.03)
 
-    return Response(stream_with_context(generate()), mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp = Response(stream_with_context(generate()), mimetype='multipart/x-mixed-replace; boundary=frame')
+    # Reduce buffering/caching so the feed stays as close to real-time as possible.
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    # If running behind a proxy like nginx, this helps disable response buffering.
+    resp.headers['X-Accel-Buffering'] = 'no'
+    return resp
 
 
 # ============= WEBSOCKET EVENTS =============

@@ -315,7 +315,7 @@ class I2CComm:
 
         if direction in ('forward', 'fwd', 'up'):
             left, right = magnitude, magnitude
-        elif direction in ('backward', 'back', 'rev', 'down'):
+        elif direction in ('backward', 'back', 'rev', 'reverse', 'backwards', 'down'):
             left, right = -magnitude, -magnitude
         elif direction in ('left', 'turn_left'):
             left, right = -magnitude, magnitude
