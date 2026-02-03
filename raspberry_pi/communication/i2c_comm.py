@@ -34,7 +34,7 @@ class I2CComm:
     CMD_REQUEST_GPS = ord('G')
     CMD_REQUEST_STATUS = ord('U')
     CMD_REQUEST_OBSTACLE = ord('O')   # New: Request obstacle flag/distance
-    CMD_SOUND_BUZZER = ord('B')       # New: Sound buzzer for duration
+    CMD_SOUND_BUZZER = ord('Q')       # New: Sound buzzer for duration
     CMD_HEARTBEAT = ord('H')
     CMD_WAYPOINT_COMPLETED = ord('Y')  # Mega -> Pi: waypoint reached
     CMD_SEND_GPS = ord('F')          # New: Send GPS from Pi to Mega (for fallback/broadcast)
@@ -49,6 +49,7 @@ class I2CComm:
     RESP_ACK = 0x80
     RESP_GPS = 0x81
     RESP_STATUS = 0x82
+    RESP_OBSTACLE = 0x83
     RESP_ERROR = 0xFF
 
     GPS_PAYLOAD_LEN = 1 + (4 * 4) + 1  # valid flag + floats + satellites
@@ -362,7 +363,7 @@ class I2CComm:
         resp = self._exchange(self.CMD_REQUEST_OBSTACLE, expect=4)
         if not resp:
             return None
-        if resp[0] == 0x83 and len(resp) >= 4:  # RESP_OBSTACLE
+        if resp[0] == self.RESP_OBSTACLE and len(resp) >= 4:
             flag = bool(resp[1])
             distance = (resp[2] << 8) | resp[3]
             if distance == 0:
