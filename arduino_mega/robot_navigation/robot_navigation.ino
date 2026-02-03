@@ -344,11 +344,13 @@ void loop() {
   wireless.update();
 
   // Safety + alert: if an ultrasonic obstacle is detected within 30cm in front,
-  // sound the buzzer continuously while the obstacle remains.
+  // sound the buzzer with a beep pattern.
+  static unsigned long lastBuzzerBeep = 0;
   if (frontUltrasonicObstacle30cm()) {
-    tone(BUZZER_PIN, BUZZER_FREQ);
-  } else {
-    noTone(BUZZER_PIN);
+    if (millis() - lastBuzzerBeep > 500) {  // Beep every 500ms
+      beepPattern(1, 200, 0);  // Short beep
+      lastBuzzerBeep = millis();
+    }
   }
 
   // If we're in manual mode and the last command was forward, stop immediately
@@ -768,7 +770,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
         int dist = obstacleAvoid.getDistance();
         bool frontObstacle = (dist > 0 && dist < OBSTACLE_THRESHOLD);
         responseBuffer[1] = frontObstacle ? 1 : 0;
-        if (dist < 0) dist = 0xFFFF;
+        if (dist < 0) dist = 0;  // Invalid distance -> 0
         responseBuffer[2] = (dist >> 8) & 0xFF;
         responseBuffer[3] = dist & 0xFF;
       }

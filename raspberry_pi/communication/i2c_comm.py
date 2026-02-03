@@ -364,6 +364,8 @@ class I2CComm:
         if resp[0] == 0x83 and len(resp) >= 4:  # RESP_OBSTACLE
             flag = bool(resp[1])
             distance = (resp[2] << 8) | resp[3]
+            if distance == 0:
+                distance = -1  # Invalid/unknown
             return {"obstacle": flag, "distance_cm": distance}
         self._log_unexpected(resp, "OBSTACLE")
         return None

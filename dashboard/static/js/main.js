@@ -1651,14 +1651,14 @@ function handleRobotEvent(event) {
         const notification = document.getElementById('obstacle-notification');
         const message = document.getElementById('obstacle-message');
         const distance = payload.distance_cm || payload.distance || 'unknown';
-        message.textContent = `🚨 Obstacle detected at ${distance}cm`;
+        message.textContent = `Obstacle detected at ${distance}cm`;
         notification.classList.remove('hidden');
         
-        // Auto-hide after 5 seconds (re-armed on each event)
+        // Auto-hide after 10 seconds if no new event
         if (state._obstacleUi.hideTimer) clearTimeout(state._obstacleUi.hideTimer);
         state._obstacleUi.hideTimer = setTimeout(() => {
             notification.classList.add('hidden');
-        }, 5000);
+        }, 10000);
     }
 
     // Map visual indicator
