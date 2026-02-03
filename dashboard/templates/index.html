@@ -22,7 +22,7 @@
         <!-- Header -->
         <header class="header">
             <div class="header-content">
-                <h1>🤖 Environmental Monitoring Robot Dashboard</h1>
+                <h1>Environmental Monitoring Robot Dashboard</h1>
                 <div class="header-actions">
                     <div class="device-selector">
                         <label for="device-select">Device</label>
@@ -47,11 +47,11 @@
         <!-- Quick Toolbar for Overlays and Zoom -->
         <div class="toolbar">
             <div class="toolbar-left">
-                <button id="open-sensors-btn" class="btn btn-small">🌡️ Sensors</button>
-                <button id="open-data-btn" class="btn btn-small">📊 Data History</button>
-                <button id="open-waypoints-btn" class="btn btn-small">📋 Waypoints</button>
-                <button id="open-status-btn" class="btn btn-small">🔋 Status</button>
-                <button id="toggle-logs-btn" class="btn btn-small">📝 Logs</button>
+                <button id="open-sensors-btn" class="btn btn-small">Sensors</button>
+                <button id="open-data-btn" class="btn btn-small">Data History</button>
+                <button id="open-waypoints-btn" class="btn btn-small">Waypoints</button>
+                <button id="open-status-btn" class="btn btn-small">Status</button>
+                <button id="toggle-logs-btn" class="btn btn-small">Logs</button>
             </div>
             <div class="toolbar-right">
                 <div class="zoom-controls">
@@ -71,9 +71,9 @@
             <!-- Top Row: Camera Feed (Left) and GPS Map (Right) -->
             <div class="panel camera-panel top-left">
                 <div class="panel-header">
-                    <h2>📹 Live Camera Feed</h2>
+                    <h2>Live Camera Feed</h2>
                     <div class="camera-controls">
-                        <button id="snapshot-btn" class="btn btn-small">📸 Snapshot</button>
+                        <button id="snapshot-btn" class="btn btn-small">Snapshot</button>
                         <span id="camera-status" class="status-badge">No Feed</span>
                         <span id="camera-mode-label" class="status-badge subtle">Relay</span>
                     </div>
@@ -82,7 +82,7 @@
                     <div class="camera-container">
                         <img id="camera-feed" src="" alt="Camera Feed" />
                         <div id="no-camera" class="no-feed-message">
-                            <span>📷</span>
+                            <span></span>
                             <p>Waiting for camera feed...</p>
                         </div>
                     </div>
@@ -100,11 +100,11 @@
             <!-- GPS Map Panel (Right of Camera) -->
             <div class="panel map-panel top-right">
                 <div class="panel-header">
-                    <h2>🗺️ Robot Location & Navigation</h2>
+                    <h2>Robot Location & Navigation</h2>
                     <div class="map-controls">
-                        <button id="center-robot-btn" class="btn btn-small">🎯 Center</button>
-                        <button id="add-waypoint-btn" class="btn btn-small">📍 Add Waypoint</button>
-                        <button id="clear-waypoints-btn" class="btn btn-small">🗑️ Clear All</button>
+                        <button id="center-robot-btn" class="btn btn-small"> Center</button>
+                        <button id="add-waypoint-btn" class="btn btn-small"> Add Waypoint</button>
+                        <button id="clear-waypoints-btn" class="btn btn-small">Clear All</button>
                     </div>
                 </div>
                 <div class="panel-content">
@@ -113,7 +113,7 @@
                         <span id="waypoint-message"></span>
                     </div>
                     <div id="obstacle-notification" class="obstacle-notification hidden">
-                        🚨 <span id="obstacle-message"></span>
+                          <span id="obstacle-message"></span>
                     </div>
                     <div class="gps-info">
                         <div class="gps-item">
@@ -143,7 +143,7 @@
             <!-- Automatic Control Panel (Bottom-left) -->
             <div class="panel control-panel bottom-left">
                 <div class="panel-header">
-                    <h2>🧭 Automatic Control</h2>
+                    <h2> Automatic Control</h2>
                     <span id="control-mode-label" class="status-badge">AUTO</span>
                 </div>
                 <div class="panel-content">
@@ -158,15 +158,15 @@
                             </div>
                         </div>
                         <div class="control-help">Send current waypoint queue and command the Mega to run autonomously.</div>
-                        <button id="send-waypoints-btn" class="btn btn-outline">📬 Send Waypoints</button>
+                        <button id="send-waypoints-btn" class="btn btn-outline"> Send Waypoints</button>
                     </div>
 
                     <div class="control-section">
                         <div class="section-header">
                             <h3>Line Follower Assist</h3>
                             <div class="control-actions">
-                                <button id="line-follow-enable-btn" class="btn btn-small">✅ Enable</button>
-                                <button id="line-follow-disable-btn" class="btn btn-small">🚫 Disable</button>
+                                <button id="line-follow-enable-btn" class="btn btn-small">Enable</button>
+                                <button id="line-follow-disable-btn" class="btn btn-small">Disable</button>
                             </div>
                         </div>
                         <div class="control-help">Observer-controlled line following using camera guidance. Toggle on/off from here.</div>
@@ -175,7 +175,7 @@
                     <div class="control-section">
                         <div class="section-header">
                             <h3>Manual Override</h3>
-                            <button id="manual-release-btn" class="btn btn-small">🤖 Return to Auto</button>
+                            <button id="manual-release-btn" class="btn btn-small"> Return to Auto</button>
                         </div>
                         <div class="manual-grid">
                             <button id="manual-forward-btn" class="control-key">▲</button>
@@ -215,8 +215,8 @@
                     </div>
 
                     <div class="backup-actions">
-                        <button id="backup-engage-btn" class="btn btn-small">🔗 Engage</button>
-                        <button id="backup-release-btn" class="btn btn-small">🤖 Return</button>
+                        <button id="backup-engage-btn" class="btn btn-small"> Engage</button>
+                        <button id="backup-release-btn" class="btn btn-small"> Return</button>
                     </div>
 
                     <div class="backup-grid">
@@ -252,7 +252,7 @@
         <!-- Waypoints Overlay -->
         <div class="panel waypoints-panel overlay-window hidden" data-overlay-id="waypoints" style="width: 460px; height: 540px; left: 20px; top: 140px;">
             <div class="panel-header overlay-header">
-                <h2>📋 Waypoint Queue</h2>
+                <h2> Waypoint Queue</h2>
                 <span id="waypoint-count" class="badge">0</span>
                 <div class="overlay-actions">
                     <button class="btn btn-small overlay-close" data-overlay-target="waypoints">✖</button>
@@ -457,7 +457,7 @@
 
         <!-- Footer -->
         <footer class="footer">
-            <p>🎓 ARM-Based Environmental Monitoring Robot | Telecommunications Engineering Project</p>
+            <p> ARM-Based Environmental Monitoring Robot | Telecommunications Engineering Project</p>
             <p>© 2026 - University Undergraduate Project</p>
         </footer>
     </div>

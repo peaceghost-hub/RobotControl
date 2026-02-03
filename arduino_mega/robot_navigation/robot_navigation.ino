@@ -59,6 +59,8 @@ ObstacleAvoidance obstacleAvoid;
 static int8_t lastManualLeft = 0;
 static int8_t lastManualRight = 0;
 
+static bool obstacleBeeped = false;
+
 static inline bool frontUltrasonicObstacle30cm() {
   const int dist = obstacleAvoid.getDistance();
   return (dist > 0 && dist < OBSTACLE_THRESHOLD);
@@ -344,13 +346,14 @@ void loop() {
   wireless.update();
 
   // Safety + alert: if an ultrasonic obstacle is detected within 30cm in front,
-  // sound the buzzer with a beep pattern.
-  static unsigned long lastBuzzerBeep = 0;
+  // sound the buzzer like on init (triple beep).
   if (frontUltrasonicObstacle30cm()) {
-    if (millis() - lastBuzzerBeep > 500) {  // Beep every 500ms
-      beepPattern(1, 200, 0);  // Short beep
-      lastBuzzerBeep = millis();
+    if (!obstacleBeeped) {
+      beepPattern(3, 200, 100);  // Triple beep like on init
+      obstacleBeeped = true;
     }
+  } else {
+    obstacleBeeped = false;
   }
 
   // If we're in manual mode and the last command was forward, stop immediately

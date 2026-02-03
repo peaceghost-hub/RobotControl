@@ -32,7 +32,7 @@
 #define SERVO_RIGHT 20
 
 // Detection thresholds
-#define OBSTACLE_THRESHOLD 30      // cm (ultrasonic)
+#define OBSTACLE_THRESHOLD 20      // cm (ultrasonic)
 #define KY032_DETECTION_THRESHOLD 600  // ADC value (analog threshold, lower = farther)
 
 struct PathScan {
