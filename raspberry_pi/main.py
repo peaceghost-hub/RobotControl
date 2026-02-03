@@ -322,6 +322,12 @@ class RobotController:
             status_thread = Thread(target=self.status_loop, daemon=True)
             status_thread.start()
             self.threads.append(status_thread)
+
+            # Start obstacle alert loop (continuous warnings while obstacle present)
+            if self.robot_link and hasattr(self.robot_link, 'request_obstacle_status'):
+                obstacle_thread = Thread(target=self.obstacle_loop, daemon=True)
+                obstacle_thread.start()
+                self.threads.append(obstacle_thread)
             
             # Start command polling loop
             command_thread = Thread(target=self.command_loop, daemon=True)
@@ -509,27 +515,7 @@ class RobotController:
                             except Exception as exc:
                                 logger.error(f"Failed to complete waypoint: {exc}")
 
-                    # Poll obstacle status and notify dashboard
-                    try:
-                        obstacle = self.robot_link.request_obstacle_status()
-                    except Exception:
-                        obstacle = None
-                    if obstacle and obstacle.get('obstacle'):
-                        status_data['event'] = {
-                            'type': 'OBSTACLE_DETECTED',
-                            'distance_cm': obstacle.get('distance_cm', -1),
-                            'timestamp': datetime.utcnow().isoformat()
-                        }
-                        # Send immediate event notification
-                        try:
-                            self.api_client.send_event({
-                                'device_id': self.device_id,
-                                'type': 'OBSTACLE_DETECTED',
-                                'distance_cm': obstacle.get('distance_cm', -1),
-                                'timestamp': status_data['event']['timestamp']
-                            })
-                        except Exception as exc:
-                            logger.debug(f"Failed to send obstacle event: {exc}")
+                    # Obstacle events are handled in obstacle_loop() for higher frequency.
 
                     if self.comm_mode == 'i2c':
                         try:
@@ -551,6 +537,65 @@ class RobotController:
 
             # Wait before next update
             shutdown_event.wait(self.status_interval)
+
+    def obstacle_loop(self):
+        """Continuously poll obstacle status and alert dashboard when present."""
+        logger.info("Starting obstacle alert loop...")
+
+        # How often we poll the Mega for obstacle status (seconds)
+        poll_interval = float(CONFIG.get('obstacle_poll_interval', 0.5))
+        # How often we emit OBSTACLE_DETECTED events while the obstacle persists (seconds)
+        emit_interval = float(CONFIG.get('obstacle_emit_interval', 1.0))
+
+        last_emit = 0.0
+        last_state = False
+
+        while not shutdown_event.is_set():
+            try:
+                obstacle = None
+                if self.robot_link:
+                    try:
+                        obstacle = self.robot_link.request_obstacle_status()
+                    except Exception:
+                        obstacle = None
+
+                now = time.time()
+                state = bool(obstacle and obstacle.get('obstacle'))
+
+                # Emit on rising edge immediately, then periodically while active.
+                should_emit = False
+                if state and not last_state:
+                    should_emit = True
+                elif state and (now - last_emit) >= emit_interval:
+                    should_emit = True
+
+                if should_emit:
+                    dist_cm = -1
+                    if obstacle and obstacle.get('distance_cm') is not None:
+                        try:
+                            dist_cm = int(obstacle.get('distance_cm'))
+                        except Exception:
+                            dist_cm = -1
+
+                    payload = {
+                        'device_id': self.device_id,
+                        'type': 'OBSTACLE_DETECTED',
+                        'distance_cm': dist_cm,
+                        'direction': 'FRONT',
+                        'timestamp': datetime.utcnow().isoformat(),
+                    }
+                    try:
+                        self.api_client.send_event(payload)
+                        last_emit = now
+                    except Exception as exc:
+                        logger.debug(f"Failed to send obstacle event: {exc}")
+
+                last_state = state
+
+            except Exception as exc:
+                logger.debug(f"Obstacle loop error: {exc}")
+
+            shutdown_event.wait(poll_interval)
     
     def command_loop(self):
         """Poll dashboard for control commands"""

@@ -1620,6 +1620,9 @@ function handleRobotEvent(event) {
     const device = event.device_id || state.deviceId || 'robot';
     const payload = event.payload || {};
 
+    // Rate limit UI spam for repeating obstacle events
+    if (!state._obstacleUi) state._obstacleUi = { lastToastMs: 0 };
+
     // Simple severity mapping
     let level = 'info';
     if (type.includes('OBSTACLE') || payload.obstacle) level = 'warning';
@@ -1634,8 +1637,14 @@ function handleRobotEvent(event) {
     if (payload.note) details.push(payload.note);
     if (details.length) msg += ` (${details.join(', ')})`;
 
-    addLog(level, msg);
-    showToast(level, 'Obstacle detected', msg);
+    const nowMs = Date.now();
+    const isObstacleEvent = (type === 'OBSTACLE_DETECTED');
+    const toastIntervalMs = 5000;
+    if (!isObstacleEvent || (nowMs - state._obstacleUi.lastToastMs) >= toastIntervalMs) {
+        addLog(level, msg);
+        showToast(level, 'Obstacle detected', msg);
+        if (isObstacleEvent) state._obstacleUi.lastToastMs = nowMs;
+    }
 
     // Show obstacle notification panel for OBSTACLE_DETECTED events
     if (type === 'OBSTACLE_DETECTED') {
@@ -1645,8 +1654,9 @@ function handleRobotEvent(event) {
         message.textContent = `🚨 Obstacle detected at ${distance}cm`;
         notification.classList.remove('hidden');
         
-        // Auto-hide after 5 seconds
-        setTimeout(() => {
+        // Auto-hide after 5 seconds (re-armed on each event)
+        if (state._obstacleUi.hideTimer) clearTimeout(state._obstacleUi.hideTimer);
+        state._obstacleUi.hideTimer = setTimeout(() => {
             notification.classList.add('hidden');
         }, 5000);
     }

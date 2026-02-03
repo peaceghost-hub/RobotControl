@@ -54,6 +54,16 @@ Navigation navigation;
 MotorControl motors;
 ObstacleAvoidance obstacleAvoid;
 
+// Track last manual motor command so we can enforce obstacle safety even if
+// the operator stops sending commands while the robot is moving.
+static int8_t lastManualLeft = 0;
+static int8_t lastManualRight = 0;
+
+static inline bool frontUltrasonicObstacle30cm() {
+  const int dist = obstacleAvoid.getDistance();
+  return (dist > 0 && dist < OBSTACLE_THRESHOLD);
+}
+
 // ------------------------------- State ---------------------------------------
 uint8_t responseBuffer[32];
 uint8_t responseLength = 0;
@@ -333,6 +343,24 @@ void loop() {
   obstacleAvoid.update();
   wireless.update();
 
+  // Safety + alert: if an ultrasonic obstacle is detected within 30cm in front,
+  // sound the buzzer continuously while the obstacle remains.
+  if (frontUltrasonicObstacle30cm()) {
+    tone(BUZZER_PIN, BUZZER_FREQ);
+  } else {
+    noTone(BUZZER_PIN);
+  }
+
+  // If we're in manual mode and the last command was forward, stop immediately
+  // when a front obstacle appears. Operator can still command reverse/turn.
+  if (manualOverride && frontUltrasonicObstacle30cm()) {
+    if (lastManualLeft > 0 && lastManualRight > 0) {
+      motors.stop();
+      lastManualLeft = 0;
+      lastManualRight = 0;
+    }
+  }
+
   if (!manualOverride && navigationActive) {
     // Check GPS validity before navigation
     if (gps.isValid()) {
@@ -387,7 +415,7 @@ void loop() {
       DEBUG_SERIAL.println(F("cm"));
       
       lastObstacleAlert = millis();
-      beepPattern(2, 100, 100);  // Double beep warning
+      // Audible warning is handled continuously by the obstacle buzzer tone.
     }
   }
 
@@ -662,11 +690,24 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
           DEBUG_SERIAL.println(F("# Joystick detected! Autonomous nav paused"));
         }
         
-        // Set motors directly
-        motors.setMotors((int)leftMotor, (int)rightMotor);
+        // If an obstacle is detected within 30cm in front, do not allow forward
+        // motion; stop and wait for a safe direction (reverse/turn).
+        const bool frontObstacle = frontUltrasonicObstacle30cm();
+        const bool isForwardCmd = (leftMotor > 0 && rightMotor > 0);
+        if (joystickActive && frontObstacle && isForwardCmd) {
+          motors.stop();
+          leftMotor = 0;
+          rightMotor = 0;
+        } else {
+          // Set motors directly
+          motors.setMotors((int)leftMotor, (int)rightMotor);
+        }
         manualOverride = true;
         controlMode = MODE_MANUAL;
         lastManualCommand = millis();
+
+        lastManualLeft = leftMotor;
+        lastManualRight = rightMotor;
         
         // Broadcast position via wireless immediately (for backup logging)
         if (wireless.isConnected() && gps.isValid()) {
@@ -723,10 +764,14 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
     case CMD_REQUEST_OBSTACLE:
       // Respond with obstacle flag and distance
       responseBuffer[0] = RESP_OBSTACLE;
-      responseBuffer[1] = obstacleAvoid.isObstacleDetected() ? 1 : 0;
-      int dist = obstacleAvoid.getDistance();
-      responseBuffer[2] = (dist >> 8) & 0xFF;
-      responseBuffer[3] = dist & 0xFF;
+      {
+        int dist = obstacleAvoid.getDistance();
+        bool frontObstacle = (dist > 0 && dist < OBSTACLE_THRESHOLD);
+        responseBuffer[1] = frontObstacle ? 1 : 0;
+        if (dist < 0) dist = 0xFFFF;
+        responseBuffer[2] = (dist >> 8) & 0xFF;
+        responseBuffer[3] = dist & 0xFF;
+      }
       responseLength = 4;
       break;
 
