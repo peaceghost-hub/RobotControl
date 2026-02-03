@@ -59,8 +59,6 @@ ObstacleAvoidance obstacleAvoid;
 static int8_t lastManualLeft = 0;
 static int8_t lastManualRight = 0;
 
-static bool obstacleBeeped = false;
-
 static inline bool frontUltrasonicObstacle30cm() {
   const int dist = obstacleAvoid.getDistance();
   return (dist > 0 && dist < OBSTACLE_THRESHOLD);
@@ -345,15 +343,14 @@ void loop() {
   obstacleAvoid.update();
   wireless.update();
 
-  // Safety + alert: if an ultrasonic obstacle is detected within 30cm in front,
-  // sound the buzzer like on init (triple beep).
+  // Safety + alert: if an ultrasonic obstacle is detected within 20cm in front,
+  // sound the buzzer like on init (triple beep), but with cooldown to not spam.
+  static unsigned long lastObstacleBeep = 0;
   if (frontUltrasonicObstacle30cm()) {
-    if (!obstacleBeeped) {
+    if (millis() - lastObstacleBeep > 2000) {  // Beep every 2 seconds while obstacle present
       beepPattern(3, 200, 100);  // Triple beep like on init
-      obstacleBeeped = true;
+      lastObstacleBeep = millis();
     }
-  } else {
-    obstacleBeeped = false;
   }
 
   // If we're in manual mode and the last command was forward, stop immediately
@@ -778,6 +775,24 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
         responseBuffer[3] = dist & 0xFF;
       }
       responseLength = 4;
+      break;
+
+    case CMD_SOUND_BUZZER:
+      // Sound buzzer for specified duration (seconds)
+      if (length >= 1) {
+        int duration = payload[0];
+        if (duration > 0 && duration <= 10) {  // Max 10 seconds
+          for (int i = 0; i < duration; i++) {
+            tone(BUZZER_PIN, BUZZER_FREQ);
+            delay(1000);
+            noTone(BUZZER_PIN);
+            delay(100);  // Short pause between seconds
+          }
+        }
+        prepareAck();
+      } else {
+        prepareError(ERR_PACKET_SIZE);
+      }
       break;
 
     default:

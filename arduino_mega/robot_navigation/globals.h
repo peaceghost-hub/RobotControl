@@ -76,6 +76,7 @@ const uint8_t CMD_WAYPOINT_COMMIT = 'M';
 const uint8_t CMD_REQUEST_GPS     = 'G';
 const uint8_t CMD_REQUEST_STATUS  = 'U';
 const uint8_t CMD_REQUEST_OBSTACLE= 'O';  // New: request obstacle flag/distance
+const uint8_t CMD_SOUND_BUZZER = 'B';  // New: sound buzzer for duration
 const uint8_t CMD_HEARTBEAT       = 'H';
 // Enhanced feature commands
 const uint8_t CMD_SEND_GPS        = 'F';  // Pi -> Mega GPS forwarding

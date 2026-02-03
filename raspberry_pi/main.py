@@ -646,6 +646,9 @@ class RobotController:
                 success = self._handle_manual_speed(payload)
             elif command_type == 'WAYPOINT_PUSH':
                 success = self._handle_waypoint_push()
+            elif command_type == 'SOUND_BUZZER':
+                duration = int((payload or {}).get('duration', 3))
+                success = self.robot_link.sound_buzzer(duration) if hasattr(self.robot_link, 'sound_buzzer') else False
             elif command_type == 'FOLLOW_LINE':
                 # Payload: {"enabled": true|false}
                 enabled = bool((payload or {}).get('enabled', True))

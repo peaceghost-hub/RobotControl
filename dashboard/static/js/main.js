@@ -1476,6 +1476,14 @@ function setupEventListeners() {
         });
     }
 
+    const soundBuzzerBtn = document.getElementById('sound-buzzer-btn');
+    if (soundBuzzerBtn) {
+        soundBuzzerBtn.addEventListener('click', async () => {
+            await sendCommand('SOUND_BUZZER', { duration: 3 });
+            addLog('info', 'Buzzer sounded for 3 seconds');
+        });
+    }
+
     const backupButtonMap = {
         'backup-forward-btn': 'forward',
         'backup-left-btn': 'left',

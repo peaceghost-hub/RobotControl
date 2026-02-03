@@ -34,6 +34,7 @@ class I2CComm:
     CMD_REQUEST_GPS = ord('G')
     CMD_REQUEST_STATUS = ord('U')
     CMD_REQUEST_OBSTACLE = ord('O')   # New: Request obstacle flag/distance
+    CMD_SOUND_BUZZER = ord('B')       # New: Sound buzzer for duration
     CMD_HEARTBEAT = ord('H')
     CMD_WAYPOINT_COMPLETED = ord('Y')  # Mega -> Pi: waypoint reached
     CMD_SEND_GPS = ord('F')          # New: Send GPS from Pi to Mega (for fallback/broadcast)
@@ -369,6 +370,13 @@ class I2CComm:
             return {"obstacle": flag, "distance_cm": distance}
         self._log_unexpected(resp, "OBSTACLE")
         return None
+
+    def sound_buzzer(self, duration: int = 3) -> bool:
+        """Sound the buzzer on Mega for specified duration (seconds)."""
+        if duration < 1 or duration > 10:
+            return False
+        resp = self._exchange(self.CMD_SOUND_BUZZER, bytes([duration]), expect=2)
+        return resp and resp[0] == self.RESP_ACK
 
     # ------------------------------------------------------------------
     # Encoding helpers
