@@ -12,6 +12,7 @@ import signal
 from datetime import datetime
 from threading import Thread, Event
 from threading import Lock
+from typing import Optional
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -741,8 +742,8 @@ class RobotController:
 
         # Keep only the latest frame to avoid buffering/latency.
         frame_lock = Lock()
-        latest_frame_bytes: bytes | None = None
-        latest_frame_ts: str | None = None
+        latest_frame_bytes: Optional[bytes] = None
+        latest_frame_ts: Optional[str] = None
 
         def on_frame(jpeg_bytes: bytes, timestamp_iso: str) -> None:
             nonlocal latest_frame_bytes, latest_frame_ts
@@ -756,13 +757,19 @@ class RobotController:
                 latest_frame_ts = timestamp_iso
 
         # Use background capture for steadier FPS.
+        background_ok = False
         try:
             if hasattr(self.camera, 'start_background_stream'):
                 self.camera.start_background_stream(on_frame, fps=fps)
+                background_ok = True
             else:
                 logger.warning("Camera does not support background stream; falling back to single capture loop")
         except Exception as exc:
             logger.warning("Failed to start background camera stream: %s", exc)
+
+        # If background capture isn't available, we'll capture frames inline.
+        inline_interval = 1.0 / float(fps)
+        next_inline = time.time()
 
         try:
             import requests
@@ -770,8 +777,19 @@ class RobotController:
             url = f"{base_url}/api/camera/frame_binary"
             headers = {'Content-Type': 'image/jpeg'}
 
-            last_sent_ts: str | None = None
+            last_sent_ts: Optional[str] = None
+            last_no_frame_log = time.time()
             while not shutdown_event.is_set():
+                # Inline capture fallback
+                if not background_ok and time.time() >= next_inline:
+                    next_inline = time.time() + inline_interval
+                    try:
+                        jpeg = self.camera.capture_frame_jpeg()
+                        if jpeg:
+                            on_frame(jpeg, datetime.utcnow().isoformat())
+                    except Exception as exc:
+                        logger.debug("Inline camera capture failed: %s", exc)
+
                 to_send_bytes = None
                 to_send_ts = None
                 with frame_lock:
@@ -798,6 +816,10 @@ class RobotController:
                     except Exception as exc:
                         # Don't advance last_sent_ts; we'll keep trying with the newest frame.
                         logger.debug("Failed to upload binary frame: %s", exc)
+
+                if not to_send_bytes and (time.time() - last_no_frame_log) > 5:
+                    logger.warning("No camera frames available to send yet")
+                    last_no_frame_log = time.time()
 
                 # Small wait keeps CPU low and latency low.
                 shutdown_event.wait(0.01)
