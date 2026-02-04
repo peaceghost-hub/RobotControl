@@ -344,7 +344,7 @@ function handleGPSUpdate(data) {
     }
     updateElement('gps-speed', payload.speed !== undefined ? `${Number(payload.speed).toFixed(2)} m/s` : '--');
     updateElement('gps-satellites', payload.satellites !== undefined ? `${payload.satellites}` : '--');
-    updateElement('gps-source', source === 'backup' ? 'Backup (ZigBee)' : 'Primary (Pi)');
+    updateElement('gps-source', source === 'backup' ? 'Backup (LoRa)' : 'Primary (Pi)');
 
     // Update map only when coordinates are valid
     if (hasValidFix && window.updateRobotPosition) {
@@ -984,7 +984,7 @@ function handleBackupUpdate(data) {
     updateControlIndicators();
 
     if (prevActive !== state.backup.active) {
-        addLog(state.backup.active ? 'warning' : 'success', state.backup.active ? 'ZigBee backup link engaged' : 'Primary control path restored');
+        addLog(state.backup.active ? 'warning' : 'success', state.backup.active ? 'LoRa backup link engaged' : 'Primary control path restored');
     }
 
     if (state.backup.active && state.backup.lastLocation) {
@@ -1479,7 +1479,7 @@ function setupEventListeners() {
     const soundBuzzerBtn = document.getElementById('sound-buzzer-btn');
     if (soundBuzzerBtn) {
         soundBuzzerBtn.addEventListener('click', async () => {
-            await sendCommand('SOUND_BUZZER', { duration: 3 });
+            await sendRobotCommand('SOUND_BUZZER', { duration: 3 });
             addLog('info', 'Buzzer sounded for 3 seconds');
         });
     }

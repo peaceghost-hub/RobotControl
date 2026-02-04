@@ -104,7 +104,7 @@ function updateRobotPosition(lat, lon, heading = 0, source = 'primary') {
         Lat: ${lat.toFixed(6)}<br>
         Lon: ${lon.toFixed(6)}<br>
         Heading: ${heading.toFixed(1)}°<br>
-        Source: ${source === 'backup' ? 'Backup (ZigBee)' : 'Primary'}
+        Source: ${source === 'backup' ? 'Backup (LoRa)' : 'Primary'}
     `);
 }
 
