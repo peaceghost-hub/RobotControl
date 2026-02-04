@@ -543,9 +543,9 @@ class RobotController:
         logger.info("Starting obstacle alert loop...")
 
         # How often we poll the Mega for obstacle status (seconds)
-        poll_interval = float(CONFIG.get('obstacle_poll_interval', 0.5))
+        poll_interval = float(CONFIG.get('obstacle_poll_interval', 0.15))  # Faster: 150ms for real-time response
         # How often we emit OBSTACLE_DETECTED events while the obstacle persists (seconds)
-        emit_interval = float(CONFIG.get('obstacle_emit_interval', 1.0))
+        emit_interval = float(CONFIG.get('obstacle_emit_interval', 0.5))  # Faster alerts
 
         last_emit = 0.0
         last_state = False

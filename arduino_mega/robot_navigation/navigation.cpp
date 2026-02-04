@@ -24,6 +24,7 @@ Navigation::Navigation() {
     lastPositionSave = 0;
     waypointJustCompleted = false;
     lastCompletedWaypointId = -1;
+    savedTargetBearing = 0.0;
 }
 
 void Navigation::begin(GPSHandler* g, CompassHandler* c, MotorControl* m, ObstacleAvoidance* o) {
@@ -80,16 +81,19 @@ void Navigation::update() {
     if (!navigationActive || !gps->isValid()) {
         return;
     }
+    
+    // CRITICAL: Check for obstacles FIRST - highest priority!
+    // Stop immediately if obstacle detected during autonomous navigation
+    if (obstacleAvoid->isObstacleDetected()) {
+        motors->stop();  // Immediate stop before handling avoidance
+        handleObstacleAvoidance();
+        return;
+    }
+    
     // Periodically save position for RETURN feature
     if (millis() - lastPositionSave >= 5000) {
         saveCurrentPosition();
         lastPositionSave = millis();
-    }
-    
-    // Check for obstacles
-    if (obstacleAvoid->isObstacleDetected()) {
-        handleObstacleAvoidance();
-        return;
     }
     
     // If we were in avoidance mode, resume normal navigation
@@ -186,50 +190,114 @@ void Navigation::handleObstacleAvoidance() {
     if (!inAvoidanceMode) {
         inAvoidanceMode = true;
         obstacleDetectedTime = millis();
+        
+        // Save current target bearing for path resumption
+        float currentLat = gps->getLatitude();
+        float currentLon = gps->getLongitude();
+        Waypoint& target = waypoints[currentWaypointIndex];
+        savedTargetBearing = calculateBearing(currentLat, currentLon, target.latitude, target.longitude);
+        
         Serial.print(F("# Obstacle detected at "));
         Serial.print(obstacleAvoid->getDistance());
-        Serial.println(F("cm - stopping for 5s and planning avoidance"));
+        Serial.println(F("cm - initiating intelligent avoidance"));
     }
 
-    // Stop and wait 5 seconds before avoiding
+    // IMMEDIATE STOP - already called in update()
     motors->stop();
-    delay(5000);
+    delay(500);  // Brief pause for stability
 
-    // First attempt: steer right by 70 degrees
-    Serial.println(F("# Avoidance: steer right 70°"));
-    motors->turnDegrees(70, 160);
-
-    // Check path ahead
-    PathScan rightScan = obstacleAvoid->scanPath();
-    bool rightClear = (rightScan.centerDist == -1 || rightScan.centerDist > OBSTACLE_THRESHOLD);
-
-    if (!rightClear) {
-        // Return to original heading (undo right turn)
-        Serial.println(F("# Path blocked; returning to original heading"));
-        motors->turnDegrees(-70, 160);
-
-        // Second attempt: steer left by 70 degrees
-        Serial.println(F("# Avoidance: steer left 70°"));
-        motors->turnDegrees(-70, 160);
-
-        PathScan leftScan = obstacleAvoid->scanPath();
-        bool leftClear = (leftScan.centerDist == -1 || leftScan.centerDist > OBSTACLE_THRESHOLD);
-        if (!leftClear) {
-            // Still blocked: scan wide and pick the clearer side
-            Serial.println(F("# Still blocked; scanning wide and nudging forward"));
-            PathScan wide = obstacleAvoid->scanPath();
-            if (wide.rightClear) {
-                motors->turnDegrees(30, 150);
-            } else if (wide.leftClear) {
-                motors->turnDegrees(-30, 150);
+    // Scan all directions to find clearest path
+    Serial.println(F("# Scanning for obstacle-free path..."));
+    PathScan scan = obstacleAvoid->scanPath();
+    
+    // Determine shortest turn radius to obstacle-free direction
+    float currentHeading = compass->getHeading();
+    int turnDirection = 0;  // 0=blocked, 1=right, -1=left
+    int turnAngle = 0;
+    
+    // Check right side (typically 90 degrees)
+    if (scan.rightClear && scan.rightDist > OBSTACLE_SAFE_DISTANCE) {
+        // Calculate angle to turn right
+        float rightBearing = currentHeading + 90;
+        if (rightBearing >= 360) rightBearing -= 360;
+        float rightDeviation = abs(savedTargetBearing - rightBearing);
+        if (rightDeviation > 180) rightDeviation = 360 - rightDeviation;
+        
+        turnDirection = 1;
+        turnAngle = 90;
+        Serial.println(F("# Clear path found: RIGHT"));
+    }
+    // Check left side (typically 90 degrees)
+    else if (scan.leftClear && scan.leftDist > OBSTACLE_SAFE_DISTANCE) {
+        // Calculate angle to turn left
+        float leftBearing = currentHeading - 90;
+        if (leftBearing < 0) leftBearing += 360;
+        float leftDeviation = abs(savedTargetBearing - leftBearing);
+        if (leftDeviation > 180) leftDeviation = 360 - leftDeviation;
+        
+        turnDirection = -1;
+        turnAngle = 90;
+        Serial.println(F("# Clear path found: LEFT"));
+    }
+    // If both blocked, try sharper turns
+    else {
+        Serial.println(F("# Both sides blocked, attempting sharp maneuver"));
+        // Try right sharp turn (120 degrees)
+        motors->turnDegrees(120, 140);
+        delay(500);
+        int checkDist = obstacleAvoid->measureDistance();
+        if (checkDist == -1 || checkDist > OBSTACLE_SAFE_DISTANCE) {
+            turnDirection = 1;
+            turnAngle = 120;
+            Serial.println(F("# Sharp right turn successful"));
+        } else {
+            // Return and try left
+            motors->turnDegrees(-120, 140);
+            delay(500);
+            motors->turnDegrees(-120, 140);
+            delay(500);
+            checkDist = obstacleAvoid->measureDistance();
+            if (checkDist == -1 || checkDist > OBSTACLE_SAFE_DISTANCE) {
+                turnDirection = -1;
+                turnAngle = 120;
+                Serial.println(F("# Sharp left turn successful"));
             }
         }
     }
 
-    // Advance cautiously then resume navigation
-    motors->forward(150);
-    delay(800);
-    motors->stop();
+    // Execute the turn if path found
+    if (turnDirection != 0) {
+        if (turnDirection == 1) {
+            Serial.print(F("# Turning RIGHT "));
+            motors->turnDegrees(turnAngle, 140);
+        } else {
+            Serial.print(F("# Turning LEFT "));
+            motors->turnDegrees(-turnAngle, 140);
+        }
+        Serial.print(turnAngle);
+        Serial.println(F("° to clear obstacle"));
+        
+        // Move forward cautiously to clear obstacle zone
+        Serial.println(F("# Moving forward to clear obstacle zone"));
+        motors->forward(100);  // Slow speed
+        delay(1500);  // Move for 1.5 seconds
+        motors->stop();
+        
+        // Check if still blocked
+        delay(300);
+        int finalCheck = obstacleAvoid->measureDistance();
+        if (finalCheck > 0 && finalCheck < OBSTACLE_CRITICAL_DISTANCE) {
+            Serial.println(F("# Still blocked after avoidance - stopping"));
+            return;  // Stay in avoidance mode
+        }
+    } else {
+        Serial.println(F("# No clear path found - staying stopped"));
+        return;  // Stay in avoidance mode, don't exit
+    }
+
+    // Obstacle cleared - prepare to resume path
+    Serial.println(F("# Obstacle cleared, resuming navigation to waypoint"));
+    inAvoidanceMode = false;
 }
 
 float Navigation::calculateDistance(float lat1, float lon1, float lat2, float lon2) {

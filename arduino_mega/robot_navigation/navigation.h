@@ -15,6 +15,9 @@
 
 #define WAYPOINT_RADIUS 5.0  // meters - distance to consider waypoint reached
 #define MAX_HISTORY_POINTS 100  // Store last 100 positions for RETURN feature
+#define DEVIATION_THRESHOLD 15.0  // degrees - threshold for course correction
+#define OBSTACLE_SAFE_DISTANCE 30  // cm - distance to check for obstacle-free path
+#define OBSTACLE_CRITICAL_DISTANCE 20  // cm - critical obstacle distance for avoidance
 
 struct Waypoint {
     float latitude;
@@ -53,6 +56,7 @@ private:
     unsigned long obstacleDetectedTime;
     bool inAvoidanceMode;
     unsigned long lastPositionSave;
+    float savedTargetBearing;  // Store target bearing before obstacle avoidance
     
     // Waypoint completion tracking
     bool waypointJustCompleted;

@@ -156,7 +156,7 @@ void MotorControl::adjustForHeading(float currentHeading, float targetHeading) {
     while (error < -180) error += 360;
     
     // PID-like control (simplified)
-    int baseSpeed = 180;
+    int baseSpeed = 120;  // Reduced from 180 for safer navigation
     int correction = constrain((int)(error * 2), -80, 80);
     
     int leftSpeed = baseSpeed - correction;

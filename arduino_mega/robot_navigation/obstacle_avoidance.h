@@ -57,7 +57,7 @@ private:
     int currentServoAngle;
     bool servoAttached;
     bool ky032Attached;       // KY-032 initialization flag
-    const unsigned long CHECK_INTERVAL = 200;  // ms
+    const unsigned long CHECK_INTERVAL = 100;  // ms (reduced from 200ms for real-time response)
     const unsigned long SERVO_DELAY = 300;  // ms for servo to stabilize
     
 public:
