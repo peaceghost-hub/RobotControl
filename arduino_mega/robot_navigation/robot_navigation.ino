@@ -40,8 +40,11 @@
 #elif defined(WIRELESS_PROTOCOL_BLE)
   #include "bluetooth_driver.h"
   BluetoothDriver wireless;
+#elif defined(WIRELESS_PROTOCOL_CC1101)
+  #include "cc1101_driver.h"
+  CC1101Driver wireless;
 #else
-  #error "No wireless protocol selected! Edit globals.h and uncomment WIRELESS_PROTOCOL_ZIGBEE, WIRELESS_PROTOCOL_LORA, or WIRELESS_PROTOCOL_BLE"
+  #error "No wireless protocol selected! Edit globals.h and uncomment WIRELESS_PROTOCOL_ZIGBEE, WIRELESS_PROTOCOL_LORA, WIRELESS_PROTOCOL_BLE, or WIRELESS_PROTOCOL_CC1101"
 #endif
 
 // Include base interface for type checking
@@ -619,6 +622,19 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
       prepareAck();
       break;
 
+    case CMD_SET_AUTO_SPEED:
+      // Payload: [speed:1] in 0..255 PWM
+      if (length >= 1) {
+        int speed = (int)payload[0];
+        motors.setAutoBaseSpeed(speed);
+        DEBUG_SERIAL.print(F("# Auto speed set to "));
+        DEBUG_SERIAL.println(motors.getAutoBaseSpeed());
+        prepareAck();
+      } else {
+        prepareError(ERR_PACKET_SIZE);
+      }
+      break;
+
     // === NEW COMMANDS FOR ENHANCED FEATURES ===
     
     case CMD_SEND_GPS:
@@ -892,18 +908,99 @@ void commitPendingWaypoints() {
 // ========================== WIRELESS HANDLING ==============================
 void handleWireless() {
   WirelessMessage msg;
-  
-  while (wireless.receive(msg)) {
-    if (msg.type == MSG_TYPE_COMMAND) {
-      // Parse command (simple text-based for now)
-      char cmdStr[65];
-      memcpy(cmdStr, msg.data, msg.length);
-      cmdStr[msg.length] = '\0';
 
-      DEBUG_SERIAL.print(F("# Wireless RX: "));
-      DEBUG_SERIAL.println(cmdStr);
-      processWirelessMessage(String(cmdStr));
+  while (wireless.receive(msg)) {
+    DEBUG_SERIAL.print(F("# Wireless RX type="));
+    DEBUG_SERIAL.print(msg.type, HEX);
+    DEBUG_SERIAL.print(F(" len="));
+    DEBUG_SERIAL.println(msg.length);
+
+    switch (msg.type) {
+      case MSG_TYPE_COMMAND:
+        if (msg.length >= 2) {
+          processWirelessCommand(msg.data[0], msg.data[1]);
+        }
+        break;
+
+      case MSG_TYPE_HANDSHAKE:
+        if (msg.length >= 10 && memcmp(msg.data, "UNO_REMOTE", 10) == 0) {
+          DEBUG_SERIAL.println(F("# UNO Remote handshake received"));
+          wirelessHandshakeComplete = true;
+          sendWirelessReady();
+        }
+        break;
+
+      case MSG_TYPE_HEARTBEAT:
+        // Just update connection status
+        break;
+
+      case MSG_TYPE_STATUS:
+        // Status request
+        sendWirelessStatus();
+        break;
+
+      default:
+        DEBUG_SERIAL.print(F("# Unknown wireless message type: "));
+        DEBUG_SERIAL.println(msg.type, HEX);
+        break;
     }
+  }
+}
+
+void processWirelessCommand(uint8_t command, uint8_t speed) {
+  lastManualCommand = millis();
+
+  switch (command) {
+    case WIRELESS_CMD_MOTOR_FORWARD:
+      enterManualMode();
+      motors.forward(speed);
+      DEBUG_SERIAL.print(F("# Manual forward: "));
+      DEBUG_SERIAL.println(speed);
+      break;
+
+    case WIRELESS_CMD_MOTOR_BACKWARD:
+      enterManualMode();
+      motors.backward(speed);
+      DEBUG_SERIAL.print(F("# Manual backward: "));
+      DEBUG_SERIAL.println(speed);
+      break;
+
+    case WIRELESS_CMD_MOTOR_LEFT:
+      enterManualMode();
+      motors.left(speed);
+      DEBUG_SERIAL.print(F("# Manual left: "));
+      DEBUG_SERIAL.println(speed);
+      break;
+
+    case WIRELESS_CMD_MOTOR_RIGHT:
+      enterManualMode();
+      motors.right(speed);
+      DEBUG_SERIAL.print(F("# Manual right: "));
+      DEBUG_SERIAL.println(speed);
+      break;
+
+    case WIRELESS_CMD_MOTOR_STOP:
+      enterManualMode();
+      motors.stop();
+      DEBUG_SERIAL.println(F("# Manual stop"));
+      break;
+
+    case WIRELESS_CMD_MODE_AUTO:
+      controlMode = MODE_AUTO;
+      manualOverride = false;
+      DEBUG_SERIAL.println(F("# Mode: AUTO"));
+      break;
+
+    case WIRELESS_CMD_MODE_MANUAL:
+      controlMode = MODE_MANUAL;
+      manualOverride = true;
+      DEBUG_SERIAL.println(F("# Mode: MANUAL"));
+      break;
+
+    default:
+      DEBUG_SERIAL.print(F("# Unknown wireless command: "));
+      DEBUG_SERIAL.println(command, HEX);
+      break;
   }
 }
 
@@ -1100,13 +1197,24 @@ void sendWirelessReady() {
   return;
 #endif
 
+#ifdef WIRELESS_PROTOCOL_CC1101
+  // CC1101: Send structured READY status message
+  WirelessMessage msg;
+  msg.type = MSG_TYPE_STATUS;
+  msg.length = 5;
+  memcpy(msg.data, "READY", 5);
+  wireless.send(msg);
+#else
+  // Other protocols: structured handshake
   WirelessMessage msg;
   msg.type = MSG_TYPE_HANDSHAKE;
   msg.length = 0;
   wireless.send(msg);
+#endif
+
   // Also emit a human-readable hello string for transparent receivers
   wireless.sendString("HELLO,MEGA_ROBOT");
-  
+
   markWirelessHandshake();
 }
 

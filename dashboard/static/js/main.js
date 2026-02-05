@@ -56,6 +56,7 @@ const state = {
     totalPages: 1,
     deviceId: CONFIG.deviceId,
     manualSpeed: CONFIG.manualDefaults.speed,
+    autoSpeed: 120,
     manualOverride: false,
     navigationActive: false,
     controlMode: 'AUTO',
@@ -112,6 +113,12 @@ function initDashboard() {
         speedSlider.value = state.manualSpeed;
     }
     updateElement('manual-speed-display', state.manualSpeed);
+
+    const autoSpeedSlider = document.getElementById('auto-speed-slider');
+    if (autoSpeedSlider) {
+        autoSpeedSlider.value = state.autoSpeed;
+    }
+    updateElement('auto-speed-display', state.autoSpeed);
 
     const backupSpeedSlider = document.getElementById('backup-speed-slider');
     if (backupSpeedSlider) {
@@ -889,6 +896,17 @@ function updateManualSpeed(value) {
     sendRobotCommand('MANUAL_SPEED', { value: numeric });
 }
 
+function updateAutoSpeed(value) {
+    if (state.backup.active) {
+        addLog('warning', 'Primary auto speed control disabled while backup control is active');
+        return;
+    }
+    const numeric = Number(value);
+    state.autoSpeed = numeric;
+    updateElement('auto-speed-display', numeric);
+    sendRobotCommand('AUTO_SPEED', { value: numeric });
+}
+
 async function sendBackupCommand(command, payload = {}) {
     if (!state.backup.enabled) {
         addLog('warning', 'Backup link disabled in configuration');
@@ -1473,6 +1491,13 @@ function setupEventListeners() {
     if (speedSlider) {
         speedSlider.addEventListener('input', (event) => {
             updateManualSpeed(event.target.value);
+        });
+    }
+
+    const autoSpeedSlider = document.getElementById('auto-speed-slider');
+    if (autoSpeedSlider) {
+        autoSpeedSlider.addEventListener('input', (event) => {
+            updateAutoSpeed(event.target.value);
         });
     }
 

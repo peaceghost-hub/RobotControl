@@ -245,7 +245,8 @@ void Navigation::handleObstacleAvoidance() {
         // Try right sharp turn (120 degrees)
         motors->turnDegrees(120, 140);
         delay(500);
-        int checkDist = obstacleAvoid->measureDistance();
+        obstacleAvoid->update();  // Update sensor reading
+        int checkDist = obstacleAvoid->getDistance();
         if (checkDist == -1 || checkDist > OBSTACLE_SAFE_DISTANCE) {
             turnDirection = 1;
             turnAngle = 120;
@@ -256,7 +257,8 @@ void Navigation::handleObstacleAvoidance() {
             delay(500);
             motors->turnDegrees(-120, 140);
             delay(500);
-            checkDist = obstacleAvoid->measureDistance();
+            obstacleAvoid->update();  // Update sensor reading
+            checkDist = obstacleAvoid->getDistance();
             if (checkDist == -1 || checkDist > OBSTACLE_SAFE_DISTANCE) {
                 turnDirection = -1;
                 turnAngle = 120;
@@ -285,7 +287,8 @@ void Navigation::handleObstacleAvoidance() {
         
         // Check if still blocked
         delay(300);
-        int finalCheck = obstacleAvoid->measureDistance();
+        obstacleAvoid->update();  // Update sensor reading
+        int finalCheck = obstacleAvoid->getDistance();
         if (finalCheck > 0 && finalCheck < OBSTACLE_CRITICAL_DISTANCE) {
             Serial.println(F("# Still blocked after avoidance - stopping"));
             return;  // Stay in avoidance mode

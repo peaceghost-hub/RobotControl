@@ -35,6 +35,7 @@ class I2CComm:
     CMD_REQUEST_STATUS = ord('U')
     CMD_REQUEST_OBSTACLE = ord('O')   # New: Request obstacle flag/distance
     CMD_SOUND_BUZZER = ord('Q')       # New: Sound buzzer for duration
+    CMD_SET_AUTO_SPEED = ord('N')     # New: Set autonomous navigation base speed (PWM)
     CMD_HEARTBEAT = ord('H')
     CMD_WAYPOINT_COMPLETED = ord('Y')  # Mega -> Pi: waypoint reached
     CMD_SEND_GPS = ord('F')          # New: Send GPS from Pi to Mega (for fallback/broadcast)
@@ -281,6 +282,17 @@ class I2CComm:
         """Set the speed used by manual_drive (dashboard arrows)."""
         self._manual_speed = int(speed)
         return True
+
+    def set_auto_speed(self, speed: int) -> bool:
+        """Set autonomous navigation base speed (used during waypoint following).
+
+        Speed is a PWM-like 0..255 value; Mega constrains to safe bounds.
+        """
+        speed = int(speed)
+        speed = max(0, min(255, speed))
+        payload = bytes([speed & 0xFF])
+        resp = self._exchange(self.CMD_SET_AUTO_SPEED, payload, expect=2)
+        return self._is_ack(resp)
 
     def manual_override(self, mode: str = 'hold') -> bool:
         """Enable/disable manual override.

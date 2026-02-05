@@ -24,11 +24,15 @@ class MotorControl {
 private:
     int speedLeft;
     int speedRight;
+    int autoBaseSpeed;
     const float TURN_MS_PER_DEG = 10.0f; // approximate timing per degree
     
 public:
     MotorControl();
     void begin();
+
+    void setAutoBaseSpeed(int speed);
+    int getAutoBaseSpeed() const;
     
     void forward(int speed = 200);
     void backward(int speed = 200);

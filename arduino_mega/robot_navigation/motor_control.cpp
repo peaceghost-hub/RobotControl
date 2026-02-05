@@ -7,6 +7,17 @@
 MotorControl::MotorControl() {
     speedLeft = 0;
     speedRight = 0;
+    autoBaseSpeed = 120;
+}
+
+void MotorControl::setAutoBaseSpeed(int speed) {
+    // Autonomous speed used for navigation heading corrections.
+    // Keep within safe PWM limits.
+    autoBaseSpeed = constrain(speed, MIN_SPEED, MAX_SPEED);
+}
+
+int MotorControl::getAutoBaseSpeed() const {
+    return autoBaseSpeed;
 }
 
 void MotorControl::begin() {
@@ -156,7 +167,7 @@ void MotorControl::adjustForHeading(float currentHeading, float targetHeading) {
     while (error < -180) error += 360;
     
     // PID-like control (simplified)
-    int baseSpeed = 120;  // Reduced from 180 for safer navigation
+    int baseSpeed = autoBaseSpeed;
     int correction = constrain((int)(error * 2), -80, 80);
     
     int leftSpeed = baseSpeed - correction;

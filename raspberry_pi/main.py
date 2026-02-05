@@ -644,6 +644,8 @@ class RobotController:
                 success = self._handle_manual_override(payload)
             elif command_type == 'MANUAL_SPEED':
                 success = self._handle_manual_speed(payload)
+            elif command_type == 'AUTO_SPEED':
+                success = self._handle_auto_speed(payload)
             elif command_type == 'WAYPOINT_PUSH':
                 success = self._handle_waypoint_push()
             elif command_type == 'SOUND_BUZZER':
@@ -769,6 +771,14 @@ class RobotController:
         if not hasattr(self.robot_link, 'manual_speed'):
             return False
         return self.robot_link.manual_speed(speed)
+
+    def _handle_auto_speed(self, payload: dict) -> bool:
+        """Set autonomous navigation base speed (affects waypoint following)."""
+        speed = int((payload or {}).get('value', 120))
+        speed = max(60, min(255, speed))
+        if not hasattr(self.robot_link, 'set_auto_speed'):
+            return False
+        return bool(self.robot_link.set_auto_speed(speed))
 
     def _handle_waypoint_push(self) -> bool:
         waypoints = self.api_client.get_waypoints()

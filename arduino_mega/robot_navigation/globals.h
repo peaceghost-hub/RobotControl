@@ -26,7 +26,8 @@ struct PendingWaypoint;
 // ==================== WIRELESS PROTOCOL SELECTION ====================
 // Uncomment ONE of these to select wireless protocol:
 // #define WIRELESS_PROTOCOL_ZIGBEE     // Uses Serial2 (RX2=17, TX2=16), transparent UART
-#define WIRELESS_PROTOCOL_LORA    // Uses SPI + pins 9(CS) & 8(RST), long range
+// #define WIRELESS_PROTOCOL_LORA    // Uses SPI + pins 9(CS) & 8(RST), long range
+#define WIRELESS_PROTOCOL_CC1101   // Uses SPI + pins 53(CS) & 2(GDO0), CC1101 module
 // #define WIRELESS_PROTOCOL_BLE     // Uses Serial3 (RX3=15, TX3=14), 38400 baud HC-05 / 9600 HM-10
 
 // ======================================================================
@@ -50,12 +51,13 @@ const uint8_t I2C_ADDRESS = 0x08;
   #define WIRELESS_SERIAL Serial3
   const uint32_t WIRELESS_BAUD = 38400;  // HC-05: change to 9600 or set via AT mode
   // For HM-10, use 9600
-#elif defined(WIRELESS_PROTOCOL_LORA)
-  // LoRa UART module (E32/E220 etc) on Serial2
-  #define WIRELESS_SERIAL Serial2
-  const uint32_t WIRELESS_BAUD = 9600;
-  #define LORA_SERIAL Serial2
-  const uint32_t LORA_BAUD = 9600;
+#elif defined(WIRELESS_PROTOCOL_CC1101)
+  // CC1101 SPI module pins (Arduino Mega)
+  #define CC1101_CS_PIN 53      // Chip Select (SS)
+  #define CC1101_GDO0_PIN 2     // Interrupt pin
+  #define CC1101_GDO2_PIN 3     // Optional interrupt/control pin
+  const float CC1101_FREQUENCY = 433.00;  // MHz
+  const float CC1101_DATA_RATE = 9.6;     // kBaud
 #endif
 
 // Legacy compatibility (maps to selected protocol)
@@ -78,6 +80,7 @@ const uint8_t CMD_REQUEST_STATUS  = 'U';
 const uint8_t CMD_REQUEST_OBSTACLE= 'O';  // New: request obstacle flag/distance
 const uint8_t CMD_SOUND_BUZZER = 'Q';  // New: sound buzzer for duration
 const uint8_t CMD_HEARTBEAT       = 'H';
+const uint8_t CMD_SET_AUTO_SPEED  = 'N';  // New: set autonomous navigation base speed (PWM)
 // Enhanced feature commands
 const uint8_t CMD_SEND_GPS        = 'F';  // Pi -> Mega GPS forwarding
 const uint8_t CMD_SEND_HEADING    = 'D';  // Pi -> Mega heading forwarding
