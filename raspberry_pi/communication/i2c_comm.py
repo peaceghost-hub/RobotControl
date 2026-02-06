@@ -37,6 +37,7 @@ class I2CComm:
     CMD_REQUEST_OBSTACLE = ord('O')   # New: Request obstacle flag/distance
     CMD_SOUND_BUZZER = ord('Q')       # New: Sound buzzer for duration
     CMD_SET_AUTO_SPEED = ord('N')     # New: Set autonomous navigation base speed (PWM)
+    CMD_ENGAGE_WIRELESS = ord('X')    # New: Engage/disengage CC1101 backup control
     CMD_HEARTBEAT = ord('H')
     CMD_WAYPOINT_COMPLETED = ord('Y')  # Mega -> Pi: waypoint reached
     CMD_SEND_GPS = ord('F')          # New: Send GPS from Pi to Mega (for fallback/broadcast)
@@ -393,6 +394,12 @@ class I2CComm:
             return False
         resp = self._exchange(self.CMD_SOUND_BUZZER, bytes([duration]), expect=2)
         return resp and resp[0] == self.RESP_ACK
+
+    def engage_wireless_control(self, engage: bool) -> bool:
+        """Engage (True) or disengage (False) CC1101 backup control mode."""
+        resp = self._exchange(self.CMD_ENGAGE_WIRELESS, bytes([1 if engage else 0]), expect=2)
+        return self._is_ack(resp)
+        return self._is_ack(resp)
 
     # ------------------------------------------------------------------
     # Encoding helpers

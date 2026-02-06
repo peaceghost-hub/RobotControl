@@ -95,6 +95,8 @@ unsigned long lastWirelessGps = 0;
 unsigned long lastManualCommand = 0;
 unsigned long lastHeartbeat = 0;
 unsigned long lastWirelessUpdate = 0;
+unsigned long lastWirelessCommand = 0;  // Track UNO remote activity
+bool wirelessControlActive = false;      // UNO remote has priority
 
 int manualSpeed = 180;
 String wirelessBuffer;
@@ -264,22 +266,21 @@ void setup() {
   digitalWrite(LINE_FOLLOWER_ENA, LOW); // disabled by default
   pinMode(LINE_FOLLOWER_OUT, INPUT);
   
-  // Initialize wireless module
-  if (wireless.begin()) {
-    DEBUG_SERIAL.print(F("# Wireless initialized: "));
-    DEBUG_SERIAL.println(wireless.getProtocolName());
-    // IMPORTANT: Avoid transmitting during setup for CC1101.
-    // Some CC1101 library variants can block in SendData() if GDO wiring is wrong
-    // or if the pin is electrically conflicted; this would stall boot before buzzer.
-    #if !defined(WIRELESS_PROTOCOL_CC1101)
-      // Send explicit handshake/hello to speed up connection indication
+  // Wireless init is deferred to loop() to avoid blocking I2C slave setup
+  #if !defined(WIRELESS_PROTOCOL_CC1101)
+    // Non-SPI wireless can init immediately
+    if (wireless.begin()) {
+      DEBUG_SERIAL.print(F("# Wireless initialized: "));
+      DEBUG_SERIAL.println(wireless.getProtocolName());
       sendWirelessReady();
       wireless.sendString("HELLO,MEGA_ROBOT");
-    #endif
-  } else {
-    DEBUG_SERIAL.println(F("# WARNING: Wireless init failed - I2C manual control only"));
-    beepPattern(3, 200, 100);
-  }
+    } else {
+      DEBUG_SERIAL.println(F("# WARNING: Wireless init failed - I2C manual control only"));
+      beepPattern(3, 200, 100);
+    }
+  #else
+    DEBUG_SERIAL.println(F("# Wireless (CC1101): deferred init in loop"));
+  #endif
   
   DEBUG_SERIAL.println(F("# Note: System continues with any component failures - graceful degradation enabled"));
   DEBUG_SERIAL.println(F("# Awaiting I2C and wireless handshakes..."));
@@ -299,6 +300,29 @@ void setup() {
 
 // ========================== MAIN LOOP ======================================
 void loop() {
+  // Deferred wireless init for CC1101 (after I2C slave is stable and only when safe)
+  #if defined(WIRELESS_PROTOCOL_CC1101)
+    static bool wirelessInitAttempted = false;
+    if (!wirelessInitAttempted && millis() > 5000 && !i2cHandshakeComplete) {
+      // Only init after 5 seconds AND no I2C activity yet (Pi may not be connected)
+      wirelessInitAttempted = true;
+      DEBUG_SERIAL.println(F("# Attempting CC1101 init (Pi inactive)..."));
+      if (wireless.begin()) {
+        DEBUG_SERIAL.println(F("# CC1101 backup control ready"));
+      } else {
+        DEBUG_SERIAL.println(F("# CC1101 init failed - waiting for Pi"));
+      }
+    }
+    // If Pi connects via I2C, wireless is secondary/disabled
+    if (i2cHandshakeComplete && wirelessInitAttempted) {
+      static bool warnedOnce = false;
+      if (!warnedOnce) {
+        DEBUG_SERIAL.println(F("# Pi connected - wireless backup on standby"));
+        warnedOnce = true;
+      }
+    }
+  #endif
+  
   // Update all sensors and communication
   // Note: compass.update() performs I2C master transactions to read HMC5883L
   // This is safe because:
@@ -349,7 +373,16 @@ void loop() {
     compass.update();          // Software I2C read from compass
   }
   obstacleAvoid.update();
-  wireless.update();
+  
+  // Only update wireless when I2C slave is completely idle (avoid SPI/I2C conflicts)
+  // This is the critical protection: never touch SPI during or near I2C activity
+  #if defined(WIRELESS_PROTOCOL_CC1101)
+    if (!i2cBusy && !i2cCommandPending && (millis() - lastI2C) > 50) {
+      wireless.update();
+    }
+  #else
+    wireless.update();  // UART wireless has no SPI conflict
+  #endif
 
   // Safety + alert: if an ultrasonic obstacle is detected within 20cm in front,
   // sound the buzzer like on init (triple beep), but with cooldown to not spam.
@@ -394,7 +427,23 @@ void loop() {
     }
   }
 
-  handleWireless();
+  // Wireless control priority logic:
+  // - If Pi (I2C) is active, ignore wireless (Pi has priority)
+  // - If Pi silent for 30+ seconds, accept wireless commands (Pi failed, UNO backup)
+  // - If wireless active, it takes over until idle for 30s (then Pi can resume)
+  bool piActive = i2cHandshakeComplete && (millis() - lastI2CActivityMs < 30000);
+  
+  if (!piActive || wirelessControlActive) {
+    // Pi is dead/absent OR wireless already took control
+    handleWireless();
+    
+    // If wireless was active but now idle for 30s, release control back to Pi
+    if (wirelessControlActive && (millis() - lastWirelessCommand > 30000)) {
+      wirelessControlActive = false;
+      DEBUG_SERIAL.println(F("# Wireless idle 30s - returning to I2C mode"));
+    }
+  }
+  
   processManualTimeout();
 
   // Optional line follow mode when enabled
@@ -429,7 +478,13 @@ void loop() {
     }
   }
 
-  if (wirelessHandshakeComplete && (millis() - lastWirelessGps >= ZIGBEE_GPS_INTERVAL)) {
+  // Only broadcast GPS via wireless if Pi is inactive (backup mode)
+  bool allowWirelessTx = !i2cBusy && !i2cCommandPending && (millis() - lastI2C) > 100;
+  #if defined(WIRELESS_PROTOCOL_CC1101)
+    allowWirelessTx = allowWirelessTx && wirelessControlActive;
+  #endif
+  
+  if (allowWirelessTx && wirelessHandshakeComplete && (millis() - lastWirelessGps >= ZIGBEE_GPS_INTERVAL)) {
     sendWirelessGps();
     lastWirelessGps = millis();
   }
@@ -454,11 +509,21 @@ void loop() {
     DEBUG_SERIAL.print(wireless.getProtocolName());
     DEBUG_SERIAL.print(F(") "));
     DEBUG_SERIAL.println(nowConnected ? F("CONNECTED") : F("DISCONNECTED"));
-    if (nowConnected) {
-      // On connect, emit handshake and hello so remotes see activity immediately
-      sendWirelessReady();
-      wireless.sendString("HELLO,MEGA_ROBOT");
-    }
+    
+    #if defined(WIRELESS_PROTOCOL_CC1101)
+      // Only send handshake if Pi is inactive (backup control mode)
+      bool piInactive = !i2cHandshakeComplete || (millis() - lastI2CActivityMs > 30000);
+      if (nowConnected && piInactive && !i2cBusy && (millis() - lastI2C) > 100) {
+        sendWirelessReady();
+        wireless.sendString("HELLO,MEGA_ROBOT");
+      }
+    #else
+      if (nowConnected) {
+        sendWirelessReady();
+        wireless.sendString("HELLO,MEGA_ROBOT");
+      }
+    #endif
+    
     lastWirelessConnected = nowConnected;
   }
 
@@ -954,6 +1019,8 @@ void handleWireless() {
 
 void processWirelessCommand(uint8_t command, uint8_t speed) {
   lastManualCommand = millis();
+  lastWirelessCommand = millis();
+  wirelessControlActive = true;  // UNO remote takes priority
 
   switch (command) {
     case WIRELESS_CMD_MOTOR_FORWARD:

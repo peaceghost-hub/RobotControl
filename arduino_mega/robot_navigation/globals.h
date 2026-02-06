@@ -81,6 +81,7 @@ const uint8_t CMD_REQUEST_OBSTACLE= 'O';  // New: request obstacle flag/distance
 const uint8_t CMD_SOUND_BUZZER = 'Q';  // New: sound buzzer for duration
 const uint8_t CMD_HEARTBEAT       = 'H';
 const uint8_t CMD_SET_AUTO_SPEED  = 'N';  // New: set autonomous navigation base speed (PWM)
+const uint8_t CMD_ENGAGE_WIRELESS = 'X';  // New: engage/disengage CC1101 backup control
 // Enhanced feature commands
 const uint8_t CMD_SEND_GPS        = 'F';  // Pi -> Mega GPS forwarding
 const uint8_t CMD_SEND_HEADING    = 'D';  // Pi -> Mega heading forwarding

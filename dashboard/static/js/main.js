@@ -1509,6 +1509,37 @@ function setupEventListeners() {
         });
     }
 
+    // CC1101 Wireless control
+    const engageWirelessBtn = document.getElementById('engage-wireless-btn');
+    if (engageWirelessBtn) {
+        engageWirelessBtn.addEventListener('click', async () => {
+            const success = await sendRobotCommand('ENGAGE_WIRELESS', { engage: true });
+            if (success) {
+                const statusEl = document.getElementById('wireless-status');
+                if (statusEl) {
+                    statusEl.textContent = 'Status: Wireless Active (UNO Remote)';
+                    statusEl.style.color = '#ff9800';
+                }
+                addLog('info', 'CC1101 backup control engaged');
+            }
+        });
+    }
+
+    const disengageWirelessBtn = document.getElementById('disengage-wireless-btn');
+    if (disengageWirelessBtn) {
+        disengageWirelessBtn.addEventListener('click', async () => {
+            const success = await sendRobotCommand('ENGAGE_WIRELESS', { engage: false });
+            if (success) {
+                const statusEl = document.getElementById('wireless-status');
+                if (statusEl) {
+                    statusEl.textContent = 'Status: I2C Priority (Normal)';
+                    statusEl.style.color = '#4CAF50';
+                }
+                addLog('info', 'CC1101 backup control disengaged');
+            }
+        });
+    }
+
     const backupButtonMap = {
         'backup-forward-btn': 'forward',
         'backup-left-btn': 'left',

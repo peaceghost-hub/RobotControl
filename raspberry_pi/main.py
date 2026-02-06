@@ -646,6 +646,14 @@ class RobotController:
                 success = self._handle_manual_speed(payload)
             elif command_type == 'AUTO_SPEED':
                 success = self._handle_auto_speed(payload)
+            elif command_type == 'ENGAGE_WIRELESS':
+                engage = payload.get('engage', False)
+                if self.robot_link and hasattr(self.robot_link, 'engage_wireless_control'):
+                    success = self.robot_link.engage_wireless_control(engage)
+                    logger.info(f"CC1101 backup control {'engaged' if engage else 'disengaged'}")
+                else:
+                    success = False
+                    logger.warning("Wireless control command not supported")
             elif command_type == 'WAYPOINT_PUSH':
                 success = self._handle_waypoint_push()
             elif command_type == 'SOUND_BUZZER':

@@ -208,11 +208,19 @@
             <!-- LoRa Backup Control Panel (Bottom-right) -->
             <div class="panel backup-panel bottom-right">
                 <div class="panel-header">
-                    <h2>🛰️ LoRa Backup Control</h2>
+                    <h2>🛰️ CC1101 Backup Control</h2>
                     <span id="backup-status-pill" class="status-badge subtle">Standby</span>
                 </div>
                 <div class="panel-content">
-                    <div class="control-help">Fallback control path routed through the LoRa wireless link when the Raspberry Pi is offline.</div>
+                    <div class="control-help">Manual control via UNO CC1101 remote. Engage to override I2C and use wireless joystick.</div>
+
+                    <div class="control-section">
+                        <div class="button-group">
+                            <button id="engage-wireless-btn" class="btn btn-warning">🎮 Engage Wireless</button>
+                            <button id="disengage-wireless-btn" class="btn btn-secondary">🔌 Disengage</button>
+                        </div>
+                        <p class="status-text" id="wireless-status" style="margin-top: 10px; color: #4CAF50;">Status: I2C Priority (Normal)</p>
+                    </div>
 
                     <div class="backup-meta">
                         <span>Device: <strong id="backup-device-id">--</strong></span>
