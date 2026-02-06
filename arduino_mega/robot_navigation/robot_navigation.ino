@@ -268,9 +268,14 @@ void setup() {
   if (wireless.begin()) {
     DEBUG_SERIAL.print(F("# Wireless initialized: "));
     DEBUG_SERIAL.println(wireless.getProtocolName());
-    // Send explicit handshake/hello to speed up connection indication
-    sendWirelessReady();
-    wireless.sendString("HELLO,MEGA_ROBOT");
+    // IMPORTANT: Avoid transmitting during setup for CC1101.
+    // Some CC1101 library variants can block in SendData() if GDO wiring is wrong
+    // or if the pin is electrically conflicted; this would stall boot before buzzer.
+    #if !defined(WIRELESS_PROTOCOL_CC1101)
+      // Send explicit handshake/hello to speed up connection indication
+      sendWirelessReady();
+      wireless.sendString("HELLO,MEGA_ROBOT");
+    #endif
   } else {
     DEBUG_SERIAL.println(F("# WARNING: Wireless init failed - I2C manual control only"));
     beepPattern(3, 200, 100);
@@ -967,14 +972,14 @@ void processWirelessCommand(uint8_t command, uint8_t speed) {
 
     case WIRELESS_CMD_MOTOR_LEFT:
       enterManualMode();
-      motors.left(speed);
+      motors.turnLeft(speed);
       DEBUG_SERIAL.print(F("# Manual left: "));
       DEBUG_SERIAL.println(speed);
       break;
 
     case WIRELESS_CMD_MOTOR_RIGHT:
       enterManualMode();
-      motors.right(speed);
+      motors.turnRight(speed);
       DEBUG_SERIAL.print(F("# Manual right: "));
       DEBUG_SERIAL.println(speed);
       break;

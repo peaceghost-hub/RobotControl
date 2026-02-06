@@ -17,7 +17,8 @@ bool CC1101Driver::begin() {
   Serial.println(F("Initializing CC1101 SPI driver..."));
 
   // Initialize SPI pins (Arduino Mega defaults)
-  ELECHOUSE_cc1101.setSpiPin(CC1101_CS_PIN, CC1101_CS_PIN, CC1101_CS_PIN, CC1101_CS_PIN); // CS pin
+  // setSpiPin(sck, miso, mosi, ss)
+  ELECHOUSE_cc1101.setSpiPin(52, 50, 51, CC1101_CS_PIN);
   ELECHOUSE_cc1101.setGDO(CC1101_GDO0_PIN, CC1101_GDO2_PIN);
 
   // Initialize module
@@ -106,9 +107,9 @@ void CC1101Driver::configureModule() {
   ELECHOUSE_cc1101.setSyncMode(SYNC_MODE);        // Sync word mode
   ELECHOUSE_cc1101.setSyncWord(SYNC_WORD, false); // Sync word
   ELECHOUSE_cc1101.setCrc(CRC_MODE);              // CRC enabled
-  ELECHOUSE_cc1101.setPacketFormat(PKT_FORMAT);   // Packet format
+  ELECHOUSE_cc1101.setPktFormat(PKT_FORMAT);      // Packet format
   ELECHOUSE_cc1101.setLengthConfig(LENGTH_CONFIG); // Variable length
-  ELECHOUSE_cc1101.setDataRate(DATA_RATE);        // Data rate
+  ELECHOUSE_cc1101.setDRate(DATA_RATE);           // Data rate
 }
 
 bool CC1101Driver::initModule() {

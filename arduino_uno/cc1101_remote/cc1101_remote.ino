@@ -78,6 +78,7 @@ enum MessageType : uint8_t {
   MSG_TYPE_COMMAND = 0x01,
   MSG_TYPE_STATUS = 0x02,
   MSG_TYPE_HANDSHAKE = 0x05,
+  MSG_TYPE_ACK = 0x06,
   MSG_TYPE_HEARTBEAT = 0x08
 };
 
@@ -215,7 +216,8 @@ void loop() {
 }
 
 bool initCC1101() {
-  ELECHOUSE_cc1101.setSpiPin(CC1101_CS, CC1101_CS, CC1101_CS, CC1101_CS); // CS pin
+  // setSpiPin(sck, miso, mosi, ss)
+  ELECHOUSE_cc1101.setSpiPin(13, 12, 11, CC1101_CS);
   ELECHOUSE_cc1101.setGDO(CC1101_GDO0, CC1101_GDO2);
 
   ELECHOUSE_cc1101.Init();
@@ -228,9 +230,9 @@ bool initCC1101() {
   ELECHOUSE_cc1101.setSyncMode(SYNC_MODE);
   ELECHOUSE_cc1101.setSyncWord(SYNC_WORD, false);
   ELECHOUSE_cc1101.setCrc(CRC_MODE);
-  ELECHOUSE_cc1101.setPacketFormat(PKT_FORMAT);
+  ELECHOUSE_cc1101.setPktFormat(PKT_FORMAT);
   ELECHOUSE_cc1101.setLengthConfig(LENGTH_CONFIG);
-  ELECHOUSE_cc1101.setDataRate(DATA_RATE);
+  ELECHOUSE_cc1101.setDRate(DATA_RATE);
 
   // Test communication
   if (!ELECHOUSE_cc1101.getCC1101()) {

@@ -11,8 +11,8 @@
 
 // ==================== SENSOR PINS ====================
 // Ultrasonic (HC-SR04): Servo-mounted
-#define ULTRASONIC_TRIG 8
-#define ULTRASONIC_ECHO 9
+#define ULTRASONIC_TRIG 30
+#define ULTRASONIC_ECHO 31
 
 // Servo Motor: Controls ultrasonic sensor direction
 #define SERVO_PIN 11

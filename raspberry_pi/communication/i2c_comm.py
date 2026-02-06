@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import struct
 import time
+import threading
 from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger('i2c_comm')
@@ -61,6 +62,7 @@ class I2CComm:
         self.bus_id = config.get('bus', 1)
         self.retry_attempts = config.get('retry_attempts', 3)
         self.request_timeout = config.get('request_timeout_ms', 200) / 1000.0
+        self._lock = threading.Lock()
 
         if not I2C_AVAILABLE:
             logger.warning("I2C communication unavailable. Install smbus2 to enable Mega link.")
@@ -105,35 +107,36 @@ class I2CComm:
         payload = bytes([command]) + data
         attempts = max(1, int(self.retry_attempts))
 
-        for attempt in range(1, attempts + 1):
-            if not self._write(payload):
-                if attempt < attempts:
-                    time.sleep(min(0.05, self.request_timeout))
-                    continue
-                return None
+        with self._lock:
+            for attempt in range(1, attempts + 1):
+                if not self._write(payload):
+                    if attempt < attempts:
+                        time.sleep(min(0.05, self.request_timeout))
+                        continue
+                    return None
 
-            if expect == 0:
-                return b""
+                if expect == 0:
+                    return b""
 
-            # Mega defers I2C command handling out of ISR (processed in its main loop).
-            # That means the first read can legitimately return zeros if the response
-            # buffer is not prepared yet. Poll briefly for a non-zero response.
-            deadline = time.time() + max(0.05, float(self.request_timeout))
-            resp = None
-            while time.time() < deadline:
-                time.sleep(0.02)
-                resp = self._read(expect)
-                if resp is None:
-                    continue
-                if len(resp) > 0 and resp[0] != 0:
+                # Mega defers I2C command handling out of ISR (processed in its main loop).
+                # That means the first read can legitimately return zeros if the response
+                # buffer is not prepared yet. Poll briefly for a non-zero response.
+                deadline = time.time() + max(0.05, float(self.request_timeout))
+                resp = None
+                while time.time() < deadline:
+                    time.sleep(0.02)
+                    resp = self._read(expect)
+                    if resp is None:
+                        continue
+                    if len(resp) > 0 and resp[0] != 0:
+                        return resp
+
+                # Return the last read (even if zeros) so caller can log/debug.
+                if resp is not None:
                     return resp
 
-            # Return the last read (even if zeros) so caller can log/debug.
-            if resp is not None:
-                return resp
-
-            if attempt < attempts:
-                time.sleep(min(0.05, self.request_timeout))
+                if attempt < attempts:
+                    time.sleep(min(0.05, self.request_timeout))
 
         return None
 

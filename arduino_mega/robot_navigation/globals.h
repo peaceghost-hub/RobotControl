@@ -56,8 +56,8 @@ const uint8_t I2C_ADDRESS = 0x08;
   #define CC1101_CS_PIN 53      // Chip Select (SS)
   #define CC1101_GDO0_PIN 2     // Interrupt pin
   #define CC1101_GDO2_PIN 3     // Optional interrupt/control pin
-  const float CC1101_FREQUENCY = 433.00;  // MHz
-  const float CC1101_DATA_RATE = 9.6;     // kBaud
+  constexpr float CC1101_FREQUENCY = 433.00f;  // MHz
+  constexpr float CC1101_DATA_RATE = 9.6f;     // kBaud
 #endif
 
 // Legacy compatibility (maps to selected protocol)

@@ -33,7 +33,7 @@ void ObstacleAvoidance::begin() {
     delay(500);  // Let servo reach center
     
     Serial.println(F("# Obstacle avoidance with servo + dual sensors initialized"));
-    Serial.println(F("# - HC-SR04 ultrasonic (pins 8-9, servo-scanned)"));
+    Serial.println(F("# - HC-SR04 ultrasonic (pins 30-31, servo-scanned)"));
     Serial.println(F("# - KY-032 infrared (pin 2 digital, A0 analog)"));
 }
 
