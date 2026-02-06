@@ -374,11 +374,14 @@ void loop() {
   }
   obstacleAvoid.update();
   
-  // Only update wireless when I2C slave is completely idle (avoid SPI/I2C conflicts)
-  // This is the critical protection: never touch SPI during or near I2C activity
+  // Wireless update logic:
+  // - When wirelessControlActive (manually engaged), always update (ignore I2C state)
+  // - Otherwise, only update when I2C slave is completely idle (avoid SPI/I2C conflicts)
   #if defined(WIRELESS_PROTOCOL_CC1101)
-    if (!i2cBusy && !i2cCommandPending && (millis() - lastI2C) > 50) {
-      wireless.update();
+    if (wirelessControlActive) {
+      wireless.update();  // Priority mode: always update
+    } else if (!i2cBusy && !i2cCommandPending && (millis() - lastI2C) > 50) {
+      wireless.update();  // Standby mode: only when I2C idle
     }
   #else
     wireless.update();  // UART wireless has no SPI conflict
@@ -428,19 +431,21 @@ void loop() {
   }
 
   // Wireless control priority logic:
-  // - If Pi (I2C) is active, ignore wireless (Pi has priority)
-  // - If Pi silent for 30+ seconds, accept wireless commands (Pi failed, UNO backup)
-  // - If wireless active, it takes over until idle for 30s (then Pi can resume)
-  bool piActive = i2cHandshakeComplete && (millis() - lastI2CActivityMs < 30000);
+  // - If Pi (I2C) is active AND wireless not manually engaged, ignore wireless (Pi has priority)
+  // - If Pi silent for 30+ seconds OR wireless manually engaged, accept wireless commands
+  // - When wireless manually engaged, Mega operates independently (no I2C blocking)
+  bool piActive = i2cHandshakeComplete && (millis() - lastI2CActivityMs < 30000) && !wirelessControlActive;
   
   if (!piActive || wirelessControlActive) {
-    // Pi is dead/absent OR wireless already took control
+    // Pi is dead/absent OR wireless control engaged from dashboard
     handleWireless();
     
-    // If wireless was active but now idle for 30s, release control back to Pi
+    // If wireless was active but now idle for 30s (and not manually engaged), release control back to Pi
     if (wirelessControlActive && (millis() - lastWirelessCommand > 30000)) {
-      wirelessControlActive = false;
-      DEBUG_SERIAL.println(F("# Wireless idle 30s - returning to I2C mode"));
+      // Only auto-release if it wasn't manually engaged via dashboard
+      // (we'd need a flag to distinguish auto vs manual engagement, for now keep it engaged)
+      // wirelessControlActive = false;
+      // DEBUG_SERIAL.println(F("# Wireless idle 30s - returning to I2C mode"));
     }
   }
   
@@ -478,11 +483,16 @@ void loop() {
     }
   }
 
-  // Only broadcast GPS via wireless if Pi is inactive (backup mode)
-  bool allowWirelessTx = !i2cBusy && !i2cCommandPending && (millis() - lastI2C) > 100;
-  #if defined(WIRELESS_PROTOCOL_CC1101)
-    allowWirelessTx = allowWirelessTx && wirelessControlActive;
-  #endif
+  // GPS broadcasting via wireless:
+  // - When wirelessControlActive, always broadcast (UNO needs GPS at control station)
+  // - Otherwise, only if Pi inactive and handshake complete
+  bool allowWirelessTx = wirelessControlActive;
+  if (!allowWirelessTx) {
+    allowWirelessTx = !i2cBusy && !i2cCommandPending && (millis() - lastI2C) > 100;
+    #if defined(WIRELESS_PROTOCOL_CC1101)
+      allowWirelessTx = allowWirelessTx && !i2cHandshakeComplete;
+    #endif
+  }
   
   if (allowWirelessTx && wirelessHandshakeComplete && (millis() - lastWirelessGps >= ZIGBEE_GPS_INTERVAL)) {
     sendWirelessGps();
@@ -510,19 +520,23 @@ void loop() {
     DEBUG_SERIAL.print(F(") "));
     DEBUG_SERIAL.println(nowConnected ? F("CONNECTED") : F("DISCONNECTED"));
     
-    #if defined(WIRELESS_PROTOCOL_CC1101)
-      // Only send handshake if Pi is inactive (backup control mode)
-      bool piInactive = !i2cHandshakeComplete || (millis() - lastI2CActivityMs > 30000);
-      if (nowConnected && piInactive && !i2cBusy && (millis() - lastI2C) > 100) {
-        sendWirelessReady();
-        wireless.sendString("HELLO,MEGA_ROBOT");
-      }
-    #else
-      if (nowConnected) {
-        sendWirelessReady();
-        wireless.sendString("HELLO,MEGA_ROBOT");
-      }
-    #endif
+    // Send handshake when:
+    // - Wireless control manually engaged (wirelessControlActive), OR
+    // - Pi is inactive (no I2C handshake or 30s timeout)
+    bool canSendHandshake = wirelessControlActive;
+    if (!canSendHandshake) {
+      #if defined(WIRELESS_PROTOCOL_CC1101)
+        bool piInactive = !i2cHandshakeComplete || (millis() - lastI2CActivityMs > 30000);
+        canSendHandshake = nowConnected && piInactive && !i2cBusy && (millis() - lastI2C) > 100;
+      #else
+        canSendHandshake = nowConnected;
+      #endif
+    }
+    
+    if (canSendHandshake) {
+      sendWirelessReady();
+      wireless.sendString("HELLO,MEGA_ROBOT");
+    }
     
     lastWirelessConnected = nowConnected;
   }

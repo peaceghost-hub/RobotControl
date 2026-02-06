@@ -416,6 +416,12 @@ class RobotController:
         
         while not shutdown_event.is_set():
             try:
+                # Skip I2C GPS polling if wireless backup control is active
+                if self.wireless_backup_active:
+                    logger.debug("GPS loop paused (wireless backup active)")
+                    shutdown_event.wait(self.gps_interval)
+                    continue
+                
                 gps_data = None
                 
                 # Priority 1: Get GPS from SIM7600E if available (dashboard feed only by default)
@@ -473,6 +479,12 @@ class RobotController:
         
         while not shutdown_event.is_set():
             try:
+                # Skip I2C status polling if wireless backup control is active
+                if self.wireless_backup_active:
+                    logger.debug("Status loop paused (wireless backup active)")
+                    shutdown_event.wait(self.status_interval)
+                    continue
+                
                 # Get system info
                 import psutil
                 
@@ -650,7 +662,9 @@ class RobotController:
                 engage = payload.get('engage', False)
                 if self.robot_link and hasattr(self.robot_link, 'engage_wireless_control'):
                     success = self.robot_link.engage_wireless_control(engage)
-                    logger.info(f"CC1101 backup control {'engaged' if engage else 'disengaged'}")
+                    if success:
+                        self.wireless_backup_active = engage
+                        logger.info(f"CC1101 backup control {'engaged - Pi I2C paused' if engage else 'disengaged - Pi I2C resumed'}")
                 else:
                     success = False
                     logger.warning("Wireless control command not supported")
