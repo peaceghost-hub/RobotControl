@@ -181,6 +181,7 @@ class RobotController:
         self._manual_drive_direction = 'stop'
         self._manual_drive_speed = 180
         self._manual_drive_thread = None
+        self.wireless_backup_active = False  # Track wireless backup control engagement
         try:
             if CONFIG.get('i2c'):
                 self.robot_link = I2CComm(CONFIG['i2c'])

@@ -540,6 +540,18 @@ void loop() {
     
     lastWirelessConnected = nowConnected;
   }
+  
+  // Force handshake when wireless control engaged (even if already connected)
+  static bool lastWirelessControlActive = false;
+  if (wirelessControlActive && !lastWirelessControlActive) {
+    DEBUG_SERIAL.println(F("# Wireless control engaged - initiating handshake"));
+    if (wireless.isConnected()) {
+      sendWirelessReady();
+      wireless.sendString("HELLO,MEGA_ROBOT");
+      wirelessHandshakeComplete = true;  // Force handshake completion
+    }
+  }
+  lastWirelessControlActive = wirelessControlActive;
 
   if (manualOverride && (millis() - lastManualCommand > MANUAL_TIMEOUT)) {
     exitManualMode(true);

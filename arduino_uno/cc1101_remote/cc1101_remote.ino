@@ -44,6 +44,19 @@ unsigned long lastRxMillis = 0;
 bool connected = false;
 bool readySeen = false;
 
+// GPS data structure (matches Mega)
+struct GPSData {
+  float latitude;
+  float longitude;
+  float altitude;
+  float speed;
+  uint16_t satellites;
+  bool valid;
+  bool fix;
+  unsigned long lastUpdate;
+};
+GPSData remoteGPS = {0};
+
 // Status LED
 static const uint8_t LED_PIN = 13;
 
@@ -293,6 +306,18 @@ void checkForMessages() {
           if (msg->length >= 5 && memcmp(msg->data, "READY", 5) == 0) {
             readySeen = true;
             Serial.println(F("[UNO] READY received"));
+          } else if (msg->length == 20) {
+            // GPS broadcast from Mega
+            memcpy(&remoteGPS.latitude, &msg->data[0], 4);
+            memcpy(&remoteGPS.longitude, &msg->data[4], 4);
+            memcpy(&remoteGPS.altitude, &msg->data[8], 4);
+            memcpy(&remoteGPS.speed, &msg->data[12], 4);
+            memcpy(&remoteGPS.satellites, &msg->data[16], 2);
+            remoteGPS.valid = (msg->data[18] == 1);
+            remoteGPS.fix = (msg->data[19] == 1);
+            remoteGPS.lastUpdate = millis();
+            
+            displayGPS();
           }
           break;
 
@@ -306,4 +331,39 @@ void checkForMessages() {
       }
     }
   }
+}
+
+void displayGPS() {
+  Serial.println(F("\\n========== ROBOT GPS =========="));
+  
+  Serial.print(F("Fix: "));
+  Serial.print(remoteGPS.fix ? F("YES") : F("NO"));
+  Serial.print(F(" | Valid: "));
+  Serial.println(remoteGPS.valid ? F("YES") : F("NO"));
+  
+  Serial.print(F("Satellites: "));
+  Serial.println(remoteGPS.satellites);
+  
+  Serial.print(F("Latitude:  "));
+  Serial.print(remoteGPS.latitude, 6);
+  Serial.println(F(" deg"));
+  
+  Serial.print(F("Longitude: "));
+  Serial.print(remoteGPS.longitude, 6);
+  Serial.println(F(" deg"));
+  
+  Serial.print(F("Altitude:  "));
+  Serial.print(remoteGPS.altitude, 1);
+  Serial.println(F(" m"));
+  
+  Serial.print(F("Speed:     "));
+  Serial.print(remoteGPS.speed, 2);
+  Serial.println(F(" knots"));
+  
+  unsigned long age = millis() - remoteGPS.lastUpdate;
+  Serial.print(F("Data age:  "));
+  Serial.print(age);
+  Serial.println(F(" ms"));
+  
+  Serial.println(F("==============================\\n"));
 }
