@@ -18,12 +18,12 @@
 #define SERVO_PIN 11
 
 // Infrared (KY-032): Fixed front-facing obstacle detection
-// ├─ DO (Digital Out) → Pin 2  (HIGH when obstacle detected)
-// ├─ AO (Analog Out)  → A0     (Analog 0: 0-1023, lower = closer obstacle)
+// ├─ DO (Digital Out) → Pin 32 (HIGH when obstacle detected)
+// ├─ ENA (Enable)     → Pin 33 (HIGH to enable module)
 // ├─ GND → GND
 // └─ VCC → 5V
-#define KY032_DO_PIN 2     // Digital output (active HIGH when obstacle detected)
-#define KY032_AO_PIN A0    // Analog output (0-1023, inversely proportional to distance)
+#define KY032_DO_PIN 32    // Digital output (active HIGH when obstacle detected)
+#define KY032_ENA_PIN 33   // Enable pin (set HIGH to enable)
 // Line follower module pins are defined in globals.h (LINE_FOLLOWER_OUT, LINE_FOLLOWER_ENA)
 
 // Servo positions for ultrasonic scanning
@@ -33,7 +33,7 @@
 
 // Detection thresholds
 #define OBSTACLE_THRESHOLD 30      // cm (ultrasonic)
-#define KY032_DETECTION_THRESHOLD 600  // ADC value (analog threshold, lower = farther)
+// Digital detection only (no analog threshold required)
 
 struct PathScan {
     int centerDist;

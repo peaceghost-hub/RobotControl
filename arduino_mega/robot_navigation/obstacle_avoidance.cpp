@@ -22,7 +22,8 @@ void ObstacleAvoidance::begin() {
     
     // Initialize KY-032 infrared sensor
     pinMode(KY032_DO_PIN, INPUT);      // Digital output
-    // Analog pin A0 is read-only via analogRead(), no pinMode needed
+    pinMode(KY032_ENA_PIN, OUTPUT);    // Enable pin
+    digitalWrite(KY032_ENA_PIN, HIGH); // Enable module
     ky032Attached = true;
     
     // Try to attach servo with fault tolerance
@@ -34,7 +35,7 @@ void ObstacleAvoidance::begin() {
     
     Serial.println(F("# Obstacle avoidance with servo + dual sensors initialized"));
     Serial.println(F("# - HC-SR04 ultrasonic (pins 30-31, servo-scanned)"));
-    Serial.println(F("# - KY-032 infrared (pin 2 digital, A0 analog)"));
+    Serial.println(F("# - KY-032 infrared (pin 32 digital, pin 33 enable)"));
 }
 
 void ObstacleAvoidance::update() {
@@ -64,14 +65,8 @@ bool ObstacleAvoidance::isIRObstacleDetected() {
 }
 
 int ObstacleAvoidance::getIRDistance() {
-    // Map ADC value (0-1023) to approximate distance
-    // KY-032 is typically max ~5cm range
-    // Higher ADC = closer object (inverse relationship)
-    if (irValue < 100) return 100;  // No detection, far away
-    if (irValue > KY032_DETECTION_THRESHOLD) return 5;  // Close detection
-    
-    // Linear interpolation for intermediate values
-    return map(irValue, 100, KY032_DETECTION_THRESHOLD, 50, 5);
+    // Digital-only KY-032: report near/far as coarse distance
+    return irObstacleDetected ? 5 : 100;
 }
 
 int ObstacleAvoidance::getIRAnalogValue() {
@@ -167,14 +162,8 @@ void ObstacleAvoidance::updateIRSensor() {
         return;
     }
     
-    // Read analog value from KY-032 (0-1023)
-    // Higher value = closer object (inverse relationship)
-    irValue = analogRead(KY032_AO_PIN);
-    
-    // Detect obstacle based on analog threshold
-    irObstacleDetected = (irValue > KY032_DETECTION_THRESHOLD);
-    
-    // Alternative: could also check digital pin
-    // bool digitalDetection = digitalRead(KY032_DO_PIN) == HIGH;
-    // Use analog method for smoother response with configurable threshold
+    // Digital detection (HIGH when obstacle detected)
+    bool digitalDetection = (digitalRead(KY032_DO_PIN) == HIGH);
+    irObstacleDetected = digitalDetection;
+    irValue = digitalDetection ? 1023 : 0;
 }

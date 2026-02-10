@@ -30,6 +30,10 @@
 #include "obstacle_avoidance.h"
 #include "globals.h"
 
+// ===================== SPI-ONLY TEST MODE =====================
+// Set to 0 to run full system (I2C + wireless); set to 1 for SPI-only test
+#define DISABLE_I2C_FOR_SPI_TEST 0
+
 // Select wireless implementation based on globals.h configuration
 #ifdef WIRELESS_PROTOCOL_ZIGBEE
   #include "zigbee_driver.h"
@@ -234,13 +238,17 @@ void setup() {
 
   GPS_SERIAL.begin(GPS_BAUD);
 
-  // Recover I2C bus before initializing Wire (in case SDA/SCL are stuck)
-  recoverI2CBus();
+  #if !DISABLE_I2C_FOR_SPI_TEST
+    // Recover I2C bus before initializing Wire (in case SDA/SCL are stuck)
+    recoverI2CBus();
 
-  // Initialize I2C as SLAVE to Raspberry Pi
-  Wire.begin(I2C_ADDRESS);
-  Wire.onReceive(onI2CReceive);
-  Wire.onRequest(onI2CRequest);
+    // Initialize I2C as SLAVE to Raspberry Pi
+    Wire.begin(I2C_ADDRESS);
+    Wire.onReceive(onI2CReceive);
+    Wire.onRequest(onI2CRequest);
+  #else
+    DEBUG_SERIAL.println(F("# I2C disabled for SPI-only test"));
+  #endif
 
   if (gps.begin(GPS_SERIAL)) {
     DEBUG_SERIAL.println(F("# GPS initialized"));
@@ -252,10 +260,12 @@ void setup() {
   // Compass moved to Pi - no initialization needed here
   DEBUG_SERIAL.println(F("# Compass: Moved to Pi for I2C compatibility"));
 
-  DEBUG_SERIAL.println(F("# I2C initialized:"));
-  DEBUG_SERIAL.print(F("#   - Slave to Pi at 0x"));
-  DEBUG_SERIAL.println(I2C_ADDRESS, HEX);
-  DEBUG_SERIAL.println(F("#   - Compass moved to Pi"));
+  #if !DISABLE_I2C_FOR_SPI_TEST
+    DEBUG_SERIAL.println(F("# I2C initialized:"));
+    DEBUG_SERIAL.print(F("#   - Slave to Pi at 0x"));
+    DEBUG_SERIAL.println(I2C_ADDRESS, HEX);
+    DEBUG_SERIAL.println(F("#   - Compass moved to Pi"));
+  #endif
 
   motors.begin();
   obstacleAvoid.begin();
@@ -294,31 +304,25 @@ void setup() {
   // Scanning the bus would switch to master mode and break slave functionality
   // To scan I2C devices, run scan from Raspberry Pi: sudo i2cdetect -y 1
   
-  DEBUG_SERIAL.println(F("# I2C slave mode active at address 0x08"));
-  DEBUG_SERIAL.println(F("# To verify I2C devices, run 'sudo i2cdetect -y 1' from Pi"));
+  #if !DISABLE_I2C_FOR_SPI_TEST
+    DEBUG_SERIAL.println(F("# I2C slave mode active at address 0x08"));
+    DEBUG_SERIAL.println(F("# To verify I2C devices, run 'sudo i2cdetect -y 1' from Pi"));
+  #endif
 }
 
 // ========================== MAIN LOOP ======================================
 void loop() {
-  // Deferred wireless init for CC1101 (after I2C slave is stable and only when safe)
+  // Deferred wireless init for CC1101 (after I2C slave is stable)
   #if defined(WIRELESS_PROTOCOL_CC1101)
     static bool wirelessInitAttempted = false;
-    if (!wirelessInitAttempted && millis() > 5000 && !i2cHandshakeComplete) {
-      // Only init after 5 seconds AND no I2C activity yet (Pi may not be connected)
+    if (!wirelessInitAttempted && millis() > 5000) {
+      // Init after 5 seconds (regardless of Pi connection)
       wirelessInitAttempted = true;
-      DEBUG_SERIAL.println(F("# Attempting CC1101 init (Pi inactive)..."));
+      DEBUG_SERIAL.println(F("# Attempting CC1101 init..."));
       if (wireless.begin()) {
         DEBUG_SERIAL.println(F("# CC1101 backup control ready"));
       } else {
-        DEBUG_SERIAL.println(F("# CC1101 init failed - waiting for Pi"));
-      }
-    }
-    // If Pi connects via I2C, wireless is secondary/disabled
-    if (i2cHandshakeComplete && wirelessInitAttempted) {
-      static bool warnedOnce = false;
-      if (!warnedOnce) {
-        DEBUG_SERIAL.println(F("# Pi connected - wireless backup on standby"));
-        warnedOnce = true;
+        DEBUG_SERIAL.println(F("# CC1101 init failed"));
       }
     }
   #endif
@@ -332,42 +336,47 @@ void loop() {
   gps.update();
 
   // Process any pending I2C command from Pi (deferred from ISR)
-  if (i2cCommandPending) {
-    uint8_t command = 0;
-    uint8_t length = 0;
-    uint8_t payload[32];
+  #if !DISABLE_I2C_FOR_SPI_TEST
+    if (i2cCommandPending) {
+      uint8_t command = 0;
+      uint8_t length = 0;
+      uint8_t payload[32];
 
-    noInterrupts();
-    command = i2cPendingCommand;
-    length = i2cPendingLength;
-    if (length > 32) {
-      length = 32;
-    }
-    for (uint8_t i = 0; i < length; i++) {
-      payload[i] = i2cPendingPayload[i];
-    }
-    i2cCommandPending = false;
-    interrupts();
+      noInterrupts();
+      command = i2cPendingCommand;
+      length = i2cPendingLength;
+      if (length > 32) {
+        length = 32;
+      }
+      for (uint8_t i = 0; i < length; i++) {
+        payload[i] = i2cPendingPayload[i];
+      }
+      i2cCommandPending = false;
+      interrupts();
 
-    handleI2CCommand(command, payload, length);
-  }
+      handleI2CCommand(command, payload, length);
+    }
+  #endif
 
   // Avoid I2C master transactions if Pi just accessed the slave interface
   bool i2cBusy = false;
   unsigned long lastI2C = 0;
-  noInterrupts();
-  i2cBusy = i2cCallbackActive;
-  lastI2C = lastI2CActivityMs;
-  interrupts();
+  #if !DISABLE_I2C_FOR_SPI_TEST
+    noInterrupts();
+    i2cBusy = i2cCallbackActive;
+    lastI2C = lastI2CActivityMs;
+    interrupts();
 
-  // I2C bus watchdog: if bus appears stuck, reinitialize slave
-  static unsigned long lastI2CWatchdog = 0;
-  if (millis() - lastI2CWatchdog > 100) {
-    lastI2CWatchdog = millis();
-    if (isI2CBusStuck() && !i2cBusy) {
-      i2cReinitSlave();
+    // I2C bus watchdog: if bus appears stuck, reinitialize slave
+    // ONLY run watchdog if Pi is expected to be connected (avoid SPI interference)
+    static unsigned long lastI2CWatchdog = 0;
+    if (i2cHandshakeComplete && (millis() - lastI2CWatchdog > 100)) {
+      lastI2CWatchdog = millis();
+      if (isI2CBusStuck() && !i2cBusy) {
+        i2cReinitSlave();
+      }
     }
-  }
+  #endif
 
   if (!i2cBusy && (millis() - lastI2C) > 5) {
     compass.update();          // Software I2C read from compass
@@ -376,10 +385,11 @@ void loop() {
   
   // Wireless update logic:
   // - When wirelessControlActive (manually engaged), always update (ignore I2C state)
+  // - When Pi never connected (i2cHandshakeComplete=false), always update
   // - Otherwise, only update when I2C slave is completely idle (avoid SPI/I2C conflicts)
   #if defined(WIRELESS_PROTOCOL_CC1101)
-    if (wirelessControlActive) {
-      wireless.update();  // Priority mode: always update
+    if (wirelessControlActive || !i2cHandshakeComplete) {
+      wireless.update();  // Priority mode or Pi not connected: always update
     } else if (!i2cBusy && !i2cCommandPending && (millis() - lastI2C) > 50) {
       wireless.update();  // Standby mode: only when I2C idle
     }
@@ -511,6 +521,23 @@ void loop() {
     DEBUG_SERIAL.println(wireless.isConnected() ? F("OK") : F("OFFLINE"));
   }
 
+  // Detect Pi disconnection and auto-enable wireless backup (5 second timeout)
+  #if defined(WIRELESS_PROTOCOL_CC1101)
+    static bool piPreviouslyConnected = false;
+    if (i2cHandshakeComplete && (millis() - lastI2CActivityMs > 5000)) {
+      // Pi has gone silent for 5+ seconds - assume disconnected
+      if (piPreviouslyConnected) {
+        DEBUG_SERIAL.println(F("# Pi disconnected - activating wireless backup"));
+      }
+      i2cHandshakeComplete = false;  // Reset handshake
+      piPreviouslyConnected = false;
+      wirelessControlActive = true;   // Auto-engage wireless
+    }
+    if (i2cHandshakeComplete) {
+      piPreviouslyConnected = true;
+    }
+  #endif
+
   // Wireless connection state change log
   static bool lastWirelessConnected = false;
   bool nowConnected = wireless.isConnected();
@@ -522,18 +549,10 @@ void loop() {
     
     // Send handshake when:
     // - Wireless control manually engaged (wirelessControlActive), OR
-    // - Pi is inactive (no I2C handshake or 30s timeout)
-    bool canSendHandshake = wirelessControlActive;
-    if (!canSendHandshake) {
-      #if defined(WIRELESS_PROTOCOL_CC1101)
-        bool piInactive = !i2cHandshakeComplete || (millis() - lastI2CActivityMs > 30000);
-        canSendHandshake = nowConnected && piInactive && !i2cBusy && (millis() - lastI2C) > 100;
-      #else
-        canSendHandshake = nowConnected;
-      #endif
-    }
+    // - Pi is inactive (no I2C handshake completed)
+    bool canSendHandshake = wirelessControlActive || !i2cHandshakeComplete;
     
-    if (canSendHandshake) {
+    if (canSendHandshake && nowConnected) {
       sendWirelessReady();
       wireless.sendString("HELLO,MEGA_ROBOT");
     }
@@ -1006,6 +1025,34 @@ void handleWireless() {
   WirelessMessage msg;
 
   while (wireless.receive(msg)) {
+    // Check for raw binary packet from ESP8266 (marker = 0xFF)
+    if (msg.type == 0xFF && msg.length == 6) {
+      // Raw binary packet structure: [throttle_h:1][throttle_l:1][steer_h:1][steer_l:1][flags:1][crc:1]
+      // Parse throttle (int16_t) and steer (int16_t)
+      int16_t throttle = ((int16_t)msg.data[0] << 8) | msg.data[1];
+      int16_t steer = ((int16_t)msg.data[2] << 8) | msg.data[3];
+      // uint8_t flags = msg.data[4];  // Not used for now
+      uint8_t crc = msg.data[5];
+
+      // Verify CRC if needed (optional)
+      // For now, just use the data
+      
+      lastManualCommand = millis();
+      lastWirelessCommand = millis();
+      wirelessControlActive = true;
+
+      // Apply arcade drive mixing
+      enterManualMode();
+      motors.arcadeDrive(throttle, steer);
+
+      DEBUG_SERIAL.print(F("# ESP8266 arcade: throttle="));
+      DEBUG_SERIAL.print(throttle);
+      DEBUG_SERIAL.print(F(" steer="));
+      DEBUG_SERIAL.println(steer);
+      return;  // Handled binary packet
+    }
+
+    // Standard WirelessMessage handling (for backward compatibility)
     DEBUG_SERIAL.print(F("# Wireless RX type="));
     DEBUG_SERIAL.print(msg.type, HEX);
     DEBUG_SERIAL.print(F(" len="));
@@ -1028,6 +1075,7 @@ void handleWireless() {
 
       case MSG_TYPE_HEARTBEAT:
         // Just update connection status
+        wirelessHandshakeComplete = true;  // Mark as connected
         break;
 
       case MSG_TYPE_STATUS:
@@ -1197,8 +1245,16 @@ void processWirelessMessage(const String& message) {
   }
 }
 
+bool canSendWireless() {
+#if defined(WIRELESS_PROTOCOL_CC1101)
+  return true; // Allow CC1101 sends even before RX is detected
+#else
+  return wireless.isConnected();
+#endif
+}
+
 void sendWirelessGps() {
-  if (!wireless.isConnected()) {
+  if (!canSendWireless()) {
     return;
   }
 
@@ -1246,7 +1302,7 @@ void sendWirelessGps() {
 }
 
 void sendWirelessStatus() {
-  if (!wireless.isConnected()) {
+  if (!canSendWireless()) {
     return;
   }
 
@@ -1283,7 +1339,7 @@ void sendWirelessStatus() {
 }
 
 void sendWirelessReady() {
-  if (!wireless.isConnected()) {
+  if (!canSendWireless()) {
     return;
   }
 
@@ -1317,7 +1373,7 @@ void sendWirelessReady() {
 }
 
 void sendWirelessObstacleAlert(int distance) {
-  if (!wireless.isConnected()) {
+  if (!canSendWireless()) {
     return;
   }
 

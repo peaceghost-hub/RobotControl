@@ -1,215 +1,149 @@
-// Arduino UNO ZigBee Remote (CC2530/CC2591 transparent UART)
-//
-// Sends MCTL commands from a joystick over ZigBee UART.
-//
-// Wiring (UNO <-> ZigBee module):
-//   UNO D2 (RX)  <- Module TX
-//   UNO D3 (TX)  -> Module RX  (IMPORTANT: module is 3.3V logic; use a divider)
-//   GND common
-//   Module VCC per your module (often 3.3V recommended)
-//
-// Joystick:
-//   VRx -> A0
-//   VRy -> A1
-//   GND -> GND
-//   VCC -> 5V (most joystick modules are fine at 5V)
+/*
+ * Arduino Mega + CC1101 Receiver -> L298N
+ * FIXES: Buffer safety, robust startup.
+ */
 
-#include <SoftwareSerial.h>
+#include <ELECHOUSE_CC1101_SRC_DRV.h>
 
-// ZigBee serial on pins 2 (RX) and 3 (TX)
-static const uint8_t ZIGBEE_RX_PIN = 2;
-static const uint8_t ZIGBEE_TX_PIN = 3;
-static const long ZIGBEE_BAUD = 9600; // Must match the Mega's ZIGBEE_BAUD
+#define PIN_GDO0 2
+#define PIN_CSN  53
 
-SoftwareSerial zigbee(ZIGBEE_RX_PIN, ZIGBEE_TX_PIN); // RX, TX
+// L298N
+#define IN1 22
+#define IN2 23
+#define ENA 5   // PWM (Left Side)
+#define IN3 24
+#define IN4 25
+#define ENB 6   // PWM (Right Side)
 
-// Connection tracking
-unsigned long lastRxMillis = 0;
-bool connected = false;
-bool readySeen = false;
+float frequency = 433.00;
+unsigned long lastPacketMs = 0;
 
-// Status LED
-static const uint8_t LED_PIN = 13;
+struct Packet {
+  int16_t throttle; 
+  int16_t steer;    
+  uint8_t flags;    
+  uint8_t crc;
+} pkt;
 
-// Joystick pins
-static const uint8_t JOY_X_PIN = A0;
-static const uint8_t JOY_Y_PIN = A1;
+uint8_t computeCrc(const Packet& p) {
+  const uint8_t* b = (const uint8_t*)&p;
+  uint8_t sum = 0;
+  for (size_t i = 0; i < sizeof(Packet) - 1; i++) sum += b[i];
+  return sum;
+}
 
-// Tuning
-static const int JOY_CENTER = 512;
-static const int JOY_DEADZONE = 90;
-static const unsigned long COMMAND_INTERVAL_MS = 120;
-static const unsigned long PING_INTERVAL_MS = 1000;
+void setMotor(int speed, uint8_t inA, uint8_t inB, uint8_t enPWM) {
+  int s = constrain(speed, -255, 255);
+  
+  // Deadzone at receiver end (optional, helps eliminate buzzing)
+  if (abs(s) < 15) s = 0;
 
-static unsigned long lastCommandMs = 0;
-static unsigned long lastPingMs = 0;
+  if (s > 0) {
+    digitalWrite(inA, HIGH);
+    digitalWrite(inB, LOW);
+    analogWrite(enPWM, s);
+  } else if (s < 0) {
+    digitalWrite(inA, LOW);
+    digitalWrite(inB, HIGH);
+    analogWrite(enPWM, -s); // PWM must be positive
+  } else {
+    digitalWrite(inA, LOW);
+    digitalWrite(inB, LOW);
+    analogWrite(enPWM, 0);
+  }
+}
 
-enum MoveDir { DIR_STOP, DIR_FWD, DIR_BACK, DIR_LEFT, DIR_RIGHT };
-MoveDir lastDir = DIR_STOP;
-int lastSpeed = 0;
+void stopMotors() {
+  setMotor(0, IN1, IN2, ENA);
+  setMotor(0, IN3, IN4, ENB);
+}
 
 void setup() {
-	pinMode(LED_PIN, OUTPUT);
-	digitalWrite(LED_PIN, LOW);
+  Serial.begin(9600);
+  delay(1200);
+  Serial.println("Mega CC1101 -> L298N RX");
 
-	Serial.begin(115200);
-	while (!Serial) { ; }
-	Serial.println(F("[UNO] ZigBee Remote Booting..."));
+  pinMode(PIN_GDO0, INPUT);
+  pinMode(PIN_CSN, OUTPUT);
+  digitalWrite(PIN_CSN, HIGH);
 
-	zigbee.begin(ZIGBEE_BAUD);
-	delay(100);
-	flushZigBee();
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(ENA, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  
+  stopMotors(); // Ensure stop at boot
 
-	Serial.print(F("[UNO] ZigBee init on D"));
-	Serial.print(ZIGBEE_RX_PIN);
-	Serial.print(F("(RX)/D"));
-	Serial.print(ZIGBEE_TX_PIN);
-	Serial.print(F("(TX) @ "));
-	Serial.println(ZIGBEE_BAUD);
+  if (!ELECHOUSE_cc1101.getCC1101()) {
+    Serial.println("CC1101 not detected.");
+    while (1) delay(1000);
+  }
 
-	// Send hello beacon to robot
-	zigbee.println(F("HELLO,UNO_REMOTE"));
-	zigbee.println(F("PING"));
+  ELECHOUSE_cc1101.Init();
+  ELECHOUSE_cc1101.setMHZ(frequency);
+  ELECHOUSE_cc1101.setModulation(0);
+  ELECHOUSE_cc1101.setDRate(9.6);
+  ELECHOUSE_cc1101.setRxBW(325);
+  ELECHOUSE_cc1101.setDeviation(47.60);
+  ELECHOUSE_cc1101.setPA(10);
+  ELECHOUSE_cc1101.setSyncMode(2);
+  ELECHOUSE_cc1101.setSyncWord(211, 145);
+  ELECHOUSE_cc1101.setCrc(1);
+  ELECHOUSE_cc1101.setDcFilterOff(0);
+  ELECHOUSE_cc1101.setManchester(0);
+  ELECHOUSE_cc1101.setPktFormat(0);
+  ELECHOUSE_cc1101.setWhiteData(0);
+  ELECHOUSE_cc1101.setAdrChk(0);
+  ELECHOUSE_cc1101.setAddr(0);
+  ELECHOUSE_cc1101.setLengthConfig(1);
+  ELECHOUSE_cc1101.SetRx();
+
+  lastPacketMs = millis();
 }
 
 void loop() {
-	// Periodic PING until READY seen
-	if (!readySeen && (millis() - lastPingMs >= PING_INTERVAL_MS)) {
-		Serial.println(F("[UNO] TX PING"));
-		zigbee.println(F("PING"));
-		lastPingMs = millis();
-	}
+  if (ELECHOUSE_cc1101.CheckRxFifo(50)) {
+    byte buf[64] = {0}; // Increased buffer size for safety
+    byte len = ELECHOUSE_cc1101.ReceiveData(buf);
 
-	// Echo any incoming ZigBee frames to Serial and update connection status
-	static String line;
-	while (zigbee.available()) {
-		char c = zigbee.read();
+    if (len == sizeof(Packet)) {
+      memcpy(&pkt, buf, sizeof(Packet));
+      
+      if (pkt.crc == computeCrc(pkt)) {
+        lastPacketMs = millis();
 
-		if (c == '\n') {
-			line.trim();
-			if (line.length() > 0) {
-				// Only consider the link alive when we receive a well-formed ASCII line.
-				lastRxMillis = millis();
-				Serial.print(F("[UNO] RX "));
-				Serial.println(line);
-				if (line.equalsIgnoreCase("READY")) {
-					readySeen = true;
-					Serial.println(F("[UNO] READY received"));
-				}
-			}
-			line = "";
-		} else if (c != '\r') {
-			// Keep only printable ASCII to avoid garbage due to baud mismatch/noise.
-			if (c >= 32 && c <= 126) {
-				line += c;
-			}
-			if (line.length() > 96) {
-				line.remove(0, line.length() - 64);
-			}
-		}
-	}
+        // MIXING LOGIC:
+        // Arcade Drive: Throttle = Forward/Back, Steer = Turn
+        int left  = pkt.throttle + pkt.steer;
+        int right = pkt.throttle - pkt.steer;
 
-	// Forward any Serial input to ZigBee (manual test typing)
-	while (Serial.available()) {
-		zigbee.write(Serial.read());
-	}
+        // Clip to max PWM
+        left  = constrain(left,  -255, 255);
+        right = constrain(right, -255, 255);
 
-	// Connection logic: consider connected if data seen in last 10 seconds
-	bool nowConnected = (millis() - lastRxMillis) < 10000UL;
-	if (nowConnected != connected) {
-		connected = nowConnected;
-		Serial.println(connected ? F("[UNO] ZigBee CONNECTED") : F("[UNO] ZigBee DISCONNECTED"));
-		digitalWrite(LED_PIN, connected ? HIGH : LOW);
-	}
+        setMotor(left,  IN1, IN2, ENA);
+        setMotor(right, IN3, IN4, ENB);
 
-	// Periodic hello beacon to robot (every 5s)
-	static unsigned long lastHello = 0;
-	if (millis() - lastHello >= 5000UL) {
-		zigbee.println(F("HELLO,UNO_REMOTE"));
-		lastHello = millis();
-	}
+        Serial.print("L:"); Serial.print(left);
+        Serial.print(" R:"); Serial.println(right);
+      } else {
+        Serial.println("CRC Fail");
+      }
+    }
 
-	// Joystick control loop
-	if (millis() - lastCommandMs >= COMMAND_INTERVAL_MS) {
-		int x = analogRead(JOY_X_PIN);
-		int y = analogRead(JOY_Y_PIN);
+    // Reset Radio to RX
+    ELECHOUSE_cc1101.SpiStrobe(0x36); // SIDLE
+    delay(2);
+    ELECHOUSE_cc1101.SpiStrobe(0x3A); // SFRX
+    delay(2);
+    ELECHOUSE_cc1101.SetRx();
+  }
 
-		int dx = x - JOY_CENTER;
-		int dy = y - JOY_CENTER;
-
-		MoveDir dir = DIR_STOP;
-		int mag = 0;
-		if (abs(dy) >= abs(dx)) {
-			// Forward/back dominates
-			if (dy > JOY_DEADZONE) {
-				dir = DIR_FWD;
-				mag = dy;
-			} else if (dy < -JOY_DEADZONE) {
-				dir = DIR_BACK;
-				mag = -dy;
-			}
-		} else {
-			// Left/right dominates
-			if (dx > JOY_DEADZONE) {
-				dir = DIR_RIGHT;
-				mag = dx;
-			} else if (dx < -JOY_DEADZONE) {
-				dir = DIR_LEFT;
-				mag = -dx;
-			}
-		}
-
-		// Map magnitude to speed (0-255). Keep a minimum so it actually moves.
-		int speed = 0;
-		if (dir != DIR_STOP) {
-			mag = constrain(mag, JOY_DEADZONE, 512);
-			speed = map(mag, JOY_DEADZONE, 512, 120, 255);
-		}
-
-		// Only send when changes occur to reduce spam.
-		if (dir != lastDir || abs(speed - lastSpeed) >= 10) {
-			Serial.print(F("[UNO] TX "));
-			switch (dir) {
-				case DIR_FWD:
-					Serial.print(F("MCTL,FORWARD,"));
-					Serial.println(speed);
-					zigbee.print(F("MCTL,FORWARD,"));
-					zigbee.println(speed);
-					break;
-				case DIR_BACK:
-					Serial.print(F("MCTL,BACKWARD,"));
-					Serial.println(speed);
-					zigbee.print(F("MCTL,BACKWARD,"));
-					zigbee.println(speed);
-					break;
-				case DIR_LEFT:
-					Serial.print(F("MCTL,LEFT,"));
-					Serial.println(speed);
-					zigbee.print(F("MCTL,LEFT,"));
-					zigbee.println(speed);
-					break;
-				case DIR_RIGHT:
-					Serial.print(F("MCTL,RIGHT,"));
-					Serial.println(speed);
-					zigbee.print(F("MCTL,RIGHT,"));
-					zigbee.println(speed);
-					break;
-				case DIR_STOP:
-				default:
-					Serial.println(F("MCTL,STOP"));
-					zigbee.println(F("MCTL,STOP"));
-					break;
-			}
-
-			lastDir = dir;
-			lastSpeed = speed;
-			lastCommandMs = millis();
-		} else {
-			lastCommandMs = millis();
-		}
-	}
-}
-
-void flushZigBee() {
-	while (zigbee.available()) { zigbee.read(); }
+  // Failsafe: Stop if signal lost for 500ms
+  if (millis() - lastPacketMs > 500) {
+    stopMotors();
+  }
 }

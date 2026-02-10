@@ -32,6 +32,28 @@ void MotorControl::begin() {
     stop();
 }
 
+// Helper: set motor with signed speed (-255 to +255)
+void MotorControl::setMotor(int speed, uint8_t inA, uint8_t inB, uint8_t enPWM) {
+  int s = constrain(speed, -255, 255);
+  
+  // Deadzone at receiver end (helps eliminate buzzing)
+  if (abs(s) < 15) s = 0;
+
+  if (s > 0) {
+    digitalWrite(inA, HIGH);
+    digitalWrite(inB, LOW);
+    analogWrite(enPWM, s);
+  } else if (s < 0) {
+    digitalWrite(inA, LOW);
+    digitalWrite(inB, HIGH);
+    analogWrite(enPWM, -s); // PWM must be positive
+  } else {
+    digitalWrite(inA, LOW);
+    digitalWrite(inB, LOW);
+    analogWrite(enPWM, 0);
+  }
+}
+
 void MotorControl::forward(int speed) {
     speed = constrain(speed, MIN_SPEED, MAX_SPEED);
     
@@ -92,6 +114,19 @@ void MotorControl::turnRight(int speed) {
     digitalWrite(MOTOR_RIGHT_IN1, LOW);
     digitalWrite(MOTOR_RIGHT_IN2, HIGH);
     analogWrite(MOTOR_RIGHT_EN, speed);
+}
+
+void MotorControl::arcadeDrive(int throttle, int steer) {
+    // Arcade drive mixing: Throttle = Forward/Back, Steer = Turn
+    int left  = throttle + steer;
+    int right = throttle - steer;
+
+    // Clip to max PWM
+    left  = constrain(left,  -255, 255);
+    right = constrain(right, -255, 255);
+
+    setMotor(left,  MOTOR_LEFT_IN1, MOTOR_LEFT_IN2, MOTOR_LEFT_EN);
+    setMotor(right, MOTOR_RIGHT_IN1, MOTOR_RIGHT_IN2, MOTOR_RIGHT_EN);
 }
 
 void MotorControl::turnDegrees(int degrees, int speed) {

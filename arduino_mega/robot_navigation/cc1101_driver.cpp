@@ -36,7 +36,18 @@ void CC1101Driver::update() {
   if (!initialized) return;
 
   // Check for received data
+  bool received = false;
   if (ELECHOUSE_cc1101.CheckReceiveFlag()) {
+    byte size = ELECHOUSE_cc1101.ReceiveData(rxBuffer);
+    if (size > 0) {
+      handleReceivedData(rxBuffer, size);
+      lastRxTime = millis();
+      received = true;
+    }
+  }
+
+  // Fallback polling: some boards don't toggle GDO0 reliably; try a direct read
+  if (!received) {
     byte size = ELECHOUSE_cc1101.ReceiveData(rxBuffer);
     if (size > 0) {
       handleReceivedData(rxBuffer, size);
@@ -78,16 +89,35 @@ bool CC1101Driver::receive(WirelessMessage& msg) {
 
   // Receive data
   byte size = ELECHOUSE_cc1101.ReceiveData(rxBuffer);
-  if (size < 2) return false; // Need at least type and length
+  if (size < 1) return false; // Need at least 1 byte
 
-  // Parse message
+  // Handle raw binary packet from ESP8266 (4-byte struct: throttle, steer, flags, crc)
+  // This is different from the structured WirelessMessage format
+  if (size == 5) {
+    // Raw packet format: [throttle_h:1][throttle_l:1][steer_h:1][steer_l:1][flags:1][crc:1]
+    // Actually the struct is: int16_t throttle (2 bytes), int16_t steer (2 bytes), uint8_t flags (1), uint8_t crc (1) = 6 bytes
+    // But with length prefix from CC1101, we expect size = 6
+    if (size == 6) {
+      // This is the raw binary packet from ESP8266
+      // Don't parse as WirelessMessage, handle directly in caller
+      memcpy(msg.data, rxBuffer, 6);
+      msg.type = 0xFF;  // Special marker for raw binary packet
+      msg.length = 6;
+      lastRxTime = millis();
+      return true;
+    }
+  }
+
+  // Standard WirelessMessage format (for backward compatibility)
   msg.type = rxBuffer[0];
-  msg.length = rxBuffer[1];
+  msg.length = (size > 1) ? rxBuffer[1] : 0;
 
   if (msg.length > 64) msg.length = 64; // Safety check
   if (size - 2 < msg.length) msg.length = size - 2; // Adjust if received less
 
-  memcpy(msg.data, &rxBuffer[2], msg.length);
+  if (msg.length > 0 && size > 2) {
+    memcpy(msg.data, &rxBuffer[2], msg.length);
+  }
 
   lastRxTime = millis();
   return true;

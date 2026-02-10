@@ -27,6 +27,9 @@ private:
     int autoBaseSpeed;
     const float TURN_MS_PER_DEG = 10.0f; // approximate timing per degree
     
+    // Helper: set motor with signed speed (-255 to +255)
+    void setMotor(int speed, uint8_t inA, uint8_t inB, uint8_t enPWM);
+    
 public:
     MotorControl();
     void begin();
@@ -40,6 +43,9 @@ public:
     void turnRight(int speed = 150);
     void turnDegrees(int degrees, int speed = 150);
     void stop();
+    
+    // Arcade drive: set motors from throttle and steer values
+    void arcadeDrive(int throttle, int steer);
     
     void setMotors(int left, int right);
     void adjustForHeading(float currentHeading, float targetHeading);
