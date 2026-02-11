@@ -1,6 +1,14 @@
  /*
- * Obstacle Avoidance Header
+ * Obstacle Avoidance Header — NON-BLOCKING
  * HC-SR04 Ultrasonic Sensor + KY-032 Infrared Sensor
+ *
+ * Blueprint rules:
+ *   - No pulseIn(), no delay() — everything runs in < 20 µs per call.
+ *   - Ultrasonic uses a two-phase state machine:
+ *       Phase 0: fire trigger pulse, record micros().
+ *       Phase 1: poll echo pin; compute distance when echo ends.
+ *   - scanPath() is broken into a multi-step state machine driven by
+ *     repeated calls to update().
  */
 
 #ifndef OBSTACLE_AVOIDANCE_H
@@ -10,30 +18,19 @@
 #include <Servo.h>
 
 // ==================== SENSOR PINS ====================
-// Ultrasonic (HC-SR04): Servo-mounted
 #define ULTRASONIC_TRIG 30
 #define ULTRASONIC_ECHO 31
-
-// Servo Motor: Controls ultrasonic sensor direction
 #define SERVO_PIN 11
+#define KY032_DO_PIN 32
+#define KY032_ENA_PIN 33
 
-// Infrared (KY-032): Fixed front-facing obstacle detection
-// ├─ DO (Digital Out) → Pin 32 (HIGH when obstacle detected)
-// ├─ ENA (Enable)     → Pin 33 (HIGH to enable module)
-// ├─ GND → GND
-// └─ VCC → 5V
-#define KY032_DO_PIN 32    // Digital output (active HIGH when obstacle detected)
-#define KY032_ENA_PIN 33   // Enable pin (set HIGH to enable)
-// Line follower module pins are defined in globals.h (LINE_FOLLOWER_OUT, LINE_FOLLOWER_ENA)
-
-// Servo positions for ultrasonic scanning
+// Servo positions
 #define SERVO_CENTER 90
-#define SERVO_LEFT 160
-#define SERVO_RIGHT 20
+#define SERVO_LEFT   160
+#define SERVO_RIGHT  20
 
 // Detection thresholds
-#define OBSTACLE_THRESHOLD 30      // cm (ultrasonic)
-// Digital detection only (no analog threshold required)
+#define OBSTACLE_THRESHOLD 30  // cm
 
 struct PathScan {
     int centerDist;
@@ -41,45 +38,72 @@ struct PathScan {
     int rightDist;
     bool leftClear;
     bool rightClear;
-    bool irDetected;      // KY-032 infrared detection result
-    int irDistance;       // KY-032 distance proxy (ADC value)
+    bool irDetected;
+    int irDistance;
 };
 
 class ObstacleAvoidance {
 private:
     Servo servo;
-    int distance;
+    int distance;                  // latest ultrasonic cm
     bool obstacleDetected;
-    bool irObstacleDetected;  // KY-032 detection flag
-    int irValue;              // KY-032 analog reading (0-1023)
+    bool irObstacleDetected;
+    int irValue;
     unsigned long lastCheck;
     unsigned long lastServoMove;
     int currentServoAngle;
     bool servoAttached;
-    bool ky032Attached;       // KY-032 initialization flag
-    const unsigned long CHECK_INTERVAL = 100;  // ms (reduced from 200ms for real-time response)
-    const unsigned long SERVO_DELAY = 300;  // ms for servo to stabilize
+    bool ky032Attached;
+
+    // ---- non-blocking ultrasonic state machine ----
+    enum UsPhase : uint8_t { US_IDLE, US_TRIGGER, US_WAIT_ECHO_HIGH, US_WAIT_ECHO_LOW };
+    UsPhase usPhase;
+    unsigned long usTriggerTime;   // micros() when trigger fired
+    unsigned long usEchoStart;     // micros() when echo went HIGH
+    unsigned long usTimeout;       // absolute micros deadline
+
+    // ---- non-blocking scan state machine ----
+    enum ScanStep : uint8_t { SCAN_NONE, SCAN_CENTER_MOVE, SCAN_CENTER_READ,
+                               SCAN_LEFT_MOVE, SCAN_LEFT_READ,
+                               SCAN_RIGHT_MOVE, SCAN_RIGHT_READ,
+                               SCAN_RETURN_CENTER, SCAN_DONE };
+    ScanStep scanStep;
+    unsigned long scanStepTime;
+    PathScan pendingScan;
+    bool scanReady;                // true once pendingScan is valid
+
+    static const unsigned long CHECK_INTERVAL = 100;
+    static const unsigned long SERVO_SETTLE   = 300;  // ms for servo to stabilise
     
 public:
     ObstacleAvoidance();
     void begin();
-    void update();
+    void update();                 // call every loop — always < 20 µs
     bool isObstacleDetected();
-    int getDistance();
-    bool isIRObstacleDetected();      // New: KY-032 detection
-    int getIRDistance();              // New: KY-032 distance proxy
-    int getIRAnalogValue();           // New: Raw ADC reading
+    int  getDistance();
+    bool isIRObstacleDetected();
+    int  getIRDistance();
+    int  getIRAnalogValue();
+
+    // Non-blocking scan API
+    void startScan();              // kick off a full L/C/R scan
+    bool isScanComplete() const;   // true when pendingScan is valid
+    PathScan getScanResult();      // returns last completed scan
+
+    // Legacy blocking scan (kept for navigation.cpp compatibility)
     PathScan scanPath();
+
     void lookCenter();
     void lookLeft();
     void lookRight();
     bool isServoReady();
     
 private:
-    int measureDistance();
-    int measureDistanceAt(int angle);
+    void triggerPing();            // starts non-blocking ping
+    void updateUltrasonic();       // state machine tick
+    void updateScan();             // scan state machine tick
+    void updateIRSensor();
     void moveServoTo(int angle);
-    void updateIRSensor();            // New: Update KY-032 reading
 };
 
 #endif

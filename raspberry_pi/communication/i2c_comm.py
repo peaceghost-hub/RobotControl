@@ -399,7 +399,6 @@ class I2CComm:
         """Engage (True) or disengage (False) CC1101 backup control mode."""
         resp = self._exchange(self.CMD_ENGAGE_WIRELESS, bytes([1 if engage else 0]), expect=2)
         return self._is_ack(resp)
-        return self._is_ack(resp)
 
     # ------------------------------------------------------------------
     # Encoding helpers

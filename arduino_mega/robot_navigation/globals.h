@@ -133,13 +133,12 @@ extern uint8_t pendingWaypointCount;
 extern bool navigationActive;
 extern bool manualOverride;
 extern bool i2cHandshakeComplete;
-extern bool zigbeeHandshakeComplete;
+extern bool wirelessHandshakeComplete;
 extern unsigned long lastStatusUpdate;
-extern unsigned long lastZigbeeGps;
+extern unsigned long lastWirelessGps;
 extern unsigned long lastManualCommand;
 extern unsigned long lastHeartbeat;
 extern int manualSpeed;
-extern String zigbeeBuffer;
 
 // Constants for timing
 const unsigned long STATUS_INTERVAL = 2000;     // ms
@@ -153,6 +152,23 @@ const uint8_t MAX_WAYPOINTS = 20;
 enum ControlMode : uint8_t { MODE_AUTO = 0, MODE_MANUAL = 1 };
 extern ControlMode controlMode;
 
+// ===================== STATE MACHINE (blueprint) ==========================
+// Two mutually-exclusive states — only one "owner" drives the motors.
+enum RobotState : uint8_t {
+  STATE_I2C      = 0,   // Pi owns the motors (autonomous / Pi-joystick)
+  STATE_WIRELESS = 1,   // ESP8266 remote owns the motors
+  STATE_FAILSAFE = 2    // Both comms lost — motors stopped, idle
+};
+extern RobotState robotState;
+
+// Timing budget constants (µs / ms)
+const unsigned long CC1101_POLL_INTERVAL   = 120;   // ms between SPI polls
+const unsigned long WIRELESS_LINK_TIMEOUT  = 3000;  // ms — no packets → back to I2C
+const unsigned long I2C_LINK_TIMEOUT       = 3000;  // ms — no I2C activity → consider lost
+const unsigned long SENSOR_UPDATE_INTERVAL = 100;   // ms between ultrasonic reads
+const unsigned long BUZZER_TICK_INTERVAL   = 10;    // ms for non-blocking buzzer
+const unsigned long FAILSAFE_BEEP_INTERVAL = 4000;  // ms — slow beep in failsafe mode
+
 // Function declarations
 void onI2CReceive(int bytes);
 void onI2CRequest();
@@ -164,18 +180,20 @@ void prepareStatusResponse();
 void resetPendingWaypoints();
 void storePendingWaypoint(const WaypointPacket& packet);
 void commitPendingWaypoints();
-void enterManualMode();
-void exitManualMode(bool resumeAutonomous);
-void processManualTimeout();
-void handleZigbee();
-void processZigbeeMessage(const String& message);
-void sendZigbeeGps();
-void sendZigbeeStatus();
-void sendZigbeeReady();
+void transitionToState(RobotState newState);
+void pollCC1101();
+void processRawMotorCommand(int16_t throttle, int16_t steer, uint8_t flags);
+void processWirelessCommand(uint8_t cmd, uint8_t speed);
+void processWirelessMessage(const String& message);
+void sendWirelessGps();
+void sendWirelessStatus();
+void sendWirelessReady();
+void sendWirelessObstacleAlert(int distance);
 void beepPattern(uint8_t pulses, uint16_t onMs, uint16_t offMs);
+void beepPatternNB(uint8_t pulses, uint16_t onMs, uint16_t offMs);
+void updateBuzzer();
 void markI2CHandshake();
-void markZigbeeHandshake();
-void checkReadyTone();
+void markWirelessHandshake();
 uint8_t readBatteryPercent();
 uint8_t readSignalQuality();
 

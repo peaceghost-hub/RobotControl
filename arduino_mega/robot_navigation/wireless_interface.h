@@ -24,7 +24,16 @@ enum MessageType : uint8_t {
   MSG_TYPE_HANDSHAKE = 0x05,     // Connection handshake
   MSG_TYPE_ACK = 0x06,           // Acknowledgment
   MSG_TYPE_ERROR = 0x07,         // Error message
-  MSG_TYPE_HEARTBEAT = 0x08      // Keep-alive
+  MSG_TYPE_HEARTBEAT = 0x08,     // Keep-alive
+  MSG_TYPE_RAW_MOTOR = 0x09      // Throttle/Steer raw values (ESP8266)
+};
+
+// Raw motor packet (used by ESP8266 transmitter)
+struct RawMotorPacket {
+  int16_t throttle;
+  int16_t steer;
+  uint8_t flags;
+  uint8_t crc;
 };
 
 // Command subtypes

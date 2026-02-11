@@ -2,167 +2,179 @@
 #include <ELECHOUSE_CC1101_SRC_DRV.h>
 #include "globals.h"
 
+// =====================================================================
+//  CC1101 Driver — NON-BLOCKING, ISR-SAFE implementation
+//
+//  Every SPI bus access is wrapped in noInterrupts()/interrupts() so
+//  the I2C slave ISR cannot fire mid-transfer and corrupt the CC1101.
+//  At most ONE packet is read per call to receive().
+// =====================================================================
+
 CC1101Driver::CC1101Driver() : initialized(false), lastRxTime(0) {
 }
 
 CC1101Driver::~CC1101Driver() {
   if (initialized) {
+    noInterrupts();
     ELECHOUSE_cc1101.goSleep();
+    interrupts();
   }
 }
 
+// ---- begin() — one-time radio initialisation ----
 bool CC1101Driver::begin() {
   if (initialized) return true;
 
-  Serial.println(F("Initializing CC1101 SPI driver..."));
+  Serial.println(F("# CC1101: Initializing SPI driver..."));
 
-  // Initialize SPI pins (Arduino Mega defaults)
-  // setSpiPin(sck, miso, mosi, ss)
+  // Set SPI pin mapping (Mega: SCK=52, MISO=50, MOSI=51, SS=53)
   ELECHOUSE_cc1101.setSpiPin(52, 50, 51, CC1101_CS_PIN);
   ELECHOUSE_cc1101.setGDO(CC1101_GDO0_PIN, CC1101_GDO2_PIN);
 
-  // Initialize module
-  if (!initModule()) {
-    Serial.println(F("CC1101 initialization failed"));
-    return false;
-  }
+  // Full radio configuration (SPI-heavy — guard it)
+  noInterrupts();
+  configureModule();
+  ELECHOUSE_cc1101.SetRx();
+  interrupts();
 
   initialized = true;
-  Serial.println(F("CC1101 driver initialized successfully"));
+  Serial.println(F("# CC1101: Ready (RX mode)"));
   return true;
 }
 
+// ---- update() — intentionally empty ----
+// All work happens in receive() called by the main state machine.
 void CC1101Driver::update() {
-  if (!initialized) return;
-
-  // Check for received data
-  bool received = false;
-  if (ELECHOUSE_cc1101.CheckReceiveFlag()) {
-    byte size = ELECHOUSE_cc1101.ReceiveData(rxBuffer);
-    if (size > 0) {
-      handleReceivedData(rxBuffer, size);
-      lastRxTime = millis();
-      received = true;
-    }
-  }
-
-  // Fallback polling: some boards don't toggle GDO0 reliably; try a direct read
-  if (!received) {
-    byte size = ELECHOUSE_cc1101.ReceiveData(rxBuffer);
-    if (size > 0) {
-      handleReceivedData(rxBuffer, size);
-      lastRxTime = millis();
-    }
-  }
-
-  // Reset connection if no data received for too long
-  if (millis() - lastRxTime > CONNECT_TIMEOUT) {
-    // Note: We don't reset here as it might interrupt ongoing operations
-    // Connection status is checked via isConnected()
-  }
+  // Nothing — by design
 }
 
+// ---- send() — transmit a WirelessMessage (non-blocking, rate-limited) ----
 bool CC1101Driver::send(const WirelessMessage& msg) {
   if (!initialized) return false;
 
-  // Non-blocking send: check if radio is ready, skip if busy
-  // This prevents blocking the main loop during I2C operations
+  // Rate-limit to avoid hammering SPI while Pi or sensors also need the bus
   static unsigned long lastSendTime = 0;
-  if (millis() - lastSendTime < 50) {
-    return false; // Rate limit: don't spam SPI bus
-  }
-  
-  // Send data (length + data) - this may briefly block but kept minimal
-  ELECHOUSE_cc1101.SendData((byte*)&msg, msg.length + 2); // +2 for type and length bytes
-  lastSendTime = millis();
+  if (millis() - lastSendTime < 50) return false;
 
+  noInterrupts();
+  ELECHOUSE_cc1101.SendData((byte*)&msg, msg.length + 2);
+  interrupts();
+
+  lastSendTime = millis();
   return true;
 }
 
+// ---- receive() — read ONE packet, non-blocking ----
+//
+// Returns true if a valid RawMotorPacket (or WirelessMessage) was decoded.
+// Always resets the RX pipeline before returning so the FIFO stays clean.
 bool CC1101Driver::receive(WirelessMessage& msg) {
   if (!initialized) return false;
 
-  // Check if data is available
-  if (!ELECHOUSE_cc1101.CheckReceiveFlag()) {
+  // --- 1. Check if anything is in the RX FIFO (fast SPI read) ---
+  noInterrupts();
+  bool hasData = ELECHOUSE_cc1101.CheckRxFifo(0);
+  interrupts();
+
+  if (!hasData) return false;
+
+  // --- 2. Read the packet out of the FIFO ---
+  byte size;
+  noInterrupts();
+  size = ELECHOUSE_cc1101.ReceiveData(rxBuffer);
+  interrupts();
+
+  if (size == 0 || size > sizeof(rxBuffer)) {
+    // Empty or oversized → flush and restart
+    resetRxPipeline();
     return false;
   }
 
-  // Receive data
-  byte size = ELECHOUSE_cc1101.ReceiveData(rxBuffer);
-  if (size < 1) return false; // Need at least 1 byte
+  // --- 3. Try to decode as RawMotorPacket (6 bytes from ESP8266) ---
+  RawMotorPacket* pktPtr = nullptr;
 
-  // Handle raw binary packet from ESP8266 (4-byte struct: throttle, steer, flags, crc)
-  // This is different from the structured WirelessMessage format
-  if (size == 5) {
-    // Raw packet format: [throttle_h:1][throttle_l:1][steer_h:1][steer_l:1][flags:1][crc:1]
-    // Actually the struct is: int16_t throttle (2 bytes), int16_t steer (2 bytes), uint8_t flags (1), uint8_t crc (1) = 6 bytes
-    // But with length prefix from CC1101, we expect size = 6
-    if (size == 6) {
-      // This is the raw binary packet from ESP8266
-      // Don't parse as WirelessMessage, handle directly in caller
-      memcpy(msg.data, rxBuffer, 6);
-      msg.type = 0xFF;  // Special marker for raw binary packet
-      msg.length = 6;
+  if (size == sizeof(RawMotorPacket)) {
+    pktPtr = (RawMotorPacket*)rxBuffer;
+  } else if (size == sizeof(RawMotorPacket) + 1) {
+    // Library sometimes prepends the length byte
+    pktPtr = (RawMotorPacket*)&rxBuffer[1];
+  }
+
+  if (pktPtr != nullptr) {
+    // Validate CRC: sum of first 5 bytes == crc byte
+    uint8_t sum = 0;
+    const uint8_t* b = (const uint8_t*)pktPtr;
+    for (uint8_t i = 0; i < sizeof(RawMotorPacket) - 1; i++) sum += b[i];
+
+    if (pktPtr->crc == sum) {
+      msg.type   = MSG_TYPE_RAW_MOTOR;
+      msg.length = sizeof(RawMotorPacket);
+      memcpy(msg.data, (const uint8_t*)pktPtr, sizeof(RawMotorPacket));
       lastRxTime = millis();
+      resetRxPipeline();
+      return true;
+    }
+    // CRC mismatch — fall through to flush
+  }
+
+  // --- 4. Try as standard WirelessMessage [type][length][data…] ---
+  if (size >= 2) {
+    msg.type   = rxBuffer[0];
+    msg.length = rxBuffer[1];
+    if (msg.length <= 62 && size >= (msg.length + 2)) {
+      memcpy(msg.data, &rxBuffer[2], msg.length);
+      lastRxTime = millis();
+      resetRxPipeline();
       return true;
     }
   }
 
-  // Standard WirelessMessage format (for backward compatibility)
-  msg.type = rxBuffer[0];
-  msg.length = (size > 1) ? rxBuffer[1] : 0;
-
-  if (msg.length > 64) msg.length = 64; // Safety check
-  if (size - 2 < msg.length) msg.length = size - 2; // Adjust if received less
-
-  if (msg.length > 0 && size > 2) {
-    memcpy(msg.data, &rxBuffer[2], msg.length);
-  }
-
-  lastRxTime = millis();
-  return true;
+  // --- 5. Unrecognised / garbage — flush ---
+  resetRxPipeline();
+  return false;
 }
 
+// ---- isConnected() ----
 bool CC1101Driver::isConnected() const {
   return initialized && (millis() - lastRxTime < CONNECT_TIMEOUT);
 }
 
+// ---- getRSSI() ----
 int8_t CC1101Driver::getRSSI() const {
-  if (!initialized) return -127; // Invalid RSSI value
-
-  // Get RSSI from CC1101 (this is approximate)
-  return ELECHOUSE_cc1101.getRssi();
+  if (!initialized) return -127;
+  noInterrupts();
+  int8_t rssi = ELECHOUSE_cc1101.getRssi();
+  interrupts();
+  return rssi;
 }
 
+// ---- configureModule() — set all radio parameters (call with ints disabled) ----
 void CC1101Driver::configureModule() {
   ELECHOUSE_cc1101.Init();
-  ELECHOUSE_cc1101.setCCMode(1);       // High sensitivity mode
-  ELECHOUSE_cc1101.setModulation(MODULATION);     // 2-FSK
-  ELECHOUSE_cc1101.setMHZ(FREQUENCY);             // Frequency
-  ELECHOUSE_cc1101.setRxBW(RX_BW);                // Receive bandwidth
-  ELECHOUSE_cc1101.setDeviation(DEVIATION);       // Frequency deviation
-  ELECHOUSE_cc1101.setPA(PA_POWER);               // Transmission power
-  ELECHOUSE_cc1101.setSyncMode(SYNC_MODE);        // Sync word mode
-  ELECHOUSE_cc1101.setSyncWord(SYNC_WORD, false); // Sync word
-  ELECHOUSE_cc1101.setCrc(CRC_MODE);              // CRC enabled
-  ELECHOUSE_cc1101.setPktFormat(PKT_FORMAT);      // Packet format
-  ELECHOUSE_cc1101.setLengthConfig(LENGTH_CONFIG); // Variable length
-  ELECHOUSE_cc1101.setDRate(DATA_RATE);           // Data rate
+  ELECHOUSE_cc1101.setCCMode(1);
+  ELECHOUSE_cc1101.setModulation(MODULATION);
+  ELECHOUSE_cc1101.setMHZ(FREQUENCY);
+  ELECHOUSE_cc1101.setRxBW(RX_BW);
+  ELECHOUSE_cc1101.setDeviation(DEVIATION);
+  ELECHOUSE_cc1101.setPA(PA_POWER);
+  ELECHOUSE_cc1101.setSyncMode(SYNC_MODE);
+  ELECHOUSE_cc1101.setSyncWord(SYNC_WORD >> 8, SYNC_WORD & 0xFF); // 211, 145
+  ELECHOUSE_cc1101.setCrc(CRC_MODE);
+  ELECHOUSE_cc1101.setDcFilterOff(0);
+  ELECHOUSE_cc1101.setManchester(0);
+  ELECHOUSE_cc1101.setPktFormat(0);
+  ELECHOUSE_cc1101.setWhiteData(0);
+  ELECHOUSE_cc1101.setLengthConfig(LENGTH_CFG);
+  ELECHOUSE_cc1101.setDRate(DATA_RATE);
 }
 
-bool CC1101Driver::initModule() {
-  configureModule();
-
-  // Skip extensive communication test to avoid blocking
-  // Module will naturally fail if not present
-  
-  // Set receive mode
+// ---- resetRxPipeline() — SIDLE → SFRX → SetRx (call any time) ----
+//  Guards SPI with noInterrupts().  Cheap: ~20 µs total.
+void CC1101Driver::resetRxPipeline() {
+  noInterrupts();
+  ELECHOUSE_cc1101.SpiStrobe(0x36);  // SIDLE
+  // No delayMicroseconds needed — SPI strobe takes ~4 µs each
+  ELECHOUSE_cc1101.SpiStrobe(0x3A);  // SFRX
   ELECHOUSE_cc1101.SetRx();
-
-  return true;
-}
-
-void CC1101Driver::handleReceivedData(byte* data, byte length) {
-  // This method is kept for backward compatibility but not used
-  // since receive() handles data retrieval
+  interrupts();
 }
