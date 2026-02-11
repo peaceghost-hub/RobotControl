@@ -638,31 +638,55 @@ class RobotController:
             shutdown_event.wait(self.command_poll_interval)
 
     def instant_command_loop(self):
-        """High-frequency poll for latency-critical instant commands.
-        Polls /api/commands/instant every ~100ms for manual drive and
-        other time-sensitive commands that bypass the DB queue."""
+        """High-frequency poll for ALL dashboard commands.
+        Polls /api/commands/instant every ~100 ms.  The endpoint returns
+        a list of queued commands (may be empty).  Each command is
+        processed in order so nothing is lost."""
         logger.info("Starting instant command loop (100ms poll)...")
-        import requests
-        base_url = self.api_client.base_url.rstrip('/') if getattr(self.api_client, 'base_url', None) else CONFIG.get('dashboard_api', {}).get('base_url', '').rstrip('/')
+        import requests as _requests
+        base_url = (
+            self.api_client.base_url.rstrip('/')
+            if getattr(self.api_client, 'base_url', None)
+            else CONFIG.get('dashboard_api', {}).get('base_url', '').rstrip('/')
+        )
         url = f"{base_url}/api/commands/instant"
-        session = requests.Session()
-        last_seq = 0
+        session = _requests.Session()
+        consecutive_errors = 0
+
+        logger.info("Instant command loop polling: %s", url)
 
         while not shutdown_event.is_set():
             try:
                 resp = session.get(url, timeout=(0.5, 1.0))
                 if resp.status_code == 200:
                     data = resp.json()
-                    cmd = data.get('command')
-                    if cmd and cmd.get('seq', 0) > last_seq:
-                        last_seq = cmd['seq']
+                    commands = data.get('commands', [])
+                    # Backward compat: old single-slot format
+                    if not commands and data.get('command'):
+                        cmd = data['command']
+                        commands = [cmd] if cmd else []
+                    for cmd in commands:
+                        cmd_type = cmd.get('command_type', '?')
+                        logger.info("Instant command received: %s (seq=%s)",
+                                    cmd_type, cmd.get('seq', '?'))
                         self._process_command({
-                            'id': None,  # no DB id for instant commands
-                            'command_type': cmd.get('command_type'),
+                            'id': None,
+                            'command_type': cmd_type,
                             'payload': cmd.get('payload', {}),
                         })
+                    if consecutive_errors > 0:
+                        logger.info("Instant command loop reconnected after %d errors", consecutive_errors)
+                    consecutive_errors = 0
+                else:
+                    consecutive_errors += 1
+                    if consecutive_errors <= 3 or consecutive_errors % 30 == 0:
+                        logger.warning("Instant command poll HTTP %d (error #%d) url=%s",
+                                       resp.status_code, consecutive_errors, url)
             except Exception as exc:
-                logger.debug("Instant command poll error: %s", exc)
+                consecutive_errors += 1
+                if consecutive_errors <= 3 or consecutive_errors % 30 == 0:
+                    logger.warning("Instant command poll error #%d: %s (url=%s)",
+                                   consecutive_errors, exc, url)
 
             shutdown_event.wait(0.1)
 
