@@ -38,11 +38,25 @@ public:
     void backward(int speed = 200);
     void turnLeft(int speed = 150);
     void turnRight(int speed = 150);
-    void turnDegrees(int degrees, int speed = 150);
+    void turnDegrees(int degrees, int speed = 150);  // blocking (legacy)
     void stop();
-    
+
+    // ---- Non-blocking timed turn API ----
+    void startTurnDegrees(int degrees, int speed = 140);
+    bool isTurnComplete();     // call every loop; auto-stops motors when done
+    void startTimedForward(int speed, unsigned long durationMs);
+    bool isTimedForwardComplete();  // call every loop; auto-stops when done
+
     void setMotors(int left, int right);
     void adjustForHeading(float currentHeading, float targetHeading);
+
+private:
+    // non-blocking turn state
+    bool  _turning;
+    unsigned long _turnEndTime;
+    // non-blocking forward state
+    bool  _timedForward;
+    unsigned long _timedForwardEnd;
 };
 
 #endif

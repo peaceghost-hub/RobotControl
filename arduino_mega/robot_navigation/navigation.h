@@ -61,6 +61,31 @@ private:
     // Waypoint completion tracking
     bool waypointJustCompleted;
     int lastCompletedWaypointId;
+
+    // ---- Non-blocking obstacle avoidance state machine ----
+    enum AvoidStep : uint8_t {
+        AV_IDLE,               // not avoiding
+        AV_STOP_PAUSE,         // initial stop, brief pause for stability
+        AV_SCAN_WAIT,          // waiting for non-blocking scan to finish
+        AV_TURN,               // executing a non-blocking turn
+        AV_FORWARD,            // moving forward cautiously to clear obstacle
+        AV_FORWARD_PAUSE,      // brief pause after forward before recheck
+        AV_RECHECK,            // waiting for sensor update after forward
+        AV_SHARP_RIGHT_TURN,   // sharp right 120°
+        AV_SHARP_RIGHT_CHECK,  // pause + recheck after sharp right
+        AV_UNDO_SHARP_RIGHT,   // undo the sharp right (turn back -120°)
+        AV_SHARP_LEFT_TURN,    // sharp left 120°
+        AV_SHARP_LEFT_CHECK,   // pause + recheck after sharp left
+        AV_DONE                // avoidance complete, resume navigation
+    };
+    AvoidStep avoidStep;
+    unsigned long avoidStepTime;   // timestamp when current step began
+    int avoidTurnDirection;        // +1 right, -1 left
+    int avoidTurnAngle;
+
+    // ---- Non-blocking GPS-only nudge state ----
+    bool gpsNudgeActive;
+    unsigned long gpsNudgeEndTime;
     
 public:
     Navigation();

@@ -140,6 +140,14 @@ latest_data = {
 recent_events = []
 MAX_EVENTS = 50
 
+# ---- Fast Manual Command Channel ----
+# In-memory slot for instant manual-drive commands.
+# Bypasses DB polling entirely; the Pi fetches at high frequency (~100ms).
+# Structure: {'command': 'MANUAL_DRIVE', 'payload': {...}, 'device_id': '...',
+#             'seq': int, 'timestamp': str}  or None when idle.
+_instant_command = None
+_instant_command_seq = 0  # monotonic counter so Pi detects new vs same
+
 backup_state = {
     'active': False,
     'device_id': None,
@@ -1115,6 +1123,50 @@ def acknowledge_command(command_id: int):
     return jsonify({'status': 'success'}), 200
 
 
+# ============= FAST MANUAL COMMAND CHANNEL =============
+# These endpoints bypass the DB queue for latency-critical commands
+# like manual drive arrows.  The browser pushes commands via WebSocket
+# or HTTP POST; the Pi polls at ~100ms via GET.
+
+@app.route('/api/commands/instant', methods=['POST'])
+def set_instant_command():
+    """Set an instant (in-memory) command for the Pi to pick up immediately.
+    Used for latency-critical manual drive control."""
+    global _instant_command, _instant_command_seq
+    try:
+        data = request.get_json() or {}
+        command_type = data.get('command')
+        if not command_type:
+            return jsonify({'status': 'error', 'message': 'Missing command'}), 400
+
+        _instant_command_seq += 1
+        with thread_lock:
+            _instant_command = {
+                'command_type': command_type,
+                'payload': data.get('payload', {}),
+                'device_id': data.get('device_id') or app.config.get('DEFAULT_DEVICE_ID', 'robot_01'),
+                'seq': _instant_command_seq,
+                'timestamp': datetime.utcnow().isoformat()
+            }
+
+        return jsonify({'status': 'success', 'seq': _instant_command_seq}), 200
+    except Exception as e:
+        logger.error("Error in instant command: %s", e)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/commands/instant', methods=['GET'])
+def get_instant_command():
+    """Pi polls this at high frequency to get the latest manual command.
+    Returns the command and clears the slot so the same command isn't
+    processed twice (seq tracking handles idempotency on Pi side)."""
+    with thread_lock:
+        cmd = _instant_command
+    if cmd:
+        return jsonify({'status': 'success', 'command': cmd}), 200
+    return jsonify({'status': 'success', 'command': None}), 200
+
+
 # ============= CAMERA STREAM =============
 
 @app.route('/api/camera/frame', methods=['POST'])
@@ -1323,6 +1375,26 @@ def handle_update_request(data):
             },
             'backup': latest_data.get('backup')
         })
+
+
+@socketio.on('instant_command', namespace='/realtime')
+def handle_instant_command(data):
+    """Handle latency-critical commands via WebSocket (manual drive, etc.).
+    This is the fast-lane alternative to HTTP POST /api/commands which goes
+    through the database queue."""
+    global _instant_command, _instant_command_seq
+    if not data or not data.get('command'):
+        return
+    _instant_command_seq += 1
+    with thread_lock:
+        _instant_command = {
+            'command_type': data['command'],
+            'payload': data.get('payload', {}),
+            'device_id': data.get('device_id') or app.config.get('DEFAULT_DEVICE_ID', 'robot_01'),
+            'seq': _instant_command_seq,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    logger.debug("Instant command via WS: %s seq=%d", data['command'], _instant_command_seq)
 
 
 # ============= DATABASE INITIALIZATION =============

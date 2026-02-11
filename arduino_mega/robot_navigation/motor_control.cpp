@@ -8,6 +8,10 @@ MotorControl::MotorControl() {
     speedLeft = 0;
     speedRight = 0;
     autoBaseSpeed = 120;
+    _turning = false;
+    _turnEndTime = 0;
+    _timedForward = false;
+    _timedForwardEnd = 0;
 }
 
 void MotorControl::setAutoBaseSpeed(int speed) {
@@ -95,7 +99,7 @@ void MotorControl::turnRight(int speed) {
 }
 
 void MotorControl::turnDegrees(int degrees, int speed) {
-    // Positive degrees -> turn right, negative -> turn left
+    // BLOCKING legacy — kept for backward compat only
     int absDeg = abs(degrees);
     unsigned long duration = (unsigned long)(absDeg * TURN_MS_PER_DEG);
     if (degrees >= 0) {
@@ -105,6 +109,45 @@ void MotorControl::turnDegrees(int degrees, int speed) {
     }
     delay(duration);
     stop();
+}
+
+// ---- Non-blocking timed turn ----
+void MotorControl::startTurnDegrees(int degrees, int speed) {
+    int absDeg = abs(degrees);
+    unsigned long duration = (unsigned long)(absDeg * TURN_MS_PER_DEG);
+    if (degrees >= 0) {
+        turnRight(speed);
+    } else {
+        turnLeft(speed);
+    }
+    _turning = true;
+    _turnEndTime = millis() + duration;
+}
+
+bool MotorControl::isTurnComplete() {
+    if (!_turning) return true;
+    if (millis() >= _turnEndTime) {
+        stop();
+        _turning = false;
+        return true;
+    }
+    return false;
+}
+
+void MotorControl::startTimedForward(int speed, unsigned long durationMs) {
+    forward(speed);
+    _timedForward = true;
+    _timedForwardEnd = millis() + durationMs;
+}
+
+bool MotorControl::isTimedForwardComplete() {
+    if (!_timedForward) return true;
+    if (millis() >= _timedForwardEnd) {
+        stop();
+        _timedForward = false;
+        return true;
+    }
+    return false;
 }
 
 void MotorControl::stop() {

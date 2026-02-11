@@ -815,26 +815,30 @@ async function sendNavigationCommand(action) {
         addLog('warning', 'Navigation commands disabled while backup control is active');
         return;
     }
-    switch (action) {
-        case 'start':
-            await sendRobotCommand('NAV_START');
-            state.navigationActive = true;
-            break;
-        case 'pause':
-            await sendRobotCommand('NAV_PAUSE');
-            state.navigationActive = false;
-            break;
-        case 'resume':
-            await sendRobotCommand('NAV_RESUME');
-            state.navigationActive = true;
-            break;
-        case 'stop':
-            await sendRobotCommand('NAV_STOP');
-            state.navigationActive = false;
-            break;
-        default:
-            break;
+
+    const navMap = {
+        'start':  { cmd: 'NAV_START',  active: true  },
+        'pause':  { cmd: 'NAV_PAUSE',  active: false },
+        'resume': { cmd: 'NAV_RESUME', active: true  },
+        'stop':   { cmd: 'NAV_STOP',   active: false }
+    };
+    const entry = navMap[action];
+    if (!entry) return;
+
+    // Use WebSocket instant channel for lowest latency
+    if (socket && socket.connected) {
+        socket.emit('instant_command', {
+            command: entry.cmd,
+            payload: {},
+            device_id: state.deviceId
+        });
+        addLog('info', `Instant nav command: ${entry.cmd}`);
+    } else {
+        // Fallback to DB queue when WebSocket is down
+        await sendRobotCommand(entry.cmd);
     }
+
+    state.navigationActive = entry.active;
     updateControlIndicators();
 }
 
@@ -850,7 +854,19 @@ async function sendManualCommand(direction) {
         direction,
         speed: state.manualSpeed
     };
-    await sendRobotCommand('MANUAL_DRIVE', payload);
+
+    // Use WebSocket instant channel for lowest latency
+    if (socket && socket.connected) {
+        socket.emit('instant_command', {
+            command: 'MANUAL_DRIVE',
+            payload,
+            device_id: state.deviceId
+        });
+        addLog('info', `Instant command: MANUAL_DRIVE ${direction}`);
+    } else {
+        // Fallback to HTTP queue if WebSocket is down
+        await sendRobotCommand('MANUAL_DRIVE', payload);
+    }
 }
 
 async function releaseManualMode() {
@@ -858,10 +874,21 @@ async function releaseManualMode() {
         addLog('warning', 'Primary manual override already released (backup active)');
         return;
     }
-    const success = await sendRobotCommand('MANUAL_OVERRIDE', { mode: 'release' });
-    if (success) {
+    // Use WebSocket instant channel for lowest latency
+    if (socket && socket.connected) {
+        socket.emit('instant_command', {
+            command: 'MANUAL_OVERRIDE',
+            payload: { mode: 'release' },
+            device_id: state.deviceId
+        });
         state.manualOverride = false;
         updateControlIndicators();
+    } else {
+        const success = await sendRobotCommand('MANUAL_OVERRIDE', { mode: 'release' });
+        if (success) {
+            state.manualOverride = false;
+            updateControlIndicators();
+        }
     }
 }
 
@@ -870,10 +897,21 @@ async function requestManualMode() {
         addLog('warning', 'Primary manual override unavailable while backup control is active');
         return;
     }
-    const success = await sendRobotCommand('MANUAL_OVERRIDE', { mode: 'hold' });
-    if (success) {
+    // Use WebSocket instant channel for lowest latency
+    if (socket && socket.connected) {
+        socket.emit('instant_command', {
+            command: 'MANUAL_OVERRIDE',
+            payload: { mode: 'hold' },
+            device_id: state.deviceId
+        });
         state.manualOverride = true;
         updateControlIndicators();
+    } else {
+        const success = await sendRobotCommand('MANUAL_OVERRIDE', { mode: 'hold' });
+        if (success) {
+            state.manualOverride = true;
+            updateControlIndicators();
+        }
     }
 }
 
@@ -882,7 +920,17 @@ async function sendWaypointsToRobot() {
         addLog('warning', 'Cannot push waypoints while backup control is active');
         return;
     }
-    await sendRobotCommand('WAYPOINT_PUSH');
+    // Use WebSocket instant channel for lowest latency
+    if (socket && socket.connected) {
+        socket.emit('instant_command', {
+            command: 'WAYPOINT_PUSH',
+            payload: {},
+            device_id: state.deviceId
+        });
+        addLog('info', 'Instant command: WAYPOINT_PUSH');
+    } else {
+        await sendRobotCommand('WAYPOINT_PUSH');
+    }
 }
 
 function updateManualSpeed(value) {
@@ -893,7 +941,16 @@ function updateManualSpeed(value) {
     const numeric = Number(value);
     state.manualSpeed = numeric;
     updateElement('manual-speed-display', numeric);
-    sendRobotCommand('MANUAL_SPEED', { value: numeric });
+    // Use instant channel so speed change applies immediately
+    if (socket && socket.connected) {
+        socket.emit('instant_command', {
+            command: 'MANUAL_SPEED',
+            payload: { value: numeric },
+            device_id: state.deviceId
+        });
+    } else {
+        sendRobotCommand('MANUAL_SPEED', { value: numeric });
+    }
 }
 
 function updateAutoSpeed(value) {
@@ -1479,8 +1536,23 @@ function setupEventListeners() {
         const element = document.getElementById(elementId);
         if (!element) return;
         element.addEventListener('click', async () => {
-            await requestManualMode();
-            await sendManualCommand(direction);
+            // Combine override + drive into a single instant command
+            // to avoid double round-trip latency
+            if (socket && socket.connected) {
+                if (!state.manualOverride) {
+                    socket.emit('instant_command', {
+                        command: 'MANUAL_OVERRIDE',
+                        payload: { mode: 'hold' },
+                        device_id: state.deviceId
+                    });
+                    state.manualOverride = true;
+                    updateControlIndicators();
+                }
+                await sendManualCommand(direction);
+            } else {
+                await requestManualMode();
+                await sendManualCommand(direction);
+            }
         });
     });
 

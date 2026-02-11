@@ -27,6 +27,7 @@ from raspberry_pi.communication.i2c_comm import I2CComm
 from raspberry_pi.communication.cloud_uploader import CloudUploader
 from raspberry_pi.communication.api_client import DashboardAPI
 from raspberry_pi.camera.camera_stream import CameraStream
+from raspberry_pi.camera.mjpeg_server import MJPEGServer, update_frame as mjpeg_update_frame
 from raspberry_pi.utils.logger import setup_logger
 from raspberry_pi.utils.data_formatter import DataFormatter
 
@@ -217,11 +218,17 @@ class RobotController:
 
         # Camera (optional)
         self.camera = None
+        self.mjpeg_server = None
         if CONFIG.get('camera', {}).get('enabled', False):
             try:
                 self.camera = CameraStream(CONFIG['camera'])
                 if self.camera and self.camera.enabled:
                     logger.info("Camera Stream initialized")
+                    # Start MJPEG direct-stream server so browsers can connect
+                    # directly to the Pi for lowest-latency video.
+                    mjpeg_port = int(CONFIG.get('camera', {}).get('mjpeg_port', 8081))
+                    self.mjpeg_server = MJPEGServer(host='0.0.0.0', port=mjpeg_port)
+                    self.mjpeg_server.start()
                 else:
                     logger.warning("Camera Stream unavailable after init")
             except Exception as e:
@@ -334,6 +341,11 @@ class RobotController:
             command_thread = Thread(target=self.command_loop, daemon=True)
             command_thread.start()
             self.threads.append(command_thread)
+
+            # Start high-frequency instant command loop (manual drive fast-lane)
+            instant_cmd_thread = Thread(target=self.instant_command_loop, daemon=True)
+            instant_cmd_thread.start()
+            self.threads.append(instant_cmd_thread)
             
             logger.info("All systems started successfully")
             return True
@@ -611,7 +623,7 @@ class RobotController:
             shutdown_event.wait(poll_interval)
     
     def command_loop(self):
-        """Poll dashboard for control commands"""
+        """Poll dashboard for control commands (DB queue — non-latency-critical)"""
         logger.info("Starting command loop...")
 
         while not shutdown_event.is_set():
@@ -624,6 +636,35 @@ class RobotController:
                 logger.error(f"Error in command loop: {exc}")
 
             shutdown_event.wait(self.command_poll_interval)
+
+    def instant_command_loop(self):
+        """High-frequency poll for latency-critical instant commands.
+        Polls /api/commands/instant every ~100ms for manual drive and
+        other time-sensitive commands that bypass the DB queue."""
+        logger.info("Starting instant command loop (100ms poll)...")
+        import requests
+        base_url = self.api_client.base_url.rstrip('/') if getattr(self.api_client, 'base_url', None) else CONFIG.get('dashboard_api', {}).get('base_url', '').rstrip('/')
+        url = f"{base_url}/api/commands/instant"
+        session = requests.Session()
+        last_seq = 0
+
+        while not shutdown_event.is_set():
+            try:
+                resp = session.get(url, timeout=(0.5, 1.0))
+                if resp.status_code == 200:
+                    data = resp.json()
+                    cmd = data.get('command')
+                    if cmd and cmd.get('seq', 0) > last_seq:
+                        last_seq = cmd['seq']
+                        self._process_command({
+                            'id': None,  # no DB id for instant commands
+                            'command_type': cmd.get('command_type'),
+                            'payload': cmd.get('payload', {}),
+                        })
+            except Exception as exc:
+                logger.debug("Instant command poll error: %s", exc)
+
+            shutdown_event.wait(0.1)
 
     def _process_command(self, command: dict) -> None:
         command_id = command.get('id')
@@ -701,7 +742,8 @@ class RobotController:
             status = 'failed'
 
         finally:
-            self.api_client.ack_command(command_id, status=status, error_message=error_message)
+            if command_id is not None:
+                self.api_client.ack_command(command_id, status=status, error_message=error_message)
 
     def _handle_manual_drive(self, payload: dict) -> bool:
         direction = (payload or {}).get('direction', '').lower()
@@ -836,6 +878,9 @@ class RobotController:
                     try:
                         jpeg = self.camera.capture_frame_jpeg()
                         if jpeg and len(jpeg) <= max_frame_bytes:
+                            # Feed MJPEG direct-stream server (near-zero latency)
+                            mjpeg_update_frame(jpeg)
+
                             timestamp_iso = datetime.utcnow().isoformat()
                             params = {
                                 'device_id': self.device_id,
@@ -901,6 +946,8 @@ class RobotController:
         
         # Stop components
         try:
+            if self.mjpeg_server:
+                self.mjpeg_server.stop()
             if self.camera and hasattr(self.camera, 'stop'):
                 self.camera.stop()
             if self.robot_link:
