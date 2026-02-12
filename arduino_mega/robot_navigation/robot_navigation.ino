@@ -33,7 +33,7 @@
  *    2. SPI Service (poll CC1101 → update WirelessBuffer)
  *    3. I²C Service (process deferred ISR command)
  *    4. MODE MANAGER (decide AUTO / WIRELESS / FAILSAFE)
- *    5. Sensor Tasks (GPS, ultrasonic, compass)
+ *    5. Sensor Tasks (GPS, ultrasonic)
  *    6. Buzzer tick
  *    7. I²C bus watchdog
  *    8. Decision Layer (act on current mode)
@@ -49,7 +49,6 @@
 #include <SPI.h>
 
 #include "gps_handler.h"
-#include "compass_handler.h"
 #include "navigation.h"
 #include "motor_control.h"
 #include "obstacle_avoidance.h"
@@ -62,7 +61,6 @@ CC1101Driver wireless;
 
 // ===================== Components =====================
 GPSHandler gps;
-CompassHandler compass;
 Navigation navigation;
 MotorControl motors;
 ObstacleAvoidance obstacleAvoid;
@@ -196,9 +194,21 @@ void recoverI2CBus() {
 }
 
 bool isI2CBusStuck() {
-  pinMode(SDA, INPUT_PULLUP);
-  pinMode(SCL, INPUT_PULLUP);
-  return (digitalRead(SDA) == LOW) || (digitalRead(SCL) == LOW);
+  // Read the TWI status register directly — NEVER call pinMode() on
+  // SDA/SCL while the Wire library owns them, as that detaches TWI
+  // from the pins and corrupts any in-flight transaction.
+  uint8_t twsr = TWSR & 0xF8;   // mask prescaler bits
+  // 0xF8 = "no relevant state" = bus is idle and healthy
+  // 0x00 = bus error (SDA/SCL stuck)
+  if (twsr == 0x00) return true;
+  // Additionally, if the TWI is stuck in an unexpected slave state
+  // for too long, consider it hung.  0xF8 (idle) and 0x60/0x80/0xA8
+  // (normal slave ops) are fine; anything else is suspicious.
+  if (twsr != 0xF8 && twsr != 0x60 && twsr != 0x80 && twsr != 0x88 &&
+      twsr != 0xA8 && twsr != 0xB8 && twsr != 0xC0 && twsr != 0xC8) {
+    return true;
+  }
+  return false;
 }
 
 void i2cReinitSlave() {
@@ -238,11 +248,11 @@ void setup() {
     beepPatternNB(3, 200, 100);
   }
 
-  DEBUG_SERIAL.println(F("# Compass: on Pi (software I2C 44/45 available)"));
+  DEBUG_SERIAL.println(F("# Compass: provided by Pi via I2C (CMD_SEND_HEADING)"));
 
   motors.begin();
   obstacleAvoid.begin();
-  navigation.begin(&gps, &compass, &motors, &obstacleAvoid);
+  navigation.begin(&gps, &motors, &obstacleAvoid);
 
   // Line follower
   pinMode(LINE_FOLLOWER_ENA, OUTPUT);
@@ -348,7 +358,7 @@ void loop() {
   // ====================================================================
   gps.update();                     // UART — non-blocking
   obstacleAvoid.update();           // non-blocking ultrasonic + IR
-  compass.update();                 // software I2C (pins 44/45, no conflict)
+  // Compass heading is received from Pi via CMD_SEND_HEADING → piHeading
 
   // ====================================================================
   //  6. Non-blocking buzzer tick
@@ -360,7 +370,7 @@ void loop() {
   // ====================================================================
   if (i2cHandshakeComplete) {
     static unsigned long lastWatchdog = 0;
-    if (now - lastWatchdog > 500) {
+    if (now - lastWatchdog > 5000) {
       lastWatchdog = now;
       if (isI2CBusStuck()) {
         i2cReinitSlave();
@@ -806,9 +816,6 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
         memcpy(&spd, &payload[8],  sizeof(float));
         memcpy(&hdg, &payload[12], sizeof(float));
         navigation.updateGpsData(lat, lon, spd, hdg);
-        if (!compass.isValid()) {
-          navigation.fallbackToGpsOnly();
-        }
         prepareAck();
       } else {
         prepareError(ERR_PACKET_SIZE);
@@ -818,6 +825,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
     case CMD_SEND_HEADING:
       if (length >= 4) {
         memcpy(&piHeading, &payload[0], sizeof(float));
+        navigation.setHeading(piHeading);
         prepareAck();
       } else {
         prepareError(ERR_PACKET_SIZE);
@@ -1025,7 +1033,7 @@ void sendWirelessGps() {
     float lat = gps.getLatitude();
     float lon = gps.getLongitude();
     float spd = gps.getSpeed();
-    float hdg = compass.getHeading();
+    float hdg = piHeading;  // Heading from Pi compass
     memcpy(&msg.data[1],  &lat, 4);
     memcpy(&msg.data[5],  &lon, 4);
     memcpy(&msg.data[9],  &spd, 4);
@@ -1075,16 +1083,15 @@ void sendWirelessObstacleAlert(int distance) {
 // ======================== LEGACY STRING HANDLER ========================
 void processWirelessMessage(const String& message) {
   if (message.length() == 0) return;
-  String cmd = message;
-  cmd.toUpperCase();
   lastManualCommand = millis();
 
-  if (cmd == "PING") {
+  // Stack-based comparison — avoids heap allocation / fragmentation
+  if (message.equalsIgnoreCase(F("PING"))) {
     sendWirelessReady();
     sendWirelessStatus();
-  } else if (cmd == "STATUS?") {
+  } else if (message.equalsIgnoreCase(F("STATUS?"))) {
     sendWirelessStatus();
-  } else if (cmd == "RETURN!" || cmd == "RETURN") {
+  } else if (message.equalsIgnoreCase(F("RETURN!")) || message.equalsIgnoreCase(F("RETURN"))) {
     if (gps.isValid()) {
       navigation.returnToStart();
       transitionToState(STATE_I2C);

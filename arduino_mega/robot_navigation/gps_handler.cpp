@@ -11,6 +11,9 @@ GPSHandler::GPSHandler() {
     altitude = 0;
     speed = 0;
     satellites = 0;
+    lastProcessedChars = 0;
+    droppedChars = 0;
+    maxBacklog = 0;
 }
 
 bool GPSHandler::begin(HardwareSerial& serial) {
@@ -19,10 +22,26 @@ bool GPSHandler::begin(HardwareSerial& serial) {
 }
 
 void GPSHandler::update() {
-    // Read GPS data
-    while (gpsSerial->available() > 0) {
+    if (gpsSerial == nullptr) return;
+
+    // Bounded parser work per loop pass to prevent loop starvation.
+    int avail = gpsSerial->available();
+    if (avail > (int)maxBacklog) {
+        maxBacklog = (uint16_t)avail;
+    }
+
+    uint8_t processed = 0;
+    while (gpsSerial->available() > 0 && processed < MAX_CHARS_PER_UPDATE) {
         char c = gpsSerial->read();
         gps.encode(c);
+        processed++;
+    }
+    lastProcessedChars = processed;
+
+    // If UART backlog stays larger than our budget, count a soft drop event.
+    // (We are not discarding bytes here; this is a diagnostic indicator.)
+    if (gpsSerial->available() > 0) {
+        droppedChars++;
     }
     
     // Update cached values if valid
@@ -60,6 +79,18 @@ float GPSHandler::getSpeed() {
 
 uint8_t GPSHandler::getSatellites() {
     return satellites;
+}
+
+uint8_t GPSHandler::getLastProcessedChars() const {
+    return lastProcessedChars;
+}
+
+uint16_t GPSHandler::getDroppedChars() const {
+    return droppedChars;
+}
+
+uint16_t GPSHandler::getMaxBacklog() const {
+    return maxBacklog;
 }
 
 void GPSHandler::printInfo() {

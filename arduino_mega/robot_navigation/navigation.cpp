@@ -157,15 +157,9 @@ void Navigation::navigateToWaypoint() {
         Serial.println(F(" reached!"));
         
         // Set completion flag for status reporting
+        // Pi reads this via CMD_REQUEST_STATUS → prepareStatusResponse()
         waypointJustCompleted = true;
         lastCompletedWaypointId = current.id;
-        
-        // Send waypoint completion to Pi
-        Wire.beginTransmission(I2C_ADDRESS);
-        Wire.write(CMD_WAYPOINT_COMPLETED);
-        Wire.write((uint8_t)(current.id >> 8));   // High byte of waypoint ID
-        Wire.write((uint8_t)(current.id & 0xFF)); // Low byte of waypoint ID
-        Wire.endTransmission();
         
         currentWaypointIndex++;
         

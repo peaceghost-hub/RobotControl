@@ -3,12 +3,9 @@
 
 #include <Arduino.h>
 #include <Wire.h>
-#include <Adafruit_Sensor.h>
-#include <Adafruit_HMC5883_U.h>
 
 // Forward declarations to avoid circular includes
 class GPSHandler;
-class CompassHandler;
 class Navigation;
 class MotorControl;
 class ObstacleAvoidance;
@@ -36,12 +33,6 @@ struct PendingWaypoint;
 const uint32_t DEBUG_BAUD = 115200;
 const uint32_t GPS_BAUD = 9600;
 const uint8_t I2C_ADDRESS = 0x08;
-
-// Compass I2C (software bus to avoid conflicts with Pi I2C)
-// Wire the compass to these pins instead of SDA/SCL (20/21)
-#define COMPASS_USE_SOFT_I2C 1
-#define COMPASS_SDA_PIN 44
-#define COMPASS_SCL_PIN 45
 
 // Wireless protocol serial port baud rates
 #ifdef WIRELESS_PROTOCOL_ZIGBEE
@@ -120,7 +111,6 @@ struct PendingWaypoint {
 
 // Global instances
 extern GPSHandler gps;
-extern CompassHandler compass;
 extern Navigation navigation;
 extern MotorControl motors;
 extern ObstacleAvoidance obstacleAvoid;
@@ -143,8 +133,8 @@ extern int manualSpeed;
 // Constants for timing
 const unsigned long STATUS_INTERVAL = 2000;     // ms
 const unsigned long ZIGBEE_GPS_INTERVAL = 1200; // ms
-const unsigned long MANUAL_TIMEOUT = 1500;      // ms
-const unsigned long HEARTBEAT_TIMEOUT = 5000;   // ms
+const unsigned long MANUAL_TIMEOUT = 7500;      // ms (x5 from 1500)
+const unsigned long HEARTBEAT_TIMEOUT = 25000;  // ms (x5 from 5000)
 
 // Maximum number of waypoints
 const uint8_t MAX_WAYPOINTS = 20;
@@ -163,8 +153,8 @@ extern RobotState robotState;
 
 // Timing budget constants (µs / ms)
 const unsigned long CC1101_POLL_INTERVAL   = 120;   // ms between SPI polls
-const unsigned long WIRELESS_LINK_TIMEOUT  = 3000;  // ms — no packets → back to I2C
-const unsigned long I2C_LINK_TIMEOUT       = 3000;  // ms — no I2C activity → consider lost
+const unsigned long WIRELESS_LINK_TIMEOUT  = 15000; // ms — no packets → back to I2C (x5 from 3000)
+const unsigned long I2C_LINK_TIMEOUT       = 15000; // ms — no I2C activity → consider lost (x5 from 3000)
 const unsigned long SENSOR_UPDATE_INTERVAL = 100;   // ms between ultrasonic reads
 const unsigned long BUZZER_TICK_INTERVAL   = 10;    // ms for non-blocking buzzer
 const unsigned long FAILSAFE_BEEP_INTERVAL = 4000;  // ms — slow beep in failsafe mode
@@ -200,11 +190,6 @@ uint8_t readSignalQuality();
 // Line follower sensor pins (4-pin module: GND, VCC, OUT, ENA)
 #define LINE_FOLLOWER_OUT 32
 #define LINE_FOLLOWER_ENA 33
-
-// Constants for HMC5883L
-#ifndef HMC5883_MAGGAIN_1_3
-  #define HMC5883_MAGGAIN_1_3 0x20  // 1.3 gain
-#endif
 
 // Define PI if not already defined
 #ifndef PI

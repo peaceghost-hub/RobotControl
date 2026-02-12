@@ -48,28 +48,7 @@ function initCamera() {
   if (directUrl) {
     console.log('Attempting direct Pi MJPEG stream:', directUrl);
     cameraFeed.onerror = fallbackToRelay;
-    setStream(directUrl, 'Live (Direct Pi) — connecting…');
-
-    // Timeout: if no frame arrives within 5 seconds, fall back to relay.
-    // On GSM the direct Pi stream is often unreachable from the browser,
-    // so we can't wait forever.
-    var streamTimeout = setTimeout(function() {
-      // Check if image actually loaded (naturalWidth > 0 means pixels arrived)
-      if (!cameraFeed.naturalWidth || cameraFeed.naturalWidth < 2) {
-        console.warn('Direct Pi stream timed out after 5s; falling back to relay');
-        cameraFeed.onerror = null;
-        setStream(relayUrl, 'Live (MJPEG relay)');
-      }
-    }, 5000);
-
-    // If a frame does arrive, cancel the timeout and update the label
-    cameraFeed.onload = function() {
-      clearTimeout(streamTimeout);
-      cameraFeed.onload = null;
-      if (status) {
-        status.textContent = 'Live (Direct Pi)';
-      }
-    };
+    setStream(directUrl, 'Live (Direct Pi)');
   } else {
     setStream(relayUrl, 'Live (MJPEG)');
   }
