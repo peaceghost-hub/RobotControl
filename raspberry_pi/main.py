@@ -642,7 +642,7 @@ class RobotController:
         Polls /api/commands/instant every ~100 ms.  The endpoint returns
         a list of queued commands (may be empty).  Each command is
         processed in order so nothing is lost."""
-        logger.info("Starting instant command loop (100ms poll)...")
+        logger.info("Starting instant command loop...")
         import requests as _requests
         base_url = (
             self.api_client.base_url.rstrip('/')
@@ -653,11 +653,23 @@ class RobotController:
         session = _requests.Session()
         consecutive_errors = 0
 
-        logger.info("Instant command loop polling: %s", url)
+        # Use the same timeout as the rest of the API (default 10s from config),
+        # split into (connect, read).  GSM/cellular links need 2-5s just for
+        # the TCP handshake, so the old 0.5s hard-coded value always timed out.
+        api_timeout = CONFIG.get('dashboard_api', {}).get('timeout', 10)
+        connect_timeout = min(api_timeout, 5)      # cap connect at 5s
+        read_timeout    = min(api_timeout, 5)       # cap read at 5s
+        poll_timeout    = (connect_timeout, read_timeout)
+
+        # Poll interval: fast on LAN, still responsive on cellular
+        poll_interval = CONFIG.get('instant_poll_interval', 0.15)  # 150ms default
+
+        logger.info("Instant command loop polling: %s  timeout=%s  interval=%.2fs",
+                     url, poll_timeout, poll_interval)
 
         while not shutdown_event.is_set():
             try:
-                resp = session.get(url, timeout=(0.5, 1.0))
+                resp = session.get(url, timeout=poll_timeout)
                 if resp.status_code == 200:
                     data = resp.json()
                     commands = data.get('commands', [])
@@ -688,7 +700,7 @@ class RobotController:
                     logger.warning("Instant command poll error #%d: %s (url=%s)",
                                    consecutive_errors, exc, url)
 
-            shutdown_event.wait(0.1)
+            shutdown_event.wait(poll_interval)
 
     def _process_command(self, command: dict) -> None:
         command_id = command.get('id')
