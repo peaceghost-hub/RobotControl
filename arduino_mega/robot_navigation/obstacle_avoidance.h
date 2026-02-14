@@ -1,6 +1,6 @@
  /*
  * Obstacle Avoidance Header — NON-BLOCKING
- * HC-SR04 Ultrasonic Sensor + KY-032 Infrared Sensor
+ * HC-SR04 Ultrasonic Sensor (servo-scanned)
  *
  * Blueprint rules:
  *   - No pulseIn(), no delay() — everything runs in < 20 µs per call.
@@ -21,8 +21,6 @@
 #define ULTRASONIC_TRIG 30
 #define ULTRASONIC_ECHO 31
 #define SERVO_PIN 11
-#define KY032_DO_PIN 32
-#define KY032_ENA_PIN 33
 
 // Servo positions
 #define SERVO_CENTER 90
@@ -38,8 +36,8 @@ struct PathScan {
     int rightDist;
     bool leftClear;
     bool rightClear;
-    bool irDetected;
-    int irDistance;
+    bool irDetected;   // always false — KY-032 removed
+    int irDistance;    // always 0    — KY-032 removed
 };
 
 class ObstacleAvoidance {
@@ -47,13 +45,10 @@ private:
     Servo servo;
     int distance;                  // latest ultrasonic cm
     bool obstacleDetected;
-    bool irObstacleDetected;
-    int irValue;
     unsigned long lastCheck;
     unsigned long lastServoMove;
     int currentServoAngle;
     bool servoAttached;
-    bool ky032Attached;
 
     // ---- non-blocking ultrasonic state machine ----
     enum UsPhase : uint8_t { US_IDLE, US_TRIGGER, US_WAIT_ECHO_HIGH, US_WAIT_ECHO_LOW };
@@ -81,9 +76,6 @@ public:
     void update();                 // call every loop — always < 20 µs
     bool isObstacleDetected();
     int  getDistance();
-    bool isIRObstacleDetected();
-    int  getIRDistance();
-    int  getIRAnalogValue();
 
     // Non-blocking scan API
     void startScan();              // kick off a full L/C/R scan
@@ -102,7 +94,6 @@ private:
     void triggerPing();            // starts non-blocking ping
     void updateUltrasonic();       // state machine tick
     void updateScan();             // scan state machine tick
-    void updateIRSensor();
     void moveServoTo(int angle);
 };
 

@@ -386,9 +386,6 @@ class RobotController:
                     except Exception as e:
                         logger.debug(f"Compass read failed: {e}")
                         sensor_data['heading'] = 0
-                    except Exception as e:
-                        logger.debug(f"Compass read failed: {e}")
-                        sensor_data['heading'] = 0
                 
                 # Add timestamp and device ID
                 sensor_data['timestamp'] = datetime.now().isoformat()
@@ -751,18 +748,7 @@ class RobotController:
             elif command_type == 'SOUND_BUZZER':
                 duration = int((payload or {}).get('duration', 3))
                 success = self.robot_link.sound_buzzer(duration) if hasattr(self.robot_link, 'sound_buzzer') else False
-            elif command_type == 'FOLLOW_LINE':
-                # Payload: {"enabled": true|false}
-                enabled = bool((payload or {}).get('enabled', True))
-                if hasattr(self.robot_link, 'set_line_follow'):
-                    success = self.robot_link.set_line_follow(enabled)
-                else:
-                    success = False
-            elif command_type == 'FOLLOW_LINE_OFF':
-                if hasattr(self.robot_link, 'set_line_follow'):
-                    success = self.robot_link.set_line_follow(False)
-                else:
-                    success = False
+            # FOLLOW_LINE removed — no line follower hardware
             else:
                 logger.warning(f"Unknown command: {command_type}")
                 error_message = f"Unknown command {command_type}"

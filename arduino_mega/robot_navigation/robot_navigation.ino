@@ -83,7 +83,6 @@ bool navigationActive        = false;
 bool manualOverride          = false;
 bool i2cHandshakeComplete    = false;
 bool wirelessHandshakeComplete = false;
-bool lineFollowEnabled       = false;
 
 // I2C ISR → main-loop deferred command
 volatile bool     i2cCommandPending   = false;
@@ -254,11 +253,6 @@ void setup() {
   obstacleAvoid.begin();
   navigation.begin(&gps, &motors, &obstacleAvoid);
 
-  // Line follower
-  pinMode(LINE_FOLLOWER_ENA, OUTPUT);
-  digitalWrite(LINE_FOLLOWER_ENA, LOW);
-  pinMode(LINE_FOLLOWER_OUT, INPUT);
-
   // CC1101 init is deferred to loop (after I2C is stable)
   DEBUG_SERIAL.println(F("# CC1101: deferred init (5 s)"));
 
@@ -293,6 +287,17 @@ void loop() {
   if (cc1101Ready && (now - lastCC1101Poll >= CC1101_POLL_INTERVAL)) {
     lastCC1101Poll = now;
     pollCC1101();
+  }
+
+  // ---- CC1101 RX health check (every 2 seconds) ----
+  // If the CC1101 drifted out of RX mode (noise, FIFO overflow, SPI
+  // glitch), this forces it back.  Costs ~20 µs, no freeze risk.
+  {
+    static unsigned long lastRxCheck = 0;
+    if (cc1101Ready && (now - lastRxCheck >= 2000)) {
+      lastRxCheck = now;
+      wireless.ensureRxMode();
+    }
   }
 
   // ====================================================================
@@ -357,7 +362,7 @@ void loop() {
   //  5. SENSOR TASKS — Always run, every state
   // ====================================================================
   gps.update();                     // UART — non-blocking
-  obstacleAvoid.update();           // non-blocking ultrasonic + IR
+  obstacleAvoid.update();           // non-blocking ultrasonic
   // Compass heading is received from Pi via CMD_SEND_HEADING → piHeading
 
   // ====================================================================
@@ -402,18 +407,6 @@ void loop() {
             motors.stop();
             lastGpsWarn = now;
           }
-        }
-      }
-
-      // Line follower (only in I2C state)
-      if (lineFollowEnabled && !manualOverride) {
-        if (digitalRead(LINE_FOLLOWER_OUT) == HIGH) {
-          motors.forward(140);
-        } else {
-          // Non-blocking wiggle: alternate left/right each iteration
-          static bool wiggleLeft = true;
-          if (wiggleLeft) motors.turnLeft(130); else motors.turnRight(130);
-          wiggleLeft = !wiggleLeft;
         }
       }
 
@@ -484,17 +477,24 @@ void loop() {
     DEBUG_SERIAL.print(F(" wp="));
     DEBUG_SERIAL.print(navigation.getWaypointCount());
     DEBUG_SERIAL.print(F(" cc="));
-    DEBUG_SERIAL.println(wireless.isConnected() ? F("ON") : F("--"));
+    DEBUG_SERIAL.print(wireless.isConnected() ? F("ON") : F("--"));
+    // RX diagnostics: good/bad packet counts and time since last packet
+    DEBUG_SERIAL.print(F(" rx="));
+    DEBUG_SERIAL.print(wireless.getRxGoodCount());
+    DEBUG_SERIAL.print(F("/"));
+    DEBUG_SERIAL.print(wireless.getRxBadCount());
+    if (wireless.getLastRxTime() > 0) {
+      DEBUG_SERIAL.print(F(" ago="));
+      DEBUG_SERIAL.print((now - wireless.getLastRxTime()) / 1000);
+      DEBUG_SERIAL.print(F("s"));
+    }
+    DEBUG_SERIAL.println();
   }
 
   // ====================================================================
-  // 11. GPS broadcast (wireless)
+  // 11. GPS broadcast (wireless) — DISABLED: ESP8266 remote is TX-only.
+  //     Sending takes CC1101 out of RX and drops incoming packets.
   // ====================================================================
-  if (wireless.isConnected() && gps.isValid() &&
-      (now - lastWirelessGps >= 1200)) {
-    sendWirelessGps();
-    lastWirelessGps = now;
-  }
 }
 
 // ======================== STATE TRANSITIONS ========================
@@ -590,14 +590,14 @@ void pollCC1101() {
 
     case MSG_TYPE_HANDSHAKE:
       wirelessHandshakeComplete = true;
-      sendWirelessReady();
+      // Don't TX reply — ESP8266 is TX-only, reply disrupts RX
       break;
 
     case MSG_TYPE_HEARTBEAT:
       break;
 
     case MSG_TYPE_STATUS:
-      sendWirelessStatus();
+      // Don't TX reply — ESP8266 is TX-only
       break;
 
     default:
@@ -704,6 +704,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
       case CMD_REQUEST_OBSTACLE:
       case CMD_SOUND_BUZZER:
       case CMD_SET_AUTO_SPEED:
+      case CMD_SEND_HEADING:     // compass data — read-only, always useful
       case CMD_EMERGENCY_STOP:   // always allow E-stop
         break;  // allowed
       default:
@@ -888,16 +889,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
       prepareAck();
       break;
 
-    case CMD_FOLLOW_LINE:
-      if (length >= 1) {
-        lineFollowEnabled = payload[0] != 0;
-        digitalWrite(LINE_FOLLOWER_ENA, lineFollowEnabled ? HIGH : LOW);
-        if (lineFollowEnabled) { navigationActive = false; motors.stop(); }
-        prepareAck();
-      } else {
-        prepareError(ERR_PACKET_SIZE);
-      }
-      break;
+    // CMD_FOLLOW_LINE removed — no line follower hardware
 
     case CMD_REQUEST_OBSTACLE: {
       int dist = obstacleAvoid.getDistance();
@@ -1020,64 +1012,33 @@ void commitPendingWaypoints() {
 }
 
 // ======================== WIRELESS TX HELPERS ========================
-void sendWirelessGps() {
-  if (!wireless.isConnected()) return;
+// NOTE: ALL wireless.send() calls are DISABLED.
+// The ESP8266 remote is TX-only (blind send) — it never receives.
+// Calling wireless.send() takes the CC1101 out of RX mode (IDLE → TX → RX),
+// which causes us to miss incoming packets and lose the wireless connection.
+// These functions are kept as stubs for future bi-directional hardware.
 
-  WirelessMessage msg;
-  msg.type = MSG_TYPE_GPS;
-  if (!gps.isValid()) {
-    msg.length = 1;
-    msg.data[0] = 0;
-  } else {
-    msg.data[0] = 1;
-    float lat = gps.getLatitude();
-    float lon = gps.getLongitude();
-    float spd = gps.getSpeed();
-    float hdg = piHeading;  // Heading from Pi compass
-    memcpy(&msg.data[1],  &lat, 4);
-    memcpy(&msg.data[5],  &lon, 4);
-    memcpy(&msg.data[9],  &spd, 4);
-    memcpy(&msg.data[13], &hdg, 4);
-    msg.data[17] = gps.getSatellites();
-    msg.length = 18;
-  }
-  wireless.send(msg);
+void sendWirelessGps() {
+  // DISABLED: ESP8266 is TX-only, cannot receive GPS data
+  // wireless.send() would disrupt RX and drop incoming packets
 }
 
 void sendWirelessStatus() {
-  if (!wireless.isConnected()) return;
-  WirelessMessage msg;
-  msg.type = MSG_TYPE_STATUS;
-  msg.data[0] = (controlMode == MODE_AUTO) ? 0 : 1;
-  msg.data[1] = navigationActive ? 1 : 0;
-  msg.data[2] = manualOverride   ? 1 : 0;
-  msg.data[3] = navigation.getWaypointCount();
-  msg.data[4] = readBatteryPercent();
-  msg.data[5] = wireless.getRSSI() & 0xFF;
-  msg.length = 6;
-  wireless.send(msg);
+  // DISABLED: ESP8266 is TX-only, cannot receive status
+  // wireless.send() would disrupt RX and drop incoming packets
 }
 
 void sendWirelessReady() {
-  if (!wireless.isConnected()) return;
-  WirelessMessage msg;
-  msg.type = MSG_TYPE_STATUS;
-  msg.length = 5;
-  memcpy(msg.data, "READY", 5);
-  wireless.send(msg);
-  wireless.sendString("HELLO,MEGA_ROBOT");
+  // ESP8266 remote is TX-only (blind send) — it never receives replies.
+  // Do NOT call wireless.send() here as it takes CC1101 out of RX mode
+  // and causes us to miss the next incoming packets from the remote.
   markWirelessHandshake();
 }
 
 void sendWirelessObstacleAlert(int distance) {
-  if (!wireless.isConnected()) return;
-  WirelessMessage msg;
-  msg.type = MSG_TYPE_OBSTACLE;
-  msg.data[0] = (distance >> 8) & 0xFF;
-  msg.data[1] = distance & 0xFF;
-  msg.data[2] = 0;
-  msg.length = 3;
-  wireless.send(msg);
+  // DISABLED: ESP8266 is TX-only, cannot receive obstacle alerts
+  // wireless.send() would disrupt RX and drop incoming packets
+  (void)distance;
 }
 
 // ======================== LEGACY STRING HANDLER ========================

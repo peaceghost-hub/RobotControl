@@ -9,7 +9,6 @@
 #include <Arduino.h>
 #include "globals.h"
 #include "gps_handler.h"
-#include "compass_handler.h"
 #include "motor_control.h"
 #include "obstacle_avoidance.h"
 
@@ -35,7 +34,6 @@ struct HistoryPoint {
 class Navigation {
 private:
     GPSHandler* gps;
-    CompassHandler* compass;
     MotorControl* motors;
     ObstacleAvoidance* obstacleAvoid;
     
@@ -50,8 +48,8 @@ private:
     int currentHistoryIndex;
     bool returningToStart;
     
-    // Navigation mode control
-    bool useCompass;  // If false, use GPS-only navigation
+    // Heading from Pi compass (set via setHeading)
+    float currentHeading;
     
     unsigned long obstacleDetectedTime;
     bool inAvoidanceMode;
@@ -83,13 +81,10 @@ private:
     int avoidTurnDirection;        // +1 right, -1 left
     int avoidTurnAngle;
 
-    // ---- Non-blocking GPS-only nudge state ----
-    bool gpsNudgeActive;
-    unsigned long gpsNudgeEndTime;
-    
 public:
     Navigation();
-    void begin(GPSHandler* g, CompassHandler* c, MotorControl* m, ObstacleAvoidance* o);
+    void begin(GPSHandler* g, MotorControl* m, ObstacleAvoidance* o);
+    void setHeading(float h);
     
     void addWaypoint(float lat, float lon, int id);
     void clearWaypoints();
@@ -108,11 +103,6 @@ public:
     int getLastCompletedWaypointId();
     void clearWaypointCompletionFlag();
 
-    // Compass fallback & GPS-only navigation
-    void setUseCompass(bool enabled);
-    bool getUseCompass() const;
-    void fallbackToGpsOnly();  // Called when compass fails
-    
     // Waypoint history & return feature
     void saveCurrentPosition();
     void returnToStart();
@@ -126,7 +116,6 @@ private:
     float calculateDistance(float lat1, float lon1, float lat2, float lon2);
     float calculateBearing(float lat1, float lon1, float lat2, float lon2);
     void navigateToWaypoint();
-    void navigateToWaypointGpsOnly();  // Without compass
     void handleObstacleAvoidance();
     void handleReturnNavigation();
 };

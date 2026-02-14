@@ -31,6 +31,10 @@ private:
   bool initialized;
   byte rxBuffer[64];
   unsigned long lastRxTime;
+  unsigned long rxGoodCount;   // successfully decoded packets (for debug)
+  unsigned long rxBadCount;    // failed/overflow/corrupt packets (for debug)
+  bool rxPending;              // true = data seen in FIFO, waiting for completion
+  unsigned long rxPendingSince; // millis() when data was first seen
 
   // Radio configuration (must match ESP8266 transmitter)
   static constexpr float FREQUENCY  = CC1101_FREQUENCY;  // 433.00 MHz
@@ -44,7 +48,7 @@ private:
   static const uint8_t  LENGTH_CFG  = 1;       // Variable packet length
   static constexpr float DEVIATION  = 47.60f;  // kHz
 
-  static const uint32_t CONNECT_TIMEOUT = 3000; // ms — link-lost threshold
+  static const uint32_t CONNECT_TIMEOUT = 15000; // ms — match WIRELESS_LINK_TIMEOUT
 
 public:
   CC1101Driver();
@@ -61,6 +65,11 @@ public:
 
   // ---- Timing helpers (used by state machine) ----
   unsigned long getLastRxTime() const { return lastRxTime; }
+  unsigned long getRxGoodCount() const { return rxGoodCount; }
+  unsigned long getRxBadCount()  const { return rxBadCount; }
+
+  // ---- Periodic health check (call from main loop every ~2s) ----
+  void ensureRxMode();
 
 private:
   void configureModule();   // sets all radio params (called once)

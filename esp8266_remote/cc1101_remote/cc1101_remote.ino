@@ -110,6 +110,8 @@ void setup() {
   }
 
   ELECHOUSE_cc1101.Init();
+  // NOTE: Do NOT call setCCMode — it changes data rate registers.
+  // The proven working code does NOT call setCCMode.
   ELECHOUSE_cc1101.setMHZ(frequency);
   ELECHOUSE_cc1101.setModulation(0);      
   ELECHOUSE_cc1101.setDRate(9.6);
@@ -126,6 +128,8 @@ void setup() {
   ELECHOUSE_cc1101.setAdrChk(0);
   ELECHOUSE_cc1101.setAddr(0);
   ELECHOUSE_cc1101.setLengthConfig(1);
+
+  Serial.println("CC1101 Ready - TX Mode");
 }
 
 void loop() {
@@ -157,10 +161,11 @@ void loop() {
   // --- MANUAL BLIND SEND (NO CRASH) ---
   byte len = sizeof(pkt);
   ELECHOUSE_cc1101.SpiStrobe(0x36); // IDLE
+  ELECHOUSE_cc1101.SpiStrobe(0x3B); // FLUSH TX (clear any leftover data)
   ELECHOUSE_cc1101.SpiWriteReg(0x3F, len); // LENGTH BYTE
   ELECHOUSE_cc1101.SpiWriteBurstReg(0x3F, (uint8_t*)&pkt, len); // DATA
   ELECHOUSE_cc1101.SpiStrobe(0x35); // TRANSMIT
-  delay(30); // WAIT
+  delay(30); // WAIT for TX to complete (~12ms at 9.6kBaud for 6-byte packet)
   ELECHOUSE_cc1101.SpiStrobe(0x36); // IDLE
   ELECHOUSE_cc1101.SpiStrobe(0x3B); // FLUSH TX
   // ------------------------------------

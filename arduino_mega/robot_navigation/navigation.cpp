@@ -20,7 +20,7 @@ Navigation::Navigation() {
     historyCount = 0;
     currentHistoryIndex = 0;
     returningToStart = false;
-    useCompass = true;
+    currentHeading = 0.0;
     lastPositionSave = 0;
     waypointJustCompleted = false;
     lastCompletedWaypointId = -1;
@@ -29,13 +29,10 @@ Navigation::Navigation() {
     avoidStepTime = 0;
     avoidTurnDirection = 0;
     avoidTurnAngle = 0;
-    gpsNudgeActive = false;
-    gpsNudgeEndTime = 0;
 }
 
-void Navigation::begin(GPSHandler* g, CompassHandler* c, MotorControl* m, ObstacleAvoidance* o) {
+void Navigation::begin(GPSHandler* g, MotorControl* m, ObstacleAvoidance* o) {
     gps = g;
-    compass = c;
     motors = m;
     obstacleAvoid = o;
 }
@@ -120,12 +117,8 @@ void Navigation::update() {
         return;
     }
 
-    // Navigate to current waypoint
-    if (useCompass) {
-        navigateToWaypoint();
-    } else {
-        navigateToWaypointGpsOnly();
-    }
+    // Navigate to current waypoint (heading from Pi)
+    navigateToWaypoint();
 }
 
 bool Navigation::isComplete() {
@@ -174,11 +167,11 @@ void Navigation::navigateToWaypoint() {
     float targetBearing = calculateBearing(currentLat, currentLon,
                                           current.latitude, current.longitude);
     
-    // Get current heading
-    float currentHeading = compass->getHeading();
+    // Get current heading (from Pi compass via setHeading)
+    float heading = currentHeading;
     
     // Adjust motors to follow bearing
-    motors->adjustForHeading(currentHeading, targetBearing);
+    motors->adjustForHeading(heading, targetBearing);
     
     // Debug output
     if (millis() % 5000 < 100) {  // Print every 5 seconds
@@ -187,7 +180,7 @@ void Navigation::navigateToWaypoint() {
         Serial.print(F("m, Bearing: "));
         Serial.print(targetBearing, 1);
         Serial.print(F("°, Heading: "));
-        Serial.print(currentHeading, 1);
+        Serial.print(heading, 1);
         Serial.println(F("°"));
     }
 }
@@ -241,7 +234,7 @@ void Navigation::handleObstacleAvoidance() {
         if (!obstacleAvoid->isScanComplete()) break;
 
         PathScan scan = obstacleAvoid->getScanResult();
-        float currentHeading = compass->getHeading();
+        float heading = currentHeading;  // From Pi compass
         avoidTurnDirection = 0;
         avoidTurnAngle = 0;
 
@@ -431,18 +424,10 @@ float Navigation::calculateBearing(float lat1, float lon1, float lat2, float lon
     return bearing;
 }
 
-// ================= Additional features / stubs =================
+// ================= Heading from Pi =================
 
-void Navigation::setUseCompass(bool enabled) {
-    useCompass = enabled;
-}
-
-bool Navigation::getUseCompass() const {
-    return useCompass;
-}
-
-void Navigation::fallbackToGpsOnly() {
-    useCompass = false;
+void Navigation::setHeading(float h) {
+    currentHeading = h;
 }
 
 void Navigation::saveCurrentPosition() {
@@ -474,9 +459,9 @@ void Navigation::clearHistory() {
 }
 
 void Navigation::updateGpsData(float lat, float lon, float speed, float heading) {
-    // Minimal stub: Record position into history for RETURN and trust compass heading
-    // A fuller implementation would feed data into GPSHandler.
-    (void)speed; (void)heading;
+    // Store heading from Pi for navigation
+    currentHeading = heading;
+    (void)speed;
     HistoryPoint p{lat, lon, millis()};
     if (historyCount < MAX_HISTORY_POINTS) {
         history[historyCount++] = p;
@@ -484,37 +469,6 @@ void Navigation::updateGpsData(float lat, float lon, float speed, float heading)
         history[currentHistoryIndex] = p;
         currentHistoryIndex = (currentHistoryIndex + 1) % MAX_HISTORY_POINTS;
     }
-}
-
-void Navigation::navigateToWaypointGpsOnly() {
-    // Fallback: use target bearing as surrogate heading correction
-    if (currentWaypointIndex >= waypointCount) return;
-
-    // If a non-blocking nudge is running, wait for it to finish
-    if (gpsNudgeActive) {
-        if (millis() >= gpsNudgeEndTime) {
-            motors->stop();
-            gpsNudgeActive = false;
-        }
-        return;  // Either still nudging or just stopped — re-evaluate next call
-    }
-
-    Waypoint& current = waypoints[currentWaypointIndex];
-    float lat = gps->getLatitude();
-    float lon = gps->getLongitude();
-    float distance = calculateDistance(lat, lon, current.latitude, current.longitude);
-    if (distance < WAYPOINT_RADIUS) {
-        current.reached = true;
-        motors->stop();
-        currentWaypointIndex++;
-        if (currentWaypointIndex >= waypointCount) navigationActive = false;
-        return;
-    }
-    float targetBearing = calculateBearing(lat, lon, current.latitude, current.longitude);
-    // Without compass, approximate by short non-blocking nudges and re-evaluation
-    motors->forward(150);
-    gpsNudgeActive = true;
-    gpsNudgeEndTime = millis() + 250;  // 250 ms nudge
 }
 
 void Navigation::handleReturnNavigation() {
@@ -538,7 +492,7 @@ void Navigation::handleReturnNavigation() {
     }
 
     float bearing = calculateBearing(lat, lon, target.latitude, target.longitude);
-    float heading = compass->getHeading();
+    float heading = currentHeading;  // From Pi compass
     motors->adjustForHeading(heading, bearing);
 }
 

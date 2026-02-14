@@ -1512,17 +1512,7 @@ function setupEventListeners() {
     const sendWaypointsBtn = document.getElementById('send-waypoints-btn');
     if (sendWaypointsBtn) sendWaypointsBtn.addEventListener('click', sendWaypointsToRobot);
 
-    // Line Follower controls
-    const lfEnableBtn = document.getElementById('line-follow-enable-btn');
-    if (lfEnableBtn) lfEnableBtn.addEventListener('click', async () => {
-        const ok = await sendRobotCommand('FOLLOW_LINE');
-        if (ok) addLog('info', 'Line follower enabled');
-    });
-    const lfDisableBtn = document.getElementById('line-follow-disable-btn');
-    if (lfDisableBtn) lfDisableBtn.addEventListener('click', async () => {
-        const ok = await sendRobotCommand('FOLLOW_LINE_OFF');
-        if (ok) addLog('info', 'Line follower disabled');
-    });
+    // Line follower removed — no line follower hardware connected
 
     const manualButtonMap = {
         'manual-forward-btn': 'forward',

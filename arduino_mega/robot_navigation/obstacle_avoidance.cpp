@@ -16,13 +16,10 @@
 ObstacleAvoidance::ObstacleAvoidance() {
     distance = -1;
     obstacleDetected = false;
-    irObstacleDetected = false;
-    irValue = 0;
     lastCheck = 0;
     lastServoMove = 0;
     currentServoAngle = SERVO_CENTER;
     servoAttached = false;
-    ky032Attached = false;
     usPhase = US_IDLE;
     usTriggerTime = 0;
     usEchoStart = 0;
@@ -38,12 +35,6 @@ void ObstacleAvoidance::begin() {
     digitalWrite(ULTRASONIC_TRIG, LOW);
     pinMode(ULTRASONIC_ECHO, INPUT);
 
-    // KY-032 infrared sensor
-    pinMode(KY032_DO_PIN, INPUT);
-    pinMode(KY032_ENA_PIN, OUTPUT);
-    digitalWrite(KY032_ENA_PIN, HIGH);
-    ky032Attached = true;
-
     // Servo
     servo.attach(SERVO_PIN);
     servoAttached = true;
@@ -55,14 +46,12 @@ void ObstacleAvoidance::begin() {
 
     Serial.println(F("# Obstacle avoidance (non-blocking) initialized"));
     Serial.println(F("# - HC-SR04 ultrasonic (pins 30-31, servo-scanned)"));
-    Serial.println(F("# - KY-032 infrared (pin 32 digital, pin 33 enable)"));
 }
 
 // ============ main update — call every loop iteration ============
 void ObstacleAvoidance::update() {
     updateUltrasonic();  // non-blocking ping state machine
     updateScan();        // non-blocking scan state machine
-    updateIRSensor();    // digitalRead — instant
 }
 
 // ============ non-blocking ultrasonic state machine ============
@@ -197,8 +186,8 @@ void ObstacleAvoidance::updateScan() {
         if (usPhase == US_IDLE) {
           pendingScan.rightDist = distance;
           pendingScan.rightClear = (distance == -1 || distance > OBSTACLE_THRESHOLD);
-          pendingScan.irDetected = irObstacleDetected;
-          pendingScan.irDistance = irValue;
+          pendingScan.irDetected = false;  // KY-032 removed
+          pendingScan.irDistance = 0;       // KY-032 removed
           moveServoTo(SERVO_CENTER);
           scanStepTime = now;
           scanStep = SCAN_RETURN_CENTER;
@@ -253,8 +242,8 @@ PathScan ObstacleAvoidance::scanPath() {
     scan.rightDist = (d == 0) ? -1 : (int)(d * 0.034f / 2.0f);
     scan.rightClear = (scan.rightDist == -1 || scan.rightDist > OBSTACLE_THRESHOLD);
 
-    scan.irDetected = irObstacleDetected;
-    scan.irDistance = irValue;
+    scan.irDetected = false;  // KY-032 removed
+    scan.irDistance = 0;       // KY-032 removed
 
     moveServoTo(SERVO_CENTER);
     return scan;
@@ -262,23 +251,11 @@ PathScan ObstacleAvoidance::scanPath() {
 
 // ============ simple helpers ============
 bool ObstacleAvoidance::isObstacleDetected() {
-    return obstacleDetected || irObstacleDetected;
+    return obstacleDetected;
 }
 
 int ObstacleAvoidance::getDistance() {
     return distance;
-}
-
-bool ObstacleAvoidance::isIRObstacleDetected() {
-    return irObstacleDetected;
-}
-
-int ObstacleAvoidance::getIRDistance() {
-    return irObstacleDetected ? 5 : 100;
-}
-
-int ObstacleAvoidance::getIRAnalogValue() {
-    return irValue;
 }
 
 void ObstacleAvoidance::lookCenter() { moveServoTo(SERVO_CENTER); }
@@ -295,15 +272,4 @@ void ObstacleAvoidance::moveServoTo(int angle) {
         currentServoAngle = angle;
         lastServoMove = millis();
     }
-}
-
-void ObstacleAvoidance::updateIRSensor() {
-    if (!ky032Attached) {
-        irObstacleDetected = false;
-        irValue = 0;
-        return;
-    }
-    bool detected = (digitalRead(KY032_DO_PIN) == HIGH);
-    irObstacleDetected = detected;
-    irValue = detected ? 1023 : 0;
 }

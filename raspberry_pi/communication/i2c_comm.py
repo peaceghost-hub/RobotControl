@@ -46,7 +46,7 @@ class I2CComm:
     CMD_MANUAL_OVERRIDE = ord('V')   # New: Manual control signal with joystick data
     CMD_EMERGENCY_STOP = ord('E')    # New: Emergency stop
     CMD_WIRELESS_BROADCAST = ord('Z') # New: Broadcast position via wireless
-    CMD_FOLLOW_LINE = ord('L')        # New: Enable/disable line follower
+    # CMD_FOLLOW_LINE removed — no line follower hardware
 
     # Response opcodes returned by Mega
     RESP_ACK = 0x80
@@ -368,11 +368,7 @@ class I2CComm:
         resp = self._exchange(self.CMD_WIRELESS_BROADCAST, payload, expect=2)
         return self._is_ack(resp)
 
-    def set_line_follow(self, enabled: bool) -> bool:
-        """Enable or disable line follower mode on Mega."""
-        payload = bytes([1 if enabled else 0])
-        resp = self._exchange(self.CMD_FOLLOW_LINE, payload, expect=2)
-        return self._is_ack(resp)
+    # set_line_follow() removed — no line follower hardware
 
     def request_obstacle_status(self) -> Optional[Dict[str, Any]]:
         """Request obstacle detection flag and distance from Mega."""

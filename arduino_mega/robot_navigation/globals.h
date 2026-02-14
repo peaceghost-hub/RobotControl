@@ -81,7 +81,7 @@ const uint8_t CMD_RETURN_TO_START = 'B';
 const uint8_t CMD_MANUAL_OVERRIDE = 'V';
 const uint8_t CMD_EMERGENCY_STOP  = 'E';
 const uint8_t CMD_WIRELESS_BROADCAST = 'Z';
-const uint8_t CMD_FOLLOW_LINE     = 'L';  // Enable/disable line follower mode
+// CMD_FOLLOW_LINE removed — no line follower hardware
 
 const uint8_t RESP_ACK    = 0x80;
 const uint8_t RESP_GPS    = 0x81;
@@ -152,7 +152,7 @@ enum RobotState : uint8_t {
 extern RobotState robotState;
 
 // Timing budget constants (µs / ms)
-const unsigned long CC1101_POLL_INTERVAL   = 120;   // ms between SPI polls
+const unsigned long CC1101_POLL_INTERVAL   = 50;    // ms between SPI polls (match ESP8266 TX rate)
 const unsigned long WIRELESS_LINK_TIMEOUT  = 15000; // ms — no packets → back to I2C (x5 from 3000)
 const unsigned long I2C_LINK_TIMEOUT       = 15000; // ms — no I2C activity → consider lost (x5 from 3000)
 const unsigned long SENSOR_UPDATE_INTERVAL = 100;   // ms between ultrasonic reads
@@ -187,9 +187,7 @@ void markWirelessHandshake();
 uint8_t readBatteryPercent();
 uint8_t readSignalQuality();
 
-// Line follower sensor pins (4-pin module: GND, VCC, OUT, ENA)
-#define LINE_FOLLOWER_OUT 32
-#define LINE_FOLLOWER_ENA 33
+// Line follower and KY-032 IR sensor removed — only HC-SR04 ultrasonic for obstacle detection
 
 // Define PI if not already defined
 #ifndef PI

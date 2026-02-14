@@ -10,7 +10,8 @@
 //  At most ONE packet is read per call to receive().
 // =====================================================================
 
-CC1101Driver::CC1101Driver() : initialized(false), lastRxTime(0) {
+CC1101Driver::CC1101Driver() : initialized(false), lastRxTime(0), rxGoodCount(0), rxBadCount(0),
+                               rxPending(false), rxPendingSince(0) {
 }
 
 CC1101Driver::~CC1101Driver() {
@@ -29,11 +30,19 @@ bool CC1101Driver::begin() {
 
   // Set SPI pin mapping (Mega: SCK=52, MISO=50, MOSI=51, SS=53)
   ELECHOUSE_cc1101.setSpiPin(52, 50, 51, CC1101_CS_PIN);
-  ELECHOUSE_cc1101.setGDO(CC1101_GDO0_PIN, CC1101_GDO2_PIN);
+  // NOTE: Do NOT call setGDO() — working standalone code doesn't use it
+  // on the Mega side. The library defaults are fine.
 
-  // Full radio configuration (SPI-heavy — guard it)
-  noInterrupts();
+  // Full radio configuration — do NOT wrap in noInterrupts() because
+  // Init() → Reset() calls delay() which needs Timer 0 ISR.
+  // This runs once at deferred boot (5 s), no I2C contention yet.
   configureModule();
+
+  // Flush any stale RX data and enter clean RX mode
+  noInterrupts();
+  ELECHOUSE_cc1101.SpiStrobe(0x36);  // SIDLE
+  ELECHOUSE_cc1101.SpiStrobe(0x3A);  // SFRX (flush RX FIFO)
+  ELECHOUSE_cc1101.SpiStrobe(0x3B);  // SFTX (flush TX FIFO)
   ELECHOUSE_cc1101.SetRx();
   interrupts();
 
@@ -56,9 +65,30 @@ bool CC1101Driver::send(const WirelessMessage& msg) {
   static unsigned long lastSendTime = 0;
   if (millis() - lastSendTime < 50) return false;
 
+  // --- Safe TX: write FIFO with ints off (fast), then strobe TX and
+  //     wait with ints ON so TWI / Timer ISRs can still fire. ---
+  uint8_t pktLen = msg.length + 2;
+
   noInterrupts();
-  ELECHOUSE_cc1101.SendData((byte*)&msg, msg.length + 2);
-  interrupts();
+  ELECHOUSE_cc1101.SpiStrobe(0x36);                   // SIDLE
+  ELECHOUSE_cc1101.SpiStrobe(0x3B);                   // SFTX  (flush TX FIFO)
+  ELECHOUSE_cc1101.SpiWriteReg(0x3F, pktLen);         // length byte
+  ELECHOUSE_cc1101.SpiWriteBurstReg(0x3F, (byte*)&msg, pktLen); // payload
+  ELECHOUSE_cc1101.SpiStrobe(0x35);                   // STX   (start transmit)
+  interrupts();                                        // ← ints back ON
+
+  // Wait for TX to finish (GDO0 goes HIGH then LOW) — with interrupts ENABLED.
+  // At 9.6 kBaud a max-size packet takes ~70 ms; timeout at 100 ms.
+  unsigned long txStart = millis();
+  while (digitalRead(CC1101_GDO0_PIN) == LOW) {
+    if (millis() - txStart > 100) { resetRxPipeline(); return false; }
+  }
+  while (digitalRead(CC1101_GDO0_PIN) == HIGH) {
+    if (millis() - txStart > 100) { resetRxPipeline(); return false; }
+  }
+
+  // Back to RX mode
+  resetRxPipeline();
 
   lastSendTime = millis();
   return true;
@@ -66,72 +96,141 @@ bool CC1101Driver::send(const WirelessMessage& msg) {
 
 // ---- receive() — read ONE packet, non-blocking ----
 //
-// Returns true if a valid RawMotorPacket (or WirelessMessage) was decoded.
-// Always resets the RX pipeline before returning so the FIFO stays clean.
+// Matches the proven standalone receiver as closely as possible:
+//
+//   Standalone uses:  CheckRxFifo(50)  →  ReceiveData(buf)  →  SIDLE,delay(2),SFRX,delay(2),SetRx
+//   CheckRxFifo(50) blocks for 50 ms to let the packet fully arrive.
+//
+// We replicate that with a NON-BLOCKING two-phase approach:
+//   Phase 1: first time we see data in FIFO → record timestamp, return false
+//   Phase 2: on next call, if 50 ms have passed → read the completed packet
+//
+// We do NOT use ReceiveData() because it has no bounds check on the
+// length byte — a garbage length (e.g. 200) overflows our buffer and
+// corrupts rxGoodCount/rxBadCount/lastRxTime in RAM.
+// Instead we read the length byte first, validate it, then read only
+// that many bytes — safe, bounded, no overflow possible.
 bool CC1101Driver::receive(WirelessMessage& msg) {
   if (!initialized) return false;
 
-  // --- 1. Check if anything is in the RX FIFO (fast SPI read) ---
+  // --- 1. Check RXBYTES ---
   noInterrupts();
-  bool hasData = ELECHOUSE_cc1101.CheckRxFifo(0);
+  uint8_t rxRaw = ELECHOUSE_cc1101.SpiReadStatus(0x3B); // CC1101_RXBYTES
   interrupts();
 
-  if (!hasData) return false;
-
-  // --- 2. Read the packet out of the FIFO ---
-  byte size;
-  noInterrupts();
-  size = ELECHOUSE_cc1101.ReceiveData(rxBuffer);
-  interrupts();
-
-  if (size == 0 || size > sizeof(rxBuffer)) {
-    // Empty or oversized → flush and restart
+  // Overflow — flush and restart
+  if (rxRaw & 0x80) {
+    rxPending = false;
     resetRxPipeline();
     return false;
   }
 
-  // --- 3. Try to decode as RawMotorPacket (6 bytes from ESP8266) ---
-  RawMotorPacket* pktPtr = nullptr;
+  uint8_t rxBytes = rxRaw & 0x7F;
 
-  if (size == sizeof(RawMotorPacket)) {
-    pktPtr = (RawMotorPacket*)rxBuffer;
-  } else if (size == sizeof(RawMotorPacket) + 1) {
-    // Library sometimes prepends the length byte
-    pktPtr = (RawMotorPacket*)&rxBuffer[1];
+  if (rxBytes == 0) {
+    rxPending = false;
+    return false;
   }
 
-  if (pktPtr != nullptr) {
-    // Validate CRC: sum of first 5 bytes == crc byte
+  // --- 2. Non-blocking wait (replaces CheckRxFifo(50)'s delay(50)) ---
+  // First time seeing data → start the timer, don't read yet.
+  if (!rxPending) {
+    rxPending = true;
+    rxPendingSince = millis();
+    return false;
+  }
+  // Still waiting? Come back later.
+  if (millis() - rxPendingSince < 50) return false;
+
+  // 50 ms have passed — packet should be complete. Clear the flag.
+  rxPending = false;
+
+  // --- 3. Re-check RXBYTES after the wait ---
+  noInterrupts();
+  rxRaw = ELECHOUSE_cc1101.SpiReadStatus(0x3B);
+  interrupts();
+
+  if (rxRaw & 0x80) {
+    resetRxPipeline();
+    return false;
+  }
+
+  rxBytes = rxRaw & 0x7F;
+  if (rxBytes == 0) return false;
+
+  // --- 4. Manual FIFO read (SAFE — no ReceiveData buffer overflow) ---
+  // Read the length byte first, validate, then read only that many bytes.
+  byte pktLen;
+  byte status[2];
+
+  noInterrupts();
+  pktLen = ELECHOUSE_cc1101.SpiReadReg(CC1101_RXFIFO);  // first FIFO byte = length
+  interrupts();
+
+  // Validate length: must be 1..62 and we must have enough bytes
+  // FIFO should contain: 1(len, already read) + pktLen(data) + 2(status)
+  if (pktLen == 0 || pktLen > 62 || rxBytes < (pktLen + 3)) {
+    resetRxPipeline();
+    return false;
+  }
+
+  // Read the payload + 2 status bytes
+  noInterrupts();
+  ELECHOUSE_cc1101.SpiReadBurstReg(CC1101_RXFIFO, rxBuffer, pktLen);
+  ELECHOUSE_cc1101.SpiReadBurstReg(CC1101_RXFIFO, status, 2);
+  interrupts();
+
+  // --- 5. Reset radio to RX (matches standalone: SIDLE→delay→SFRX→delay→SetRx) ---
+  resetRxPipeline();
+
+  // NOTE: Do NOT check hardware CRC_OK bit (status[1] & 0x80).
+  // The working standalone code does not check it — it relies solely
+  // on the software checksum (computeCrc).  Hardware CRC_OK may fail
+  // due to register config differences between ccmode=0 and ccmode=1.
+
+  // --- 6. Decode as RawMotorPacket (6 bytes, matches standalone exactly) ---
+  if (pktLen == sizeof(RawMotorPacket)) {
+    RawMotorPacket* pkt = (RawMotorPacket*)rxBuffer;
     uint8_t sum = 0;
-    const uint8_t* b = (const uint8_t*)pktPtr;
+    const uint8_t* b = (const uint8_t*)pkt;
     for (uint8_t i = 0; i < sizeof(RawMotorPacket) - 1; i++) sum += b[i];
 
-    if (pktPtr->crc == sum) {
+    if (pkt->crc == sum) {
       msg.type   = MSG_TYPE_RAW_MOTOR;
       msg.length = sizeof(RawMotorPacket);
-      memcpy(msg.data, (const uint8_t*)pktPtr, sizeof(RawMotorPacket));
+      memcpy(msg.data, (const uint8_t*)pkt, sizeof(RawMotorPacket));
       lastRxTime = millis();
-      resetRxPipeline();
+      rxGoodCount++;
       return true;
     }
-    // CRC mismatch — fall through to flush
+    rxBadCount++;
+    return false;
   }
 
-  // --- 4. Try as standard WirelessMessage [type][length][data…] ---
-  if (size >= 2) {
+  // --- 7. Try as standard WirelessMessage [type][length][data…] ---
+  if (pktLen >= 2) {
     msg.type   = rxBuffer[0];
     msg.length = rxBuffer[1];
-    if (msg.length <= 62 && size >= (msg.length + 2)) {
+    if (msg.length <= 60 && pktLen >= (msg.length + 2)) {
       memcpy(msg.data, &rxBuffer[2], msg.length);
       lastRxTime = millis();
-      resetRxPipeline();
+      rxGoodCount++;
       return true;
     }
   }
 
-  // --- 5. Unrecognised / garbage — flush ---
-  resetRxPipeline();
+  // --- 8. Unrecognized ---
+  rxBadCount++;
   return false;
+}
+
+// ---- ensureRxMode() — no-op ----
+// Removed: reading MARCSTATE inside noInterrupts() adds freeze risk,
+// and the radio is often in a non-0x0D state while receiving a packet
+// (e.g. 0x11 = RX_OVERFLOW, or transitioning).  The overflow check in
+// receive() handles the real failure case safely.
+void CC1101Driver::ensureRxMode() {
+  // intentionally empty — overflow handled in receive()
 }
 
 // ---- isConnected() ----
@@ -148,10 +247,15 @@ int8_t CC1101Driver::getRSSI() const {
   return rssi;
 }
 
-// ---- configureModule() — set all radio parameters (call with ints disabled) ----
+// ---- configureModule() — set all radio parameters ----
+// Called once during deferred init with interrupts ENABLED
+// (Init() internally calls delay() which needs Timer 0 ISR).
 void CC1101Driver::configureModule() {
   ELECHOUSE_cc1101.Init();
-  ELECHOUSE_cc1101.setCCMode(1);
+  // NOTE: Do NOT call setCCMode(1) — it changes MDMCFG3/MDMCFG4/PKTCTRL0
+  // which alters the effective data rate and packet format.
+  // The proven working standalone code does NOT call setCCMode.
+  // Init() → RegConfigSettings() → setCCMode(0) sets the correct defaults.
   ELECHOUSE_cc1101.setModulation(MODULATION);
   ELECHOUSE_cc1101.setMHZ(FREQUENCY);
   ELECHOUSE_cc1101.setRxBW(RX_BW);
@@ -164,6 +268,8 @@ void CC1101Driver::configureModule() {
   ELECHOUSE_cc1101.setManchester(0);
   ELECHOUSE_cc1101.setPktFormat(0);
   ELECHOUSE_cc1101.setWhiteData(0);
+  ELECHOUSE_cc1101.setAdrChk(0);         // no address filtering (match ESP8266)
+  ELECHOUSE_cc1101.setAddr(0);           // address 0 (match ESP8266)
   ELECHOUSE_cc1101.setLengthConfig(LENGTH_CFG);
   ELECHOUSE_cc1101.setDRate(DATA_RATE);
 }
@@ -173,8 +279,9 @@ void CC1101Driver::configureModule() {
 void CC1101Driver::resetRxPipeline() {
   noInterrupts();
   ELECHOUSE_cc1101.SpiStrobe(0x36);  // SIDLE
-  // No delayMicroseconds needed — SPI strobe takes ~4 µs each
+  delayMicroseconds(100);            // let CC1101 reach IDLE (matches standalone's delay(2))
   ELECHOUSE_cc1101.SpiStrobe(0x3A);  // SFRX
+  delayMicroseconds(100);            // let flush complete
   ELECHOUSE_cc1101.SetRx();
   interrupts();
 }
