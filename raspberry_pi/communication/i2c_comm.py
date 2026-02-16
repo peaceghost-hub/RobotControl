@@ -418,7 +418,9 @@ class I2CComm:
         seq = int(waypoint.get('sequence', 0)) & 0xFF
         lat = float(waypoint.get('latitude', 0.0))
         lon = float(waypoint.get('longitude', 0.0))
-        return struct.pack('<HBdd', wp_id, seq, lat, lon)
+        # MUST use 'f' (4-byte float), NOT 'd' (8-byte double)!
+        # AVR ATmega2560 sizeof(double) == sizeof(float) == 4 bytes.
+        return struct.pack('<HBff', wp_id, seq, lat, lon)
 
     def _decode_gps(self, payload: bytes) -> Dict[str, Any]:
         valid = bool(payload[0])

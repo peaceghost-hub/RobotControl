@@ -78,8 +78,12 @@ void ObstacleAvoidance::updateUltrasonic() {
         } else if ((long)(nowUs - usTimeout) >= 0) {
           // Timeout waiting for echo to start — object may be too close
           // (HC-SR04 blind zone < 2 cm) or sensor disconnected.
-          // Keep previous obstacleDetected state to avoid false "clear".
+          // Respect sticky hold, but clear after hold expires to prevent
+          // permanent stuck-true if sensor keeps timing out.
           distance = -1;
+          if (nowMs >= obstacleHoldUntil) {
+              obstacleDetected = false;
+          }
           lastCheck = nowMs;
           usPhase = US_IDLE;
         }
