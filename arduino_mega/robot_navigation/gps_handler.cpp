@@ -14,6 +14,8 @@ GPSHandler::GPSHandler() {
     lastProcessedChars = 0;
     droppedChars = 0;
     maxBacklog = 0;
+    seeded = false;
+    neoHasFixedOnce = false;
 }
 
 bool GPSHandler::begin(HardwareSerial& serial) {
@@ -47,18 +49,37 @@ void GPSHandler::update() {
     // Update cached values if valid
     if (gps.location.isValid()) {
         valid = true;
+        seeded = false;          // Neo-6M fix is authoritative — stop using seed
+        neoHasFixedOnce = true;
         latitude = gps.location.lat();   // TinyGPS++ returns double
         longitude = gps.location.lng();  // TinyGPS++ returns double
         altitude = gps.altitude.meters();
         speed = gps.speed.mps();  // meters per second
         satellites = gps.satellites.value();
-    } else {
+    } else if (!seeded) {
+        // No Neo-6M fix AND no seed — truly invalid
         valid = false;
     }
+    // If seeded==true and Neo has no fix, 'valid' stays true from seedPosition()
 }
 
 bool GPSHandler::isValid() {
-    return valid && gps.location.isValid();
+    return valid;  // true from Neo-6M fix OR from seed
+}
+
+bool GPSHandler::isSeeded() const {
+    return seeded;
+}
+
+void GPSHandler::seedPosition(double lat, double lon) {
+    // Only use seed if Neo-6M hasn't fixed yet.
+    // Once Neo-6M locks, its data is always preferred.
+    if (neoHasFixedOnce) return;
+    latitude = lat;
+    longitude = lon;
+    seeded = true;
+    valid = true;
+    Serial.println(F("# GPS seeded from Pi/SIM7600E"));
 }
 
 double GPSHandler::getLatitude() {

@@ -118,7 +118,7 @@ fi
 
 # Show module identity
 info "Module info:"
-at_cmd "ATI" 2 | grep -vE '^\s*$|^AT'
+at_cmd "ATI" 2 | grep -vE '^\s*$|^AT' || true
 
 # ---- GPS OFF ------------------------------------------------
 if [ "$MODE" = "disable" ]; then
@@ -182,7 +182,7 @@ for i in $(seq 1 $MAX_POLLS); do
 
     # +CGPSINFO: lat,N/S,lon,E/W,date,UTC,alt,speed,course
     # If no fix:  +CGPSINFO: ,,,,,,,,
-    CGPS_LINE=$(echo "$RESP" | grep '+CGPSINFO:' | head -1)
+    CGPS_LINE=$(echo "$RESP" | grep '+CGPSINFO:' | head -1 || true)
 
     if [ -z "$CGPS_LINE" ]; then
         printf "\r  [%02d/%d] No response yet...            " "$i" "$MAX_POLLS"
@@ -194,7 +194,7 @@ for i in $(seq 1 $MAX_POLLS); do
     DATA="${CGPS_LINE#*: }"
 
     # Check if we have actual data (not all commas)
-    if echo "$DATA" | grep -qE '^,+$'; then
+    if echo "$DATA" | grep -qE '^,+$' 2>/dev/null; then
         printf "\r  [%02d/%d] Searching for satellites...     " "$i" "$MAX_POLLS"
         sleep 2
         continue

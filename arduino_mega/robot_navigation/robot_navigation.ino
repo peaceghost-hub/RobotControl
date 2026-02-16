@@ -816,6 +816,9 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
         memcpy(&lon, &payload[4],  sizeof(float));
         memcpy(&spd, &payload[8],  sizeof(float));
         memcpy(&hdg, &payload[12], sizeof(float));
+        // Seed GPS position so navigation can start before Neo-6M locks.
+        // seedPosition() is a no-op once Neo-6M has its own fix.
+        gps.seedPosition((double)lat, (double)lon);
         navigation.updateGpsData(lat, lon, spd, hdg);
         prepareAck();
       } else {

@@ -450,7 +450,11 @@ class RobotController:
             shutdown_event.wait(HEADING_INTERVAL)
 
     def gps_loop(self):
-        """Request and transmit GPS data from Arduino or SIM7600E"""
+        """GPS loop: SIM7600E is the primary GPS source for the dashboard.
+        Always forwards position to Mega as a seed so navigation can start
+        before the Neo-6M gets its own fix.  Once Neo-6M locks, the Mega
+        ignores the seed automatically.
+        """
         logger.info("Starting GPS loop...")
         
         while not shutdown_event.is_set():
@@ -463,22 +467,18 @@ class RobotController:
                 
                 gps_data = None
                 
-                # Priority 1: Get GPS from SIM7600E if available (dashboard feed only by default)
+                # Primary source: SIM7600E GPS
                 if self.sim7600e:
                     gps_data = self.sim7600e.get_gps_data()
-                    if gps_data:
-                        # Optionally forward to Mega if configured
-                        forward_cfg = CONFIG.get('sim7600e', {}).get('forward_to_mega', False)
-                        if forward_cfg and self.robot_link:
-                            try:
-                                self.robot_link.send_gps_data(gps_data)
-                                logger.debug("Forwarded SIM7600E GPS to Mega (per config)")
-                            except Exception as e:
-                                logger.debug(f"Could not forward GPS to Mega: {e}")
-                
-                # Fallback: Request GPS data from Arduino Neo-6M
-                if not gps_data and self.robot_link:
-                    gps_data = self.robot_link.request_gps_data()
+                    if gps_data and self.robot_link:
+                        # Always forward to Mega — seeds its position until
+                        # the Neo-6M gets its own fix (seedPosition is a no-op
+                        # once Neo-6M has locked).
+                        try:
+                            self.robot_link.send_gps_data(gps_data)
+                            logger.debug("Forwarded SIM7600E GPS to Mega")
+                        except Exception as e:
+                            logger.debug(f"Could not forward GPS to Mega: {e}")
                 
                 if gps_data and gps_data.get('latitude') is not None and gps_data.get('longitude') is not None:
                     # Add compass heading (Pi-side) so the dashboard shows heading even when GPS is stationary.
