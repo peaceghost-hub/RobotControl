@@ -171,7 +171,13 @@ class I2CComm:
         return self._is_ack(self._exchange(self.CMD_NAV_START, expect=2))
 
     def stop_navigation(self) -> bool:
-        return self._is_ack(self._exchange(self.CMD_NAV_STOP, expect=2))
+        """Stop navigation with retries — critical safety command."""
+        for attempt in range(3):
+            if self._is_ack(self._exchange(self.CMD_NAV_STOP, expect=2)):
+                return True
+            time.sleep(0.05)
+        logger.warning("NAV_STOP: all retries failed")
+        return False
 
     def pause_navigation(self) -> bool:
         return self._is_ack(self._exchange(self.CMD_NAV_PAUSE, expect=2))
@@ -412,7 +418,7 @@ class I2CComm:
         seq = int(waypoint.get('sequence', 0)) & 0xFF
         lat = float(waypoint.get('latitude', 0.0))
         lon = float(waypoint.get('longitude', 0.0))
-        return struct.pack('<HBff', wp_id, seq, lat, lon)
+        return struct.pack('<HBdd', wp_id, seq, lat, lon)
 
     def _decode_gps(self, payload: bytes) -> Dict[str, Any]:
         valid = bool(payload[0])

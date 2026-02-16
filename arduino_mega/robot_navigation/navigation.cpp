@@ -37,7 +37,7 @@ void Navigation::begin(GPSHandler* g, MotorControl* m, ObstacleAvoidance* o) {
     obstacleAvoid = o;
 }
 
-void Navigation::addWaypoint(float lat, float lon, int id) {
+void Navigation::addWaypoint(double lat, double lon, int id) {
     if (waypointCount < MAX_WAYPOINTS) {
         waypoints[waypointCount].latitude = lat;
         waypoints[waypointCount].longitude = lon;
@@ -67,6 +67,8 @@ void Navigation::start() {
 
 void Navigation::stop() {
     navigationActive = false;
+    inAvoidanceMode = false;
+    avoidStep = AV_IDLE;          // Cancel any in-progress obstacle avoidance
     motors->stop();
 }
 
@@ -133,11 +135,11 @@ void Navigation::navigateToWaypoint() {
     Waypoint& current = waypoints[currentWaypointIndex];
     
     // Get current position
-    float currentLat = gps->getLatitude();
-    float currentLon = gps->getLongitude();
+    double currentLat = gps->getLatitude();
+    double currentLon = gps->getLongitude();
     
     // Calculate distance to waypoint
-    float distance = calculateDistance(currentLat, currentLon, 
+    double distance = calculateDistance(currentLat, currentLon, 
                                       current.latitude, current.longitude);
     
     // Check if waypoint reached
@@ -164,21 +166,23 @@ void Navigation::navigateToWaypoint() {
     }
     
     // Calculate bearing to waypoint
-    float targetBearing = calculateBearing(currentLat, currentLon,
+    double targetBearing = calculateBearing(currentLat, currentLon,
                                           current.latitude, current.longitude);
     
     // Get current heading (from Pi compass via setHeading)
     float heading = currentHeading;
     
     // Adjust motors to follow bearing
-    motors->adjustForHeading(heading, targetBearing);
+    motors->adjustForHeading(heading, (float)targetBearing);
     
-    // Debug output
-    if (millis() % 5000 < 100) {  // Print every 5 seconds
+    // Debug output (reliable timer instead of millis() modulo trick)
+    static unsigned long lastNavDebug = 0;
+    if (millis() - lastNavDebug >= 5000) {
+        lastNavDebug = millis();
         Serial.print(F("# Dist: "));
-        Serial.print(distance, 1);
+        Serial.print((float)distance, 1);
         Serial.print(F("m, Bearing: "));
-        Serial.print(targetBearing, 1);
+        Serial.print((float)targetBearing, 1);
         Serial.print(F("°, Heading: "));
         Serial.print(heading, 1);
         Serial.println(F("°"));
@@ -199,10 +203,10 @@ void Navigation::handleObstacleAvoidance() {
 
         // Save current target bearing so we can resume toward waypoint later
         if (currentWaypointIndex < waypointCount) {
-            float lat = gps->getLatitude();
-            float lon = gps->getLongitude();
+            double lat = gps->getLatitude();
+            double lon = gps->getLongitude();
             Waypoint& target = waypoints[currentWaypointIndex];
-            savedTargetBearing = calculateBearing(lat, lon, target.latitude, target.longitude);
+            savedTargetBearing = (float)calculateBearing(lat, lon, target.latitude, target.longitude);
         }
 
         Serial.print(F("# Obstacle detected at "));
@@ -220,54 +224,16 @@ void Navigation::handleObstacleAvoidance() {
     // ---- 1. Brief 500 ms pause for sensor stability ----
     case AV_STOP_PAUSE:
         if (now - avoidStepTime >= 500) {
-            // Kick off non-blocking scan
-            Serial.println(F("# Scanning for obstacle-free path..."));
-            obstacleAvoid->startScan();
-            avoidStep = AV_SCAN_WAIT;
+            // No servo scanner — turn robot body right 90° to find clear path.
+            // The fixed-mount ultrasonic will face the new direction after the turn.
+            Serial.println(F("# Turning right 90° to find clear path"));
+            avoidTurnDirection = 1;
+            avoidTurnAngle = 90;
+            motors->startTurnDegrees(90, 140);
+            avoidStep = AV_TURN;
             avoidStepTime = now;
         }
         break;
-
-    // ---- 2. Wait for the non-blocking scan to finish ----
-    case AV_SCAN_WAIT: {
-        obstacleAvoid->update();   // drive the scan state machine
-        if (!obstacleAvoid->isScanComplete()) break;
-
-        PathScan scan = obstacleAvoid->getScanResult();
-        float heading = currentHeading;  // From Pi compass
-        avoidTurnDirection = 0;
-        avoidTurnAngle = 0;
-
-        // Prefer right if clear
-        if (scan.rightClear && scan.rightDist > OBSTACLE_SAFE_DISTANCE) {
-            avoidTurnDirection = 1;
-            avoidTurnAngle = 90;
-            Serial.println(F("# Clear path found: RIGHT 90°"));
-        }
-        // Then left
-        else if (scan.leftClear && scan.leftDist > OBSTACLE_SAFE_DISTANCE) {
-            avoidTurnDirection = -1;
-            avoidTurnAngle = 90;
-            Serial.println(F("# Clear path found: LEFT 90°"));
-        }
-        // Both blocked → try sharp right 120°
-        else {
-            Serial.println(F("# Both sides blocked, attempting sharp RIGHT 120°"));
-            avoidTurnDirection = 1;
-            avoidTurnAngle = 120;
-            motors->startTurnDegrees(120, 140);
-            avoidStep = AV_SHARP_RIGHT_TURN;
-            avoidStepTime = now;
-            break;
-        }
-
-        // Execute the chosen 90° turn (non-blocking)
-        int deg = avoidTurnAngle * avoidTurnDirection;
-        motors->startTurnDegrees(deg, 140);
-        avoidStep = AV_TURN;
-        avoidStepTime = now;
-        break;
-    }
 
     // ---- 3a. Waiting for the primary 90° turn to finish ----
     case AV_TURN:
@@ -304,11 +270,11 @@ void Navigation::handleObstacleAvoidance() {
         obstacleAvoid->update();
         int finalCheck = obstacleAvoid->getDistance();
         if (finalCheck > 0 && finalCheck < OBSTACLE_CRITICAL_DISTANCE) {
-            Serial.println(F("# Still blocked after avoidance — stopping"));
-            motors->stop();
-            // Stay in avoidance; will retry on next update() when sensor clears
-            avoidStep = AV_IDLE;
-            // inAvoidanceMode stays true so update() re-enters if obstacle persists
+            // Still blocked — escalate to sharp right 120° turn
+            Serial.println(F("# Still blocked — trying sharp right 120°"));
+            motors->startTurnDegrees(120, 140);
+            avoidStep = AV_SHARP_RIGHT_TURN;
+            avoidStepTime = now;
         } else {
             avoidStep = AV_DONE;
         }
@@ -392,31 +358,31 @@ void Navigation::handleObstacleAvoidance() {
     }
 }
 
-float Navigation::calculateDistance(float lat1, float lon1, float lat2, float lon2) {
-    // Haversine formula
-    const float R = 6371000.0; // Earth radius in meters
+double Navigation::calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+    // Haversine formula — double precision required for GPS coordinates
+    const double R = 6371000.0; // Earth radius in meters
     
-    float dLat = (lat2 - lat1) * DEG_TO_RAD;
-    float dLon = (lon2 - lon1) * DEG_TO_RAD;
+    double dLat = (lat2 - lat1) * DEG_TO_RAD;
+    double dLon = (lon2 - lon1) * DEG_TO_RAD;
     
-    float a = sin(dLat/2) * sin(dLat/2) +
+    double a = sin(dLat/2.0) * sin(dLat/2.0) +
               cos(lat1 * DEG_TO_RAD) * cos(lat2 * DEG_TO_RAD) *
-              sin(dLon/2) * sin(dLon/2);
+              sin(dLon/2.0) * sin(dLon/2.0);
     
-    float c = 2 * atan2(sqrt(a), sqrt(1-a));
+    double c = 2.0 * atan2(sqrt(a), sqrt(1.0-a));
     
     return R * c;
 }
 
-float Navigation::calculateBearing(float lat1, float lon1, float lat2, float lon2) {
-    // Calculate bearing between two points
-    float dLon = (lon2 - lon1) * DEG_TO_RAD;
+double Navigation::calculateBearing(double lat1, double lon1, double lat2, double lon2) {
+    // Calculate bearing between two points — double precision
+    double dLon = (lon2 - lon1) * DEG_TO_RAD;
     
-    float y = sin(dLon) * cos(lat2 * DEG_TO_RAD);
-    float x = cos(lat1 * DEG_TO_RAD) * sin(lat2 * DEG_TO_RAD) -
+    double y = sin(dLon) * cos(lat2 * DEG_TO_RAD);
+    double x = cos(lat1 * DEG_TO_RAD) * sin(lat2 * DEG_TO_RAD) -
               sin(lat1 * DEG_TO_RAD) * cos(lat2 * DEG_TO_RAD) * cos(dLon);
     
-    float bearing = atan2(y, x) * RAD_TO_DEG;
+    double bearing = atan2(y, x) * RAD_TO_DEG;
     
     // Normalize to 0-360
     bearing = fmod((bearing + 360.0), 360.0);
@@ -458,7 +424,7 @@ void Navigation::clearHistory() {
     currentHistoryIndex = 0;
 }
 
-void Navigation::updateGpsData(float lat, float lon, float speed, float heading) {
+void Navigation::updateGpsData(double lat, double lon, float speed, float heading) {
     // Store heading from Pi for navigation
     currentHeading = heading;
     (void)speed;
@@ -480,9 +446,9 @@ void Navigation::handleReturnNavigation() {
     int idx = (historyCount < MAX_HISTORY_POINTS) ? 0 : currentHistoryIndex;
     HistoryPoint target = history[idx];
 
-    float lat = gps->getLatitude();
-    float lon = gps->getLongitude();
-    float distance = calculateDistance(lat, lon, target.latitude, target.longitude);
+    double lat = gps->getLatitude();
+    double lon = gps->getLongitude();
+    double distance = calculateDistance(lat, lon, target.latitude, target.longitude);
 
     if (distance < WAYPOINT_RADIUS) {
         returningToStart = false;
@@ -491,9 +457,9 @@ void Navigation::handleReturnNavigation() {
         return;
     }
 
-    float bearing = calculateBearing(lat, lon, target.latitude, target.longitude);
+    double bearing = calculateBearing(lat, lon, target.latitude, target.longitude);
     float heading = currentHeading;  // From Pi compass
-    motors->adjustForHeading(heading, bearing);
+    motors->adjustForHeading(heading, (float)bearing);
 }
 
 // Waypoint completion tracking methods

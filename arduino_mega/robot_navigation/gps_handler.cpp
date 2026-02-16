@@ -47,8 +47,8 @@ void GPSHandler::update() {
     // Update cached values if valid
     if (gps.location.isValid()) {
         valid = true;
-        latitude = gps.location.lat();
-        longitude = gps.location.lng();
+        latitude = gps.location.lat();   // TinyGPS++ returns double
+        longitude = gps.location.lng();  // TinyGPS++ returns double
         altitude = gps.altitude.meters();
         speed = gps.speed.mps();  // meters per second
         satellites = gps.satellites.value();
@@ -61,11 +61,11 @@ bool GPSHandler::isValid() {
     return valid && gps.location.isValid();
 }
 
-float GPSHandler::getLatitude() {
+double GPSHandler::getLatitude() {
     return latitude;
 }
 
-float GPSHandler::getLongitude() {
+double GPSHandler::getLongitude() {
     return longitude;
 }
 

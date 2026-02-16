@@ -19,15 +19,15 @@
 #define OBSTACLE_CRITICAL_DISTANCE 20  // cm - critical obstacle distance for avoidance
 
 struct Waypoint {
-    float latitude;
-    float longitude;
+    double latitude;
+    double longitude;
     int id;
     bool reached;
 };
 
 struct HistoryPoint {
-    float latitude;
-    float longitude;
+    double latitude;
+    double longitude;
     unsigned long timestamp;
 };
 
@@ -86,7 +86,7 @@ public:
     void begin(GPSHandler* g, MotorControl* m, ObstacleAvoidance* o);
     void setHeading(float h);
     
-    void addWaypoint(float lat, float lon, int id);
+    void addWaypoint(double lat, double lon, int id);
     void clearWaypoints();
     int getWaypointCount();
     int getCurrentWaypointIndex();
@@ -110,11 +110,11 @@ public:
     void clearHistory();
     
     // Update GPS data from Pi (for redundancy)
-    void updateGpsData(float lat, float lon, float speed, float heading);
+    void updateGpsData(double lat, double lon, float speed, float heading);
     
 private:
-    float calculateDistance(float lat1, float lon1, float lat2, float lon2);
-    float calculateBearing(float lat1, float lon1, float lat2, float lon2);
+    double calculateDistance(double lat1, double lon1, double lat2, double lon2);
+    double calculateBearing(double lat1, double lon1, double lat2, double lon2);
     void navigateToWaypoint();
     void handleObstacleAvoidance();
     void handleReturnNavigation();

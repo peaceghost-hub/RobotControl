@@ -232,7 +232,11 @@ class Compass:
     # HEADING
     # --------------------------------------------------------------
     def read_heading(self):
-        x, y, _ = self.read_raw()
+        if not hasattr(self, '_lock'):
+            import threading
+            self._lock = threading.Lock()
+        with self._lock:
+            x, y, _ = self.read_raw()
 
         if x == 0 and y == 0:
             return 0.0

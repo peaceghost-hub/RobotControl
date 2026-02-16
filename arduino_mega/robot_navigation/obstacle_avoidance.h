@@ -45,6 +45,7 @@ private:
     Servo servo;
     int distance;                  // latest ultrasonic cm
     bool obstacleDetected;
+    unsigned long obstacleHoldUntil;  // sticky detection — don't clear until this time
     unsigned long lastCheck;
     unsigned long lastServoMove;
     int currentServoAngle;

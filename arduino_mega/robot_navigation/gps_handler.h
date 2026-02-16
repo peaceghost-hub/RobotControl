@@ -14,8 +14,8 @@ private:
     TinyGPSPlus gps;
     HardwareSerial* gpsSerial;
     bool valid;
-    float latitude;
-    float longitude;
+    double latitude;
+    double longitude;
     float altitude;
     float speed;
     uint8_t satellites;
@@ -31,8 +31,8 @@ public:
     void update();
     bool isValid();
     
-    float getLatitude();
-    float getLongitude();
+    double getLatitude();
+    double getLongitude();
     float getAltitude();
     float getSpeed();
     uint8_t getSatellites();

@@ -760,12 +760,12 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
       break;
 
     case CMD_WAYPOINT_PACKET:
-      if (length >= 11) {
+      if (length >= 19) {   // 2(id) + 1(seq) + 8(lat double) + 8(lon double)
         WaypointPacket pkt;
         pkt.id  = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
         pkt.seq = payload[2];
-        memcpy(&pkt.latitude,  &payload[3], sizeof(float));
-        memcpy(&pkt.longitude, &payload[7], sizeof(float));
+        memcpy(&pkt.latitude,  &payload[3], sizeof(double));
+        memcpy(&pkt.longitude, &payload[11], sizeof(double));
         storePendingWaypoint(pkt);
         prepareAck();
       } else {

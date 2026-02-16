@@ -98,13 +98,13 @@ const uint8_t ERR_PACKET_SIZE  = 0x03;
 struct WaypointPacket {
   uint16_t id;
   uint8_t seq;
-  float latitude;
-  float longitude;
+  double latitude;
+  double longitude;
 };
 
 struct PendingWaypoint {
-  float latitude;
-  float longitude;
+  double latitude;
+  double longitude;
   uint16_t id;
   uint8_t seq;
 };

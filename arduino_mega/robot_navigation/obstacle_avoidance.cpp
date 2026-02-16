@@ -16,6 +16,7 @@
 ObstacleAvoidance::ObstacleAvoidance() {
     distance = -1;
     obstacleDetected = false;
+    obstacleHoldUntil = 0;
     lastCheck = 0;
     lastServoMove = 0;
     currentServoAngle = SERVO_CENTER;
@@ -35,17 +36,14 @@ void ObstacleAvoidance::begin() {
     digitalWrite(ULTRASONIC_TRIG, LOW);
     pinMode(ULTRASONIC_ECHO, INPUT);
 
-    // Servo
-    servo.attach(SERVO_PIN);
-    servoAttached = true;
-    servo.write(SERVO_CENTER);
+    // No servo — ultrasonic sensor is fixed on robot body.
+    // moveServoTo() checks servoAttached and is a no-op when false.
+    servoAttached = false;
     currentServoAngle = SERVO_CENTER;
-    // No delay() — the servo will reach center before the first ping fires
-    // because CHECK_INTERVAL (100 ms) >> servo travel time for small angle.
     lastServoMove = millis();
 
     Serial.println(F("# Obstacle avoidance (non-blocking) initialized"));
-    Serial.println(F("# - HC-SR04 ultrasonic (pins 30-31, servo-scanned)"));
+    Serial.println(F("# - HC-SR04 ultrasonic (pins 30-31, fixed mount)"));
 }
 
 // ============ main update — call every loop iteration ============
@@ -78,9 +76,10 @@ void ObstacleAvoidance::updateUltrasonic() {
           usEchoStart = nowUs;
           usPhase = US_WAIT_ECHO_LOW;
         } else if ((long)(nowUs - usTimeout) >= 0) {
-          // Timeout waiting for echo to start
+          // Timeout waiting for echo to start — object may be too close
+          // (HC-SR04 blind zone < 2 cm) or sensor disconnected.
+          // Keep previous obstacleDetected state to avoid false "clear".
           distance = -1;
-          obstacleDetected = false;
           lastCheck = nowMs;
           usPhase = US_IDLE;
         }
@@ -91,13 +90,20 @@ void ObstacleAvoidance::updateUltrasonic() {
           unsigned long duration = nowUs - usEchoStart;
           int dist = (int)(duration * 0.034f / 2.0f);
           distance = dist;
-          obstacleDetected = (dist > 0 && dist < OBSTACLE_THRESHOLD);
+          if (dist > 0 && dist < OBSTACLE_THRESHOLD) {
+              obstacleDetected = true;
+              obstacleHoldUntil = nowMs + 500;  // hold for at least 500 ms
+          } else if (nowMs >= obstacleHoldUntil) {
+              obstacleDetected = false;          // only clear after hold expires
+          }
           lastCheck = nowMs;
           usPhase = US_IDLE;
         } else if ((long)(nowUs - usTimeout) >= 0) {
-          // Echo stuck HIGH — no return signal
+          // Echo stuck HIGH — no return signal (far away or sensor issue)
           distance = -1;
-          obstacleDetected = false;
+          if (nowMs >= obstacleHoldUntil) {
+              obstacleDetected = false;
+          }
           lastCheck = nowMs;
           usPhase = US_IDLE;
         }

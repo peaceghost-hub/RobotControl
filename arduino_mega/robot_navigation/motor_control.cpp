@@ -161,6 +161,10 @@ void MotorControl::stop() {
     
     speedLeft = 0;
     speedRight = 0;
+    
+    // Cancel any in-progress timed manoeuvres
+    _turning = false;
+    _timedForward = false;
 }
 
 void MotorControl::setMotors(int left, int right) {
@@ -209,12 +213,13 @@ void MotorControl::adjustForHeading(float currentHeading, float targetHeading) {
     while (error > 180) error -= 360;
     while (error < -180) error += 360;
     
-    // PID-like control (simplified)
+    // Proportional control: error > 0 means target is to the RIGHT (clockwise)
+    // To turn right: speed up LEFT motor, slow down RIGHT motor
     int baseSpeed = autoBaseSpeed;
     int correction = constrain((int)(error * 2), -80, 80);
     
-    int leftSpeed = baseSpeed - correction;
-    int rightSpeed = baseSpeed + correction;
+    int leftSpeed  = baseSpeed + correction;   // + correction to turn right when error > 0
+    int rightSpeed = baseSpeed - correction;    // - correction to turn right when error > 0
     
     setMotors(leftSpeed, rightSpeed);
 }

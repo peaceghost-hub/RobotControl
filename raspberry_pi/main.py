@@ -346,6 +346,12 @@ class RobotController:
             instant_cmd_thread = Thread(target=self.instant_command_loop, daemon=True)
             instant_cmd_thread.start()
             self.threads.append(instant_cmd_thread)
+
+            # Start fast compass heading loop (200ms updates for navigation)
+            if self.compass and self.robot_link:
+                compass_thread = Thread(target=self.compass_heading_loop, daemon=True)
+                compass_thread.start()
+                self.threads.append(compass_thread)
             
             logger.info("All systems started successfully")
             return True
@@ -370,19 +376,12 @@ class RobotController:
                 else:
                     logger.debug("Sensor manager not available; sending compass-only payload")
                 
-                # Read compass
+                # Read compass heading for dashboard data
+                # (Heading is sent to Mega at 200ms rate by compass_heading_loop)
                 if self.compass:
                     try:
                         heading = self.compass.read_heading()
                         sensor_data['heading'] = heading
-                        if self.robot_link:
-                            import struct
-                            try:
-                                resp = self.robot_link._exchange(ord('D'), struct.pack('<f', float(heading)), expect=2)
-                                if not resp or resp[0] != getattr(self.robot_link, 'RESP_ACK', 0x80):
-                                    logger.debug("Mega did not ACK heading update")
-                            except Exception as comm_err:
-                                logger.debug(f"Heading forward failed: {comm_err}")
                     except Exception as e:
                         logger.debug(f"Compass read failed: {e}")
                         sensor_data['heading'] = 0
@@ -420,6 +419,36 @@ class RobotController:
             # Wait before next reading
             shutdown_event.wait(self.update_interval)
     
+    def compass_heading_loop(self):
+        """Send compass heading to Mega at high frequency for navigation.
+        
+        Runs at 200ms intervals (5 Hz) so autonomous navigation always has
+        a fresh heading for steering corrections.  This is decoupled from the
+        slow sensor_loop (5 s) which handles dashboard telemetry.
+        """
+        import struct
+        HEADING_INTERVAL = 0.2  # 200 ms
+        logger.info("Starting fast compass heading loop (200 ms interval)...")
+
+        while not shutdown_event.is_set():
+            try:
+                if self.compass and self.robot_link:
+                    heading = self.compass.read_heading()
+                    try:
+                        resp = self.robot_link._exchange(
+                            ord('D'),
+                            struct.pack('<f', float(heading)),
+                            expect=2
+                        )
+                        if not resp or resp[0] != getattr(self.robot_link, 'RESP_ACK', 0x80):
+                            logger.debug("Mega did not ACK heading update")
+                    except Exception as comm_err:
+                        logger.debug(f"Heading forward failed: {comm_err}")
+            except Exception as e:
+                logger.debug(f"Compass heading loop error: {e}")
+
+            shutdown_event.wait(HEADING_INTERVAL)
+
     def gps_loop(self):
         """Request and transmit GPS data from Arduino or SIM7600E"""
         logger.info("Starting GPS loop...")
