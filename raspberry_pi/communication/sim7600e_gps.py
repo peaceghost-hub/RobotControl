@@ -262,17 +262,14 @@ class SIM7600EGPS:
             return False
     
     def _enable_gps(self) -> bool:
-        """Enable GPS on SIM7600E"""
-        # Power on GPS GNSS
-        if not self._send_at_command('AT+CGNSPWR=1', 'OK'):
-            return False
+        """Enable GPS on SIM7600E using AT+CGPS (not AT+CGNS which is SIM800 series)"""
+        # AT+CGPS=1,1  →  1=enable, 1=standalone mode
+        resp_ok = self._send_at_command('AT+CGPS=1,1', 'OK')
+        if not resp_ok:
+            # GPS may already be running — "GPS has started" is not an error
+            logger.info("AT+CGPS=1,1 did not return OK — GPS may already be running")
         
-        time.sleep(3)  # Allow GPS to initialize
-        
-        # Enable GNSS positioning
-        if not self._send_at_command('AT+CGPS=1', 'OK'):
-            return False
-        
+        time.sleep(2)  # Allow GPS engine to initialise
         return True
     
     def get_gps_data(self) -> Optional[Dict]:
@@ -299,18 +296,16 @@ class SIM7600EGPS:
                 time.sleep(5)
     
     def _update_gps_data(self):
-        """Query GPS data from module"""
+        """Query GPS data from SIM7600E using AT+CGPSINFO (not AT+CGNSINF which is SIM800)"""
         if not self.connected or not self.gps_enabled:
             return
         
         try:
-            # Query GNSS position: +CGNSINF: <gnss_run>,<fix_stat>,<utc_time>,<lat>,<lon>,<altitude>,
-            #                                  <speed>,<course>,<fix_accur>,<hdop>,<pdop>,<vdop>
-            cmd = 'AT+CGNSINF'
             if not self.serial or not self.serial.is_open:
                 return
             
-            self.serial.write((cmd + '\r\n').encode())
+            self.serial.reset_input_buffer()
+            self.serial.write(b'AT+CGPSINFO\r\n')
             self.serial.flush()
             
             response = ''
@@ -319,72 +314,96 @@ class SIM7600EGPS:
             while (time.time() - start) < 3.0:
                 if self.serial.in_waiting:
                     response += self.serial.read(self.serial.in_waiting).decode(errors='ignore')
-                    if 'OK' in response or '+CGNSINF:' in response:
+                    if 'OK' in response or 'ERROR' in response:
                         break
                 time.sleep(0.05)
             
-            # Parse response
-            if '+CGNSINF:' in response:
-                # Extract the data line
+            # Parse +CGPSINFO: response
+            if '+CGPSINFO:' in response:
                 for line in response.split('\n'):
-                    if '+CGNSINF:' in line:
-                        self._parse_gps_response(line)
+                    if '+CGPSINFO:' in line:
+                        self._parse_cgpsinfo_response(line.strip())
                         break
             
         except Exception as e:
             logger.debug(f"GPS update error: {e}")
     
-    def _parse_gps_response(self, line: str):
-        """Parse GPS data from AT+CGNSINF response"""
+    @staticmethod
+    def _ddmm_to_decimal(raw: str, hemisphere: str) -> float:
+        """Convert DDMM.MMMM (or DDDMM.MMMM) to decimal degrees.
+
+        SIM7600E AT+CGPSINFO returns lat as DDMM.MMMM and lon as DDDMM.MMMM.
+        """
         try:
-            # Format: +CGNSINF: <gnss_run>,<fix_stat>,<utc_time>,<lat>,<lon>,<altitude>,
-            #                    <speed>,<course>,<fix_accur>,<hdop>,<pdop>,<vdop>
-            
-            # Remove command prefix
-            if '+CGNSINF:' in line:
-                data = line.split('+CGNSINF:')[1].strip()
-            else:
+            val = float(raw)
+        except (ValueError, TypeError):
+            return 0.0
+        degrees = int(val / 100)
+        minutes = val - degrees * 100
+        dec = degrees + minutes / 60.0
+        if hemisphere in ('S', 'W'):
+            dec = -dec
+        return dec
+
+    def _parse_cgpsinfo_response(self, line: str):
+        """Parse GPS data from SIM7600E AT+CGPSINFO response.
+
+        Format:  +CGPSINFO: lat,N/S,lon,E/W,date,UTC,alt,speed,course
+        No fix:  +CGPSINFO: ,,,,,,,,
+        """
+        try:
+            if '+CGPSINFO:' not in line:
                 return
-            
-            parts = data.split(',')
-            
-            if len(parts) < 6:
-                return
-            
-            try:
-                gnss_run = int(parts[0])
-                fix_stat = int(parts[1])
-                utc_time = parts[2].strip()
-                latitude = float(parts[3]) if parts[3].strip() else 0
-                longitude = float(parts[4]) if parts[4].strip() else 0
-                altitude = float(parts[5]) if parts[5].strip() else 0
-                speed = float(parts[6]) if len(parts) > 6 and parts[6].strip() else 0
-                course = float(parts[7]) if len(parts) > 7 and parts[7].strip() else 0
-                fix_accuracy = float(parts[8]) if len(parts) > 8 and parts[8].strip() else 0
-                satellites = int(parts[10]) if len(parts) > 10 and parts[10].strip() else 0
-            except (ValueError, IndexError) as e:
-                logger.debug(f"Parse error: {e}")
-                return
-            
-            # Update only if we have a fix
-            if fix_stat > 0 and latitude != 0 and longitude != 0:
-                self.last_gps_data = {
-                    'valid': True,
-                    'latitude': latitude,
-                    'longitude': longitude,
-                    'altitude': altitude,
-                    'speed': speed,
-                    'heading': course,
-                    'satellites': satellites,
-                    'accuracy': fix_accuracy,
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'source': 'SIM7600E'
-                }
-                self.gps_lock = True
-                logger.debug(f"GPS fix: {latitude:.6f}, {longitude:.6f} ({satellites} sats)")
-            else:
+            data = line.split('+CGPSINFO:')[1].strip()
+
+            # No fix — all fields empty
+            if not data or data.replace(',', '').strip() == '':
                 self.gps_lock = False
-        
+                return
+
+            parts = data.split(',')
+            if len(parts) < 9:
+                return
+
+            lat_raw   = parts[0].strip()
+            lat_hemi  = parts[1].strip()
+            lon_raw   = parts[2].strip()
+            lon_hemi  = parts[3].strip()
+            # parts[4] = date (DDMMYY), parts[5] = UTC time (HHMMSS.S)
+            alt_str   = parts[6].strip()
+            spd_str   = parts[7].strip()  # knots
+            crs_str   = parts[8].strip()  # course/heading
+
+            if not lat_raw or not lon_raw:
+                self.gps_lock = False
+                return
+
+            latitude  = self._ddmm_to_decimal(lat_raw, lat_hemi)
+            longitude = self._ddmm_to_decimal(lon_raw, lon_hemi)
+            altitude  = float(alt_str) if alt_str else 0.0
+            speed_kn  = float(spd_str) if spd_str else 0.0
+            speed_mps = speed_kn * 0.514444   # knots → m/s
+            course    = float(crs_str) if crs_str else 0.0
+
+            if latitude == 0.0 and longitude == 0.0:
+                self.gps_lock = False
+                return
+
+            self.last_gps_data = {
+                'valid': True,
+                'latitude': latitude,
+                'longitude': longitude,
+                'altitude': altitude,
+                'speed': speed_mps,
+                'heading': course,
+                'satellites': 0,       # AT+CGPSINFO doesn't report sat count
+                'accuracy': 0.0,
+                'timestamp': datetime.utcnow().isoformat(),
+                'source': 'SIM7600E'
+            }
+            self.gps_lock = True
+            logger.debug(f"GPS fix: {latitude:.6f}, {longitude:.6f}")
+
         except Exception as e:
             logger.error(f"GPS parse error: {e}")
     

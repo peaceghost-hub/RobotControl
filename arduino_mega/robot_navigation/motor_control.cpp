@@ -167,6 +167,10 @@ void MotorControl::stop() {
     _timedForward = false;
 }
 
+bool MotorControl::isRunning() const {
+    return (speedLeft != 0 || speedRight != 0);
+}
+
 void MotorControl::setMotors(int left, int right) {
     left = constrain(left, -MAX_SPEED, MAX_SPEED);
     right = constrain(right, -MAX_SPEED, MAX_SPEED);

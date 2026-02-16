@@ -40,6 +40,7 @@ public:
     void turnRight(int speed = 150);
     void turnDegrees(int degrees, int speed = 150);  // blocking (legacy)
     void stop();
+    bool isRunning() const;   // true if motors are not stopped
 
     // ---- Non-blocking timed turn API ----
     void startTurnDegrees(int degrees, int speed = 140);

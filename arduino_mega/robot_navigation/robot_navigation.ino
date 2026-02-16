@@ -365,6 +365,17 @@ void loop() {
   obstacleAvoid.update();           // non-blocking ultrasonic
   // Compass heading is received from Pi via CMD_SEND_HEADING → piHeading
 
+  // SAFETY: Emergency obstacle stop — runs ALWAYS, regardless of state.
+  // If navigation is active and obstacle detected, navigation.update()
+  // handles avoidance.  But if motors are running for ANY other reason
+  // (manual drive, transition, etc.) we still need to stop on obstacles.
+  if (obstacleAvoid.isObstacleDetected() && !navigationActive) {
+      if (motors.isRunning()) {
+          motors.stop();
+          DEBUG_SERIAL.println(F("# SAFETY: obstacle stop (non-nav)"));
+      }
+  }
+
   // ====================================================================
   //  6. Non-blocking buzzer tick
   // ====================================================================

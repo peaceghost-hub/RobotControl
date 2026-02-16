@@ -77,9 +77,12 @@ void GPSHandler::seedPosition(double lat, double lon) {
     if (neoHasFixedOnce) return;
     latitude = lat;
     longitude = lon;
+    if (!seeded) {
+        // Print only on first seed to avoid log spam (called every 2s)
+        Serial.println(F("# GPS seeded from Pi/SIM7600E"));
+    }
     seeded = true;
     valid = true;
-    Serial.println(F("# GPS seeded from Pi/SIM7600E"));
 }
 
 double GPSHandler::getLatitude() {
