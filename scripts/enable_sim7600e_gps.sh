@@ -33,80 +33,60 @@ info() { echo -e "${CYN}>> $*${RST}"; }
 ok()   { echo -e "${GRN}✓  $*${RST}"; }
 warn() { echo -e "${YEL}⚠  $*${RST}"; }
 
-send_at() {
-    # send_at <command> [<wait_seconds>]
-    local cmd="$1"
-    local wait="${2:-$TIMEOUT}"
-    local resp
-
-    # Use a file descriptor so we don't re-open the port each time
-    resp=$(timeout "$wait" bash -c "
-        exec 3<>\"$AT_PORT\"
-        stty -F \"$AT_PORT\" $BAUD raw -echo -echoe -echok
-        printf '%s\r\n' '$cmd' >&3
-        sleep 0.3
-        cat <&3 &
-        CAT_PID=\$!
-        sleep $wait
-        kill \$CAT_PID 2>/dev/null || true
-        exec 3>&-
-    " 2>/dev/null || true)
-
-    echo "$resp"
-}
-
-send_at_clean() {
-    # Send AT command and capture response cleanly
-    local cmd="$1"
-    local wait="${2:-$TIMEOUT}"
-
-    stty -F "$AT_PORT" "$BAUD" raw -echo -echoe -echok 2>/dev/null || true
-
-    {
-        printf '%s\r\n' "$cmd"
-        sleep "$wait"
-    } > "$AT_PORT" &
-    local WRITE_PID=$!
-
-    local resp=""
-    resp=$(timeout "$((wait + 1))" cat "$AT_PORT" 2>/dev/null || true)
-    wait "$WRITE_PID" 2>/dev/null || true
-
-    echo "$resp"
-}
-
-# Cleaner AT send using stty + direct read
+# ---- AT command via python3 + pyserial ----------------------
+# Much more reliable than stty + shell redirects on USB-serial.
 at_cmd() {
     local cmd="$1"
     local wait="${2:-$TIMEOUT}"
-    local resp=""
-
-    # Configure port
-    stty -F "$AT_PORT" "$BAUD" raw -echo -echoe -echok 2>/dev/null || die "Cannot configure $AT_PORT"
-
-    # Flush input
-    timeout 0.2 cat "$AT_PORT" > /dev/null 2>&1 || true
-
-    # Send command
-    printf '%s\r\n' "$cmd" > "$AT_PORT"
-
-    # Read response
-    local end_time=$(( $(date +%s) + wait + 1 ))
-    while [ "$(date +%s)" -lt "$end_time" ]; do
-        local chunk
-        chunk=$(timeout 1 head -c 512 "$AT_PORT" 2>/dev/null || true)
-        resp+="$chunk"
-        if echo "$resp" | grep -qE '(OK|ERROR|\+CME ERROR)'; then
-            break
-        fi
-    done
-
-    echo "$resp"
+    python3 -c "
+import serial, sys, time
+try:
+    ser = serial.Serial('$AT_PORT', $BAUD, timeout=0.5, write_timeout=1,
+                        rtscts=False, dsrdtr=False)
+except Exception as e:
+    print(f'__PORT_ERROR__:{e}', file=sys.stderr)
+    sys.exit(1)
+try:
+    ser.reset_input_buffer()
+    ser.write(b'${cmd}\r\n')
+    resp = b''
+    deadline = time.time() + float($wait)
+    while time.time() < deadline:
+        n = ser.in_waiting
+        if n:
+            resp += ser.read(n)
+            if b'OK' in resp or b'ERROR' in resp:
+                break
+        time.sleep(0.05)
+    print(resp.decode('utf-8', errors='ignore'))
+finally:
+    ser.close()
+" 2>&1
 }
 
 # ---- pre-flight checks -------------------------------------
 [ "$(id -u)" -eq 0 ] || die "Run as root:  sudo $0"
 [ -e "$AT_PORT" ]    || die "AT port $AT_PORT not found. Is SIM7600E connected via USB?"
+
+# Check python3 + pyserial are available
+python3 -c 'import serial' 2>/dev/null || die "pyserial not installed. Run: pip3 install pyserial"
+
+# Check if ModemManager or another process is holding the port
+if command -v fuser &>/dev/null; then
+    PIDS=$(fuser "$AT_PORT" 2>/dev/null || true)
+    if [ -n "$PIDS" ]; then
+        PROCS=$(ps -p ${PIDS// /,} -o comm= 2>/dev/null || echo "unknown")
+        warn "Port $AT_PORT is held by: $PROCS (PIDs: $PIDS)"
+        if echo "$PROCS" | grep -qi 'ModemManager'; then
+            info "Stopping ModemManager to release the port..."
+            systemctl stop ModemManager 2>/dev/null || true
+            sleep 1
+            ok "ModemManager stopped"
+        else
+            warn "Another process holds the port — will try anyway"
+        fi
+    fi
+fi
 
 # ---- parse args ---------------------------------------------
 MODE="enable"
