@@ -170,7 +170,11 @@ void MotorControl::stop() {
 bool MotorControl::isRunning() const {
     return (speedLeft != 0 || speedRight != 0);
 }
-
+bool MotorControl::isMovingForward() const {
+    // True only when BOTH motors are driving forward (positive speed).
+    // Reverse, turns, and arcs are NOT considered "forward".
+    return speedLeft > 0 && speedRight > 0;
+}
 void MotorControl::setMotors(int left, int right) {
     left = constrain(left, -MAX_SPEED, MAX_SPEED);
     right = constrain(right, -MAX_SPEED, MAX_SPEED);

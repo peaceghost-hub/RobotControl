@@ -241,8 +241,10 @@ class Compass:
         if x == 0 and y == 0:
             return 0.0
 
-        # Correct heading formula
-        heading = math.atan2(y, x)
+        # Heading formula: atan2(Y, X)
+        # Y-axis is physically inverted (points LEFT instead of RIGHT),
+        # so negate Y to correct the heading direction.
+        heading = math.atan2(-y, x)
 
         # Apply declination (already in radians)
         heading += self.declination

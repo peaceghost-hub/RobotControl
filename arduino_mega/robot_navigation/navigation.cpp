@@ -1,5 +1,11 @@
 /*
- * Navigation Implementation
+ * Navigation Implementation — v2
+ *
+ * 3-Phase steering with PD controller, simplified obstacle avoidance,
+ * heading freshness watchdog, stall detection, consecutive-arrival,
+ * adaptive speed, GPS speed gate.
+ *
+ * GOLDEN RULE: Every handler < 100 µs.  Zero delay().  Zero blocking.
  */
 
 #include "navigation.h"
@@ -11,31 +17,51 @@
 #define RAD_TO_DEG (180.0/PI)
 #endif
 
+// ===================== Constructor =====================
+
 Navigation::Navigation() {
     waypointCount = 0;
     currentWaypointIndex = 0;
     navigationActive = false;
-    obstacleDetectedTime = 0;
-    inAvoidanceMode = false;
+    navState = NAV_IDLE;
+    stateEntryTime = 0;
+    currentHeading = 0.0f;
+    lastHeadingUpdateMs = 0;
+    lastHeadingError = 0.0f;
+    consecutiveArrivals = 0;
+    avoidAttempts = 0;
+    avoidTurnDir = 1;
+    stallCheckLat = 0.0;
+    stallCheckLon = 0.0;
+    stallCheckTime = 0;
+    stallRecoveries = 0;
+    lastGoodBearing = 0.0f;
+    lastBearingValid = false;
+    navStartTime = 0;
     historyCount = 0;
     currentHistoryIndex = 0;
     returningToStart = false;
-    currentHeading = 0.0;
-    lastPositionSave = 0;
     waypointJustCompleted = false;
     lastCompletedWaypointId = -1;
-    savedTargetBearing = 0.0;
-    avoidStep = AV_IDLE;
-    avoidStepTime = 0;
-    avoidTurnDirection = 0;
-    avoidTurnAngle = 0;
+    lastPositionSave = 0;
 }
+
+// ===================== Setup =====================
 
 void Navigation::begin(GPSHandler* g, MotorControl* m, ObstacleAvoidance* o) {
     gps = g;
     motors = m;
     obstacleAvoid = o;
 }
+
+// ===================== Heading from Pi =====================
+
+void Navigation::setHeading(float h) {
+    currentHeading = h;
+    lastHeadingUpdateMs = millis();   // freshness timestamp
+}
+
+// ===================== Waypoint Management =====================
 
 void Navigation::addWaypoint(double lat, double lon, int id) {
     if (waypointCount < MAX_WAYPOINTS) {
@@ -60,341 +86,524 @@ int Navigation::getCurrentWaypointIndex() {
     return currentWaypointIndex;
 }
 
+// ===================== Navigation Control =====================
+
 void Navigation::start() {
     navigationActive = true;
     currentWaypointIndex = 0;
+    navStartTime = millis();
+    resetWaypointCounters();
+    lastHeadingError = 0.0f;
+    lastBearingValid = false;
+    enterState(NAV_DRIVE_TO_TARGET);
+    Serial.println(F("# NAV: started"));
 }
 
 void Navigation::stop() {
     navigationActive = false;
-    inAvoidanceMode = false;
-    avoidStep = AV_IDLE;          // Cancel any in-progress obstacle avoidance
+    enterState(NAV_IDLE);
     motors->stop();
+    Serial.println(F("# NAV: stopped"));
 }
 
 void Navigation::resume() {
     if (waypointCount > 0 && currentWaypointIndex < waypointCount) {
         navigationActive = true;
+        enterState(NAV_DRIVE_TO_TARGET);
     }
 }
 
 void Navigation::pause() {
     navigationActive = false;
+    enterState(NAV_IDLE);
 }
 
+bool Navigation::isComplete() {
+    return (navState == NAV_COMPLETE) || (currentWaypointIndex >= waypointCount);
+}
+
+Navigation::NavState Navigation::getNavState() const {
+    return navState;
+}
+
+// ===================== State machine helpers =====================
+
+void Navigation::enterState(NavState newState) {
+    navState = newState;
+    stateEntryTime = millis();
+}
+
+void Navigation::resetWaypointCounters() {
+    consecutiveArrivals = 0;
+    avoidAttempts = 0;
+    stallRecoveries = 0;
+    stallCheckTime = millis();
+    if (gps && gps->isValid()) {
+        stallCheckLat = gps->getLatitude();
+        stallCheckLon = gps->getLongitude();
+    }
+}
+
+float Navigation::normalizeHeadingError(float error) {
+    while (error > 180.0f)  error -= 360.0f;
+    while (error < -180.0f) error += 360.0f;
+    return error;
+}
+
+int Navigation::speedForDistance(double distance) {
+    if (distance > SLOWDOWN_RADIUS_FAR)  return motors->getAutoBaseSpeed();  // default 120
+    if (distance > SLOWDOWN_RADIUS_NEAR) return 100;
+    return 80;
+}
+
+// ===================== Main Update =====================
+
 void Navigation::update() {
+    // ---- Gate: must be active with valid GPS ----
     if (!navigationActive || !gps->isValid()) {
         return;
     }
 
-    // If obstacle avoidance state machine is active, run it instead of navigation
-    if (avoidStep != AV_IDLE) {
-        handleObstacleAvoidance();
+    const unsigned long now = millis();
+
+    // ---- SAFETY: Heading freshness watchdog ----
+    // If Pi hasn't sent a heading in 500 ms, something is wrong.
+    // Driving with stale heading = driving blind → stop immediately.
+    if (lastHeadingUpdateMs > 0 && (now - lastHeadingUpdateMs > HEADING_STALE_LIMIT)) {
+        // Only stop + warn if we were actively driving
+        if (navState == NAV_TURN_TO_TARGET || navState == NAV_DRIVE_TO_TARGET) {
+            motors->stop();
+            static unsigned long lastStaleWarn = 0;
+            if (now - lastStaleWarn > 3000) {
+                Serial.println(F("# NAV: heading STALE — motors stopped"));
+                lastStaleWarn = now;
+            }
+        }
+        return;  // Skip this cycle — heading is not fresh
+    }
+
+    // ---- SAFETY: Navigation timeout (10 min) ----
+    if (now - navStartTime > NAV_TIMEOUT) {
+        Serial.println(F("# NAV: TIMEOUT — stopping"));
+        stop();
+        navigationActive = false;
         return;
     }
-    
-    // CRITICAL: Check for obstacles FIRST - highest priority!
-    // Stop immediately if obstacle detected during autonomous navigation
-    if (obstacleAvoid->isObstacleDetected()) {
-        motors->stop();  // Immediate stop before handling avoidance
-        handleObstacleAvoidance();  // Enters AV_STOP_PAUSE on first call
-        return;
+
+    // ---- SAFETY: Stall detection ----
+    // Only check during active forward motion states
+    if (navState == NAV_TURN_TO_TARGET || navState == NAV_DRIVE_TO_TARGET) {
+        if (now - stallCheckTime > STALL_CHECK_INTERVAL) {
+            double curLat = gps->getLatitude();
+            double curLon = gps->getLongitude();
+            double moved = calculateDistance(stallCheckLat, stallCheckLon, curLat, curLon);
+
+            // Update checkpoint for next interval
+            stallCheckLat = curLat;
+            stallCheckLon = curLon;
+            stallCheckTime = now;
+
+            if (moved < STALL_DISTANCE) {
+                stallRecoveries++;
+                Serial.print(F("# NAV: STALL detected (moved "));
+                Serial.print((float)moved, 1);
+                Serial.print(F("m) — recovery #"));
+                Serial.println(stallRecoveries);
+
+                if (stallRecoveries > MAX_STALL_RECOVERIES) {
+                    Serial.println(F("# NAV: too many stalls — skipping waypoint"));
+                    advanceWaypoint();
+                    return;
+                }
+
+                // Enter stall recovery: reverse briefly
+                motors->stop();
+                enterState(NAV_STALLED);
+                return;
+            }
+        }
     }
-    
-    // Periodically save position for RETURN feature
-    if (millis() - lastPositionSave >= 5000) {
+
+    // ---- Periodically save position for RETURN feature ----
+    if (now - lastPositionSave >= 5000) {
         saveCurrentPosition();
-        lastPositionSave = millis();
+        lastPositionSave = now;
     }
-    
-    // If we were in avoidance mode, resume normal navigation
-    if (inAvoidanceMode) {
-        inAvoidanceMode = false;
-        Serial.println(F("# Obstacle cleared, resuming navigation"));
-    }
-    
-    // Handle RETURN mode if active
+
+    // ---- Handle RETURN mode ----
     if (returningToStart) {
         handleReturnNavigation();
         return;
     }
 
-    // Navigate to current waypoint (heading from Pi)
-    navigateToWaypoint();
-}
+    // ---- OBSTACLE CHECK — highest priority (except during avoidance) ----
+    if (navState != NAV_AVOID_STOP && navState != NAV_AVOID_TURN &&
+        navState != NAV_AVOID_DRIVE && navState != NAV_AVOID_RECHECK &&
+        navState != NAV_STALLED) {
+        if (obstacleAvoid->isObstacleDetected()) {
+            motors->stop();
+            avoidAttempts++;
+            Serial.print(F("# NAV: obstacle! attempt #"));
+            Serial.println(avoidAttempts);
 
-bool Navigation::isComplete() {
-    return (currentWaypointIndex >= waypointCount);
-}
-
-void Navigation::navigateToWaypoint() {
-    if (currentWaypointIndex >= waypointCount) {
-        return;
+            if (avoidAttempts > MAX_AVOID_ATTEMPTS) {
+                Serial.println(F("# NAV: too many obstacles — skipping waypoint"));
+                advanceWaypoint();
+                return;
+            }
+            // Alternate turn direction each attempt
+            avoidTurnDir = (avoidAttempts % 2 == 1) ? 1 : -1;
+            enterState(NAV_AVOID_STOP);
+            return;
+        }
     }
-    
-    Waypoint& current = waypoints[currentWaypointIndex];
-    
-    // Get current position
-    double currentLat = gps->getLatitude();
-    double currentLon = gps->getLongitude();
-    
-    // Calculate distance to waypoint
-    double distance = calculateDistance(currentLat, currentLon, 
-                                      current.latitude, current.longitude);
-    
-    // Check if waypoint reached
-    if (distance < WAYPOINT_RADIUS) {
-        current.reached = true;
-        motors->stop();
-        
-        Serial.print(F("# Waypoint "));
-        Serial.print(currentWaypointIndex + 1);
-        Serial.println(F(" reached!"));
-        
-        // Set completion flag for status reporting
-        // Pi reads this via CMD_REQUEST_STATUS → prepareStatusResponse()
-        waypointJustCompleted = true;
-        lastCompletedWaypointId = current.id;
-        
-        currentWaypointIndex++;
-        
-        if (currentWaypointIndex >= waypointCount) {
+
+    // ---- Run current state handler ----
+    switch (navState) {
+        case NAV_TURN_TO_TARGET:    handleTurnToTarget();    break;
+        case NAV_DRIVE_TO_TARGET:   handleDriveToTarget();   break;
+        case NAV_WAYPOINT_REACHED:  handleWaypointReached(); break;
+        case NAV_AVOID_STOP:        handleAvoidStop();       break;
+        case NAV_AVOID_TURN:        handleAvoidTurn();       break;
+        case NAV_AVOID_DRIVE:       handleAvoidDrive();      break;
+        case NAV_AVOID_RECHECK:     handleAvoidRecheck();    break;
+        case NAV_STALLED:           handleStalled();         break;
+
+        case NAV_COMPLETE:
+            // All waypoints done — stop motors, set flag
+            motors->stop();
             navigationActive = false;
-        }
-        
+            break;
+
+        case NAV_IDLE:
+        default:
+            break;
+    }
+}
+
+// ================================================================
+//  PHASE 1 (legacy): Turn-to-target is now handled INSIDE
+//  handleDriveToTarget via graduated arc steering.
+//  The state NAV_TURN_TO_TARGET is kept for API compat but
+//  immediately falls through to NAV_DRIVE_TO_TARGET.
+// ================================================================
+
+void Navigation::handleTurnToTarget() {
+    // Legacy state — redirect to unified drive handler.
+    // This prevents any rotation-in-place behavior.
+    enterState(NAV_DRIVE_TO_TARGET);
+}
+
+// ================================================================
+//  PHASE 2+3: PD proportional steering (+ deadband)
+// ================================================================
+
+void Navigation::handleDriveToTarget() {
+    if (currentWaypointIndex >= waypointCount) {
+        enterState(NAV_COMPLETE);
         return;
     }
-    
-    // Calculate bearing to waypoint
-    double targetBearing = calculateBearing(currentLat, currentLon,
-                                          current.latitude, current.longitude);
-    
-    // Get current heading (from Pi compass via setHeading)
-    float heading = currentHeading;
-    
-    // Adjust motors to follow bearing
-    motors->adjustForHeading(heading, (float)targetBearing);
-    
-    // Debug output (reliable timer instead of millis() modulo trick)
-    static unsigned long lastNavDebug = 0;
-    if (millis() - lastNavDebug >= 5000) {
-        lastNavDebug = millis();
-        Serial.print(F("# Dist: "));
+
+    Waypoint& wp = waypoints[currentWaypointIndex];
+    double curLat = gps->getLatitude();
+    double curLon = gps->getLongitude();
+
+    // --- Distance ---
+    double distance = calculateDistance(curLat, curLon, wp.latitude, wp.longitude);
+
+    // --- Waypoint reached check (consecutive confirmation) ---
+    if (distance < WAYPOINT_RADIUS) {
+        consecutiveArrivals++;
+        if (consecutiveArrivals >= CONSECUTIVE_ARRIVALS) {
+            motors->stop();
+            enterState(NAV_WAYPOINT_REACHED);
+            return;
+        }
+    } else {
+        consecutiveArrivals = 0;
+    }
+
+    // --- Bearing to waypoint (with speed gate) ---
+    float targetBearing;
+    float gpsSpeed = gps->getSpeed();
+
+    if (gpsSpeed < SPEED_GATE_THRESHOLD && lastBearingValid) {
+        // Nearly stationary — hold last known good bearing to prevent jitter
+        targetBearing = lastGoodBearing;
+    } else {
+        targetBearing = (float)calculateBearing(curLat, curLon, wp.latitude, wp.longitude);
+        lastGoodBearing = targetBearing;
+        lastBearingValid = true;
+    }
+
+    // --- Heading error ---
+    float error = normalizeHeadingError(targetBearing - currentHeading);
+    float absError = fabsf(error);
+
+    // --- Adaptive base speed ---
+    int baseSpeed = speedForDistance(distance);
+
+    // --- Graduated Steering (no rotation-in-place, always forward progress) ---
+    if (absError < HEADING_DEADBAND) {
+        // PHASE 3: Deadband — drive straight
+        motors->setMotors(baseSpeed, baseSpeed);
+    } else if (absError >= TURN_IN_PLACE_THRESH) {
+        // LARGE ERROR (>25°): Sharp arc — outer motor forward, inner motor STOPPED
+        // Robot arcs tightly toward target while still making forward progress.
+        // No counter-rotation, no spin, no compass-lag oscillation.
+        int outerSpeed = constrain(baseSpeed, MIN_TURN_SPEED, MAX_TURN_SPEED);
+        if (error > 0) {
+            // Target RIGHT → left motor forward, right motor stopped
+            motors->setMotors(outerSpeed, 0);
+        } else {
+            // Target LEFT → right motor forward, left motor stopped
+            motors->setMotors(0, outerSpeed);
+        }
+    } else {
+        // PHASE 2 (5°–25°): PD proportional steering
+        float dError = error - lastHeadingError;
+        float correction = (STEERING_KP * error) + (STEERING_KD * dError);
+        int corr = constrain((int)correction, -STEERING_MAX_CORRECTION, STEERING_MAX_CORRECTION);
+
+        int leftSpeed  = baseSpeed + corr;
+        int rightSpeed = baseSpeed - corr;
+
+        motors->setMotors(leftSpeed, rightSpeed);
+    }
+
+    lastHeadingError = error;
+
+    // Debug (rate-limited)
+    static unsigned long lastDbg = 0;
+    if (millis() - lastDbg >= 5000) {
+        lastDbg = millis();
+        Serial.print(F("# DRIVE: dist="));
         Serial.print((float)distance, 1);
-        Serial.print(F("m, Bearing: "));
-        Serial.print((float)targetBearing, 1);
-        Serial.print(F("°, Heading: "));
-        Serial.print(heading, 1);
-        Serial.println(F("°"));
+        Serial.print(F("m brg="));
+        Serial.print(targetBearing, 1);
+        Serial.print(F(" hdg="));
+        Serial.print(currentHeading, 1);
+        Serial.print(F(" err="));
+        Serial.print(error, 1);
+        Serial.print(F(" spd="));
+        Serial.println(baseSpeed);
     }
 }
 
-void Navigation::handleObstacleAvoidance() {
-    // ================================================================
-    // NON-BLOCKING obstacle avoidance state machine.
-    // Each call runs < 1 ms — never blocks the main loop / I2C / heartbeat.
-    // ================================================================
-    const unsigned long now = millis();
+// ================================================================
+//  Waypoint Reached — advance to next
+// ================================================================
 
-    // ---------- First entry: initialise ----------
-    if (avoidStep == AV_IDLE) {
-        inAvoidanceMode = true;
-        obstacleDetectedTime = now;
+void Navigation::handleWaypointReached() {
+    // Brief stop already happened when we entered this state
+    advanceWaypoint();
+}
 
-        // Save current target bearing so we can resume toward waypoint later
-        if (currentWaypointIndex < waypointCount) {
-            double lat = gps->getLatitude();
-            double lon = gps->getLongitude();
-            Waypoint& target = waypoints[currentWaypointIndex];
-            savedTargetBearing = (float)calculateBearing(lat, lon, target.latitude, target.longitude);
-        }
+void Navigation::advanceWaypoint() {
+    if (currentWaypointIndex < waypointCount) {
+        waypoints[currentWaypointIndex].reached = true;
 
-        Serial.print(F("# Obstacle detected at "));
-        Serial.print(obstacleAvoid->getDistance());
-        Serial.println(F("cm — non-blocking avoidance started"));
+        Serial.print(F("# NAV: Waypoint "));
+        Serial.print(currentWaypointIndex + 1);
+        Serial.print(F("/"));
+        Serial.print(waypointCount);
+        Serial.println(F(" reached!"));
 
+        waypointJustCompleted = true;
+        lastCompletedWaypointId = waypoints[currentWaypointIndex].id;
+
+        currentWaypointIndex++;
+    }
+
+    if (currentWaypointIndex >= waypointCount) {
+        Serial.println(F("# NAV: ALL waypoints complete!"));
+        enterState(NAV_COMPLETE);
+        navigationActive = false;
+    } else {
+        // Reset per-waypoint counters for the next waypoint
+        resetWaypointCounters();
+        lastHeadingError = 0.0f;
+        lastBearingValid = false;
+        enterState(NAV_DRIVE_TO_TARGET);
+    }
+}
+
+// ================================================================
+//  Obstacle Avoidance — 4 states, alternating direction
+//  Each handler runs < 100 µs.  NEVER blocks.
+// ================================================================
+
+void Navigation::handleAvoidStop() {
+    // Wait for settle period
+    if (millis() - stateEntryTime >= AVOID_STOP_DURATION) {
+        // Start turning away — direction alternates per attempt
+        int turnDeg = avoidTurnDir * 80;  // ~80° turn
+        motors->startTurnDegrees(turnDeg, AVOID_TURN_SPEED);
+
+        Serial.print(F("# AVOID: turning "));
+        Serial.print(turnDeg > 0 ? F("RIGHT ") : F("LEFT "));
+        Serial.print(abs(turnDeg));
+        Serial.println(F("°"));
+
+        enterState(NAV_AVOID_TURN);
+    }
+}
+
+void Navigation::handleAvoidTurn() {
+    if (motors->isTurnComplete()) {
+        // Drive past the obstacle
+        Serial.println(F("# AVOID: driving past"));
+        motors->startTimedForward(AVOID_DRIVE_SPEED, AVOID_DRIVE_DURATION);
+        enterState(NAV_AVOID_DRIVE);
+    }
+}
+
+void Navigation::handleAvoidDrive() {
+    if (motors->isTimedForwardComplete()) {
+        // Stop and prepare to recheck
         motors->stop();
-        avoidStep = AV_STOP_PAUSE;
-        avoidStepTime = now;
+        enterState(NAV_AVOID_RECHECK);
+    }
+}
+
+void Navigation::handleAvoidRecheck() {
+    // Settle time before recheck
+    if (millis() - stateEntryTime < AVOID_RECHECK_SETTLE) return;
+
+    // Force a fresh ultrasonic reading
+    obstacleAvoid->update();
+    int dist = obstacleAvoid->getDistance();
+
+    if (dist > 0 && dist < OBSTACLE_TRIGGER_CM) {
+        // Still blocked
+        Serial.println(F("# AVOID: still blocked after manoeuvre"));
+        if (avoidAttempts >= MAX_AVOID_ATTEMPTS) {
+            Serial.println(F("# AVOID: max attempts — skipping waypoint"));
+            advanceWaypoint();
+        } else {
+            // Try again with opposite direction
+            avoidAttempts++;
+            avoidTurnDir = -avoidTurnDir;
+            motors->stop();
+            enterState(NAV_AVOID_STOP);
+        }
+    } else {
+        // Clear — resume navigation (recalculates bearing automatically)
+        Serial.println(F("# AVOID: clear — resuming navigation"));
+        enterState(NAV_DRIVE_TO_TARGET);
+    }
+}
+
+// ================================================================
+//  Stall Recovery — reverse briefly, then retry
+// ================================================================
+
+void Navigation::handleStalled() {
+    unsigned long elapsed = millis() - stateEntryTime;
+
+    if (elapsed < STALL_REVERSE_DURATION) {
+        // Reverse at moderate speed
+        motors->setMotors(-100, -100);
+    } else {
+        // Done reversing — resume navigation
+        motors->stop();
+        Serial.println(F("# STALL: recovery done, resuming"));
+        stallCheckTime = millis();
+        stallCheckLat = gps->getLatitude();
+        stallCheckLon = gps->getLongitude();
+        enterState(NAV_DRIVE_TO_TARGET);
+    }
+}
+
+// ================================================================
+//  Return-to-Start Navigation
+// ================================================================
+
+void Navigation::handleReturnNavigation() {
+    if (historyCount == 0) {
+        returningToStart = false;
+        motors->stop();
         return;
     }
 
-    switch (avoidStep) {
+    // Choose the oldest point as the start
+    int idx = (historyCount < MAX_HISTORY_POINTS) ? 0 : currentHistoryIndex;
+    HistoryPoint target = history[idx];
 
-    // ---- 1. Brief 500 ms pause for sensor stability ----
-    case AV_STOP_PAUSE:
-        if (now - avoidStepTime >= 500) {
-            // No servo scanner — turn robot body right 90° to find clear path.
-            // The fixed-mount ultrasonic will face the new direction after the turn.
-            Serial.println(F("# Turning right 90° to find clear path"));
-            avoidTurnDirection = 1;
-            avoidTurnAngle = 90;
-            motors->startTurnDegrees(90, 140);
-            avoidStep = AV_TURN;
-            avoidStepTime = now;
-        }
-        break;
+    double lat = gps->getLatitude();
+    double lon = gps->getLongitude();
+    double distance = calculateDistance(lat, lon, target.latitude, target.longitude);
 
-    // ---- 3a. Waiting for the primary 90° turn to finish ----
-    case AV_TURN:
-        if (motors->isTurnComplete()) {
-            // Move forward cautiously for 1.5 s to clear obstacle zone
-            Serial.println(F("# Moving forward to clear obstacle zone"));
-            motors->startTimedForward(100, 1500);
-            avoidStep = AV_FORWARD;
-            avoidStepTime = now;
-        }
-        break;
-
-    // ---- 4. Moving forward after turn ----
-    case AV_FORWARD:
-        if (motors->isTimedForwardComplete()) {
-            // Pause 300 ms then recheck
-            motors->stop();
-            avoidStep = AV_FORWARD_PAUSE;
-            avoidStepTime = now;
-        }
-        break;
-
-    // ---- 5. Brief pause before recheck ----
-    case AV_FORWARD_PAUSE:
-        if (now - avoidStepTime >= 300) {
-            obstacleAvoid->update();
-            avoidStep = AV_RECHECK;
-            avoidStepTime = now;
-        }
-        break;
-
-    // ---- 6. Recheck if still blocked ----
-    case AV_RECHECK: {
-        obstacleAvoid->update();
-        int finalCheck = obstacleAvoid->getDistance();
-        if (finalCheck > 0 && finalCheck < OBSTACLE_CRITICAL_DISTANCE) {
-            // Still blocked — escalate to sharp right 120° turn
-            Serial.println(F("# Still blocked — trying sharp right 120°"));
-            motors->startTurnDegrees(120, 140);
-            avoidStep = AV_SHARP_RIGHT_TURN;
-            avoidStepTime = now;
-        } else {
-            avoidStep = AV_DONE;
-        }
-        break;
+    if (distance < WAYPOINT_RADIUS) {
+        returningToStart = false;
+        motors->stop();
+        Serial.println(F("# Returned to start"));
+        return;
     }
 
-    // ---- Sharp right 120° turn ----
-    case AV_SHARP_RIGHT_TURN:
-        if (motors->isTurnComplete()) {
-            // Pause + recheck
-            avoidStep = AV_SHARP_RIGHT_CHECK;
-            avoidStepTime = now;
-        }
-        break;
+    double bearing = calculateBearing(lat, lon, target.latitude, target.longitude);
+    float error = normalizeHeadingError((float)bearing - currentHeading);
 
-    case AV_SHARP_RIGHT_CHECK: {
-        if (now - avoidStepTime < 300) break;  // 300 ms pause
-        obstacleAvoid->update();
-        int checkDist = obstacleAvoid->getDistance();
-        if (checkDist == -1 || checkDist > OBSTACLE_SAFE_DISTANCE) {
-            Serial.println(F("# Sharp right turn successful"));
-            // Move forward cautiously
-            motors->startTimedForward(100, 1500);
-            avoidStep = AV_FORWARD;
-            avoidStepTime = now;
+    // Use the same 3-phase approach for return navigation
+    int baseSpeed = speedForDistance(distance);
+
+    if (fabsf(error) > TURN_IN_PLACE_THRESH) {
+        // Turn in place first
+        int turnSpeed = map(constrain((int)fabsf(error), 25, 180),
+                            25, 180, MIN_TURN_SPEED, MAX_TURN_SPEED);
+        if (error > 0) {
+            motors->setMotors(turnSpeed, -turnSpeed);
         } else {
-            // Undo sharp right: turn back -120°
-            Serial.println(F("# Sharp right failed, undoing..."));
-            motors->startTurnDegrees(-120, 140);
-            avoidStep = AV_UNDO_SHARP_RIGHT;
-            avoidStepTime = now;
+            motors->setMotors(-turnSpeed, turnSpeed);
         }
-        break;
-    }
-
-    case AV_UNDO_SHARP_RIGHT:
-        if (motors->isTurnComplete()) {
-            // Now try sharp left -120°
-            Serial.println(F("# Attempting sharp LEFT 120°"));
-            motors->startTurnDegrees(-120, 140);
-            avoidStep = AV_SHARP_LEFT_TURN;
-            avoidStepTime = now;
-        }
-        break;
-
-    case AV_SHARP_LEFT_TURN:
-        if (motors->isTurnComplete()) {
-            avoidStep = AV_SHARP_LEFT_CHECK;
-            avoidStepTime = now;
-        }
-        break;
-
-    case AV_SHARP_LEFT_CHECK: {
-        if (now - avoidStepTime < 300) break;
-        obstacleAvoid->update();
-        int checkDist = obstacleAvoid->getDistance();
-        if (checkDist == -1 || checkDist > OBSTACLE_SAFE_DISTANCE) {
-            Serial.println(F("# Sharp left turn successful"));
-            motors->startTimedForward(100, 1500);
-            avoidStep = AV_FORWARD;
-            avoidStepTime = now;
-        } else {
-            Serial.println(F("# No clear path found — staying stopped"));
-            motors->stop();
-            avoidStep = AV_IDLE;
-            // inAvoidanceMode stays true
-        }
-        break;
-    }
-
-    // ---- Done: obstacle cleared, resume navigation ----
-    case AV_DONE:
-        Serial.println(F("# Obstacle cleared, resuming navigation to waypoint"));
-        inAvoidanceMode = false;
-        avoidStep = AV_IDLE;
-        break;
-
-    default:
-        avoidStep = AV_IDLE;
-        break;
+    } else if (fabsf(error) < HEADING_DEADBAND) {
+        motors->setMotors(baseSpeed, baseSpeed);
+    } else {
+        float correction = STEERING_KP * error;
+        int corr = constrain((int)correction, -STEERING_MAX_CORRECTION, STEERING_MAX_CORRECTION);
+        motors->setMotors(baseSpeed + corr, baseSpeed - corr);
     }
 }
+
+// ================================================================
+//  Haversine Distance (meters)
+// ================================================================
 
 double Navigation::calculateDistance(double lat1, double lon1, double lat2, double lon2) {
-    // Haversine formula — double precision required for GPS coordinates
-    const double R = 6371000.0; // Earth radius in meters
-    
+    const double R = 6371000.0;
+
     double dLat = (lat2 - lat1) * DEG_TO_RAD;
     double dLon = (lon2 - lon1) * DEG_TO_RAD;
-    
-    double a = sin(dLat/2.0) * sin(dLat/2.0) +
-              cos(lat1 * DEG_TO_RAD) * cos(lat2 * DEG_TO_RAD) *
-              sin(dLon/2.0) * sin(dLon/2.0);
-    
-    double c = 2.0 * atan2(sqrt(a), sqrt(1.0-a));
-    
+
+    double a = sin(dLat / 2.0) * sin(dLat / 2.0) +
+               cos(lat1 * DEG_TO_RAD) * cos(lat2 * DEG_TO_RAD) *
+               sin(dLon / 2.0) * sin(dLon / 2.0);
+
+    double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
+
     return R * c;
 }
 
+// ================================================================
+//  Bearing (degrees 0-360, true north)
+// ================================================================
+
 double Navigation::calculateBearing(double lat1, double lon1, double lat2, double lon2) {
-    // Calculate bearing between two points — double precision
     double dLon = (lon2 - lon1) * DEG_TO_RAD;
-    
+
     double y = sin(dLon) * cos(lat2 * DEG_TO_RAD);
     double x = cos(lat1 * DEG_TO_RAD) * sin(lat2 * DEG_TO_RAD) -
-              sin(lat1 * DEG_TO_RAD) * cos(lat2 * DEG_TO_RAD) * cos(dLon);
-    
+               sin(lat1 * DEG_TO_RAD) * cos(lat2 * DEG_TO_RAD) * cos(dLon);
+
     double bearing = atan2(y, x) * RAD_TO_DEG;
-    
-    // Normalize to 0-360
     bearing = fmod((bearing + 360.0), 360.0);
-    
+
     return bearing;
 }
 
-// ================= Heading from Pi =================
-
-void Navigation::setHeading(float h) {
-    currentHeading = h;
-}
+// ================================================================
+//  Position History
+// ================================================================
 
 void Navigation::saveCurrentPosition() {
     if (!gps || !gps->isValid()) return;
@@ -424,9 +633,13 @@ void Navigation::clearHistory() {
     currentHistoryIndex = 0;
 }
 
+// ================================================================
+//  GPS data from Pi (SIM7600E seed — also saves to history)
+// ================================================================
+
 void Navigation::updateGpsData(double lat, double lon, float speed, float heading) {
-    // Store heading from Pi for navigation
     currentHeading = heading;
+    lastHeadingUpdateMs = millis();
     (void)speed;
     HistoryPoint p{lat, lon, millis()};
     if (historyCount < MAX_HISTORY_POINTS) {
@@ -437,32 +650,10 @@ void Navigation::updateGpsData(double lat, double lon, float speed, float headin
     }
 }
 
-void Navigation::handleReturnNavigation() {
-    if (historyCount == 0) {
-        returningToStart = false;
-        return;
-    }
-    // Choose the oldest point as the start (index 0 if not wrapped)
-    int idx = (historyCount < MAX_HISTORY_POINTS) ? 0 : currentHistoryIndex;
-    HistoryPoint target = history[idx];
+// ================================================================
+//  Waypoint Completion Tracking
+// ================================================================
 
-    double lat = gps->getLatitude();
-    double lon = gps->getLongitude();
-    double distance = calculateDistance(lat, lon, target.latitude, target.longitude);
-
-    if (distance < WAYPOINT_RADIUS) {
-        returningToStart = false;
-        motors->stop();
-        Serial.println(F("# Returned to start"));
-        return;
-    }
-
-    double bearing = calculateBearing(lat, lon, target.latitude, target.longitude);
-    float heading = currentHeading;  // From Pi compass
-    motors->adjustForHeading(heading, (float)bearing);
-}
-
-// Waypoint completion tracking methods
 bool Navigation::isWaypointJustCompleted() {
     return waypointJustCompleted;
 }

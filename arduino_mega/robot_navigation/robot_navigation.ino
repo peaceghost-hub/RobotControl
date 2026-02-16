@@ -367,10 +367,11 @@ void loop() {
 
   // SAFETY: Emergency obstacle stop — runs ALWAYS, regardless of state.
   // If navigation is active and obstacle detected, navigation.update()
-  // handles avoidance.  But if motors are running for ANY other reason
-  // (manual drive, transition, etc.) we still need to stop on obstacles.
+  // handles avoidance.  But if motors are driving FORWARD for any other
+  // reason (manual drive, etc.) we stop.  Reverse and side turns are
+  // ALLOWED so the user can back away from the obstacle.
   if (obstacleAvoid.isObstacleDetected() && !navigationActive) {
-      if (motors.isRunning()) {
+      if (motors.isMovingForward()) {
           motors.stop();
           DEBUG_SERIAL.println(F("# SAFETY: obstacle stop (non-nav)"));
       }
