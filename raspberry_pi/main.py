@@ -30,6 +30,7 @@ from raspberry_pi.camera.camera_stream import CameraStream
 from raspberry_pi.camera.mjpeg_server import MJPEGServer, update_frame as mjpeg_update_frame
 from raspberry_pi.utils.logger import setup_logger
 from raspberry_pi.utils.data_formatter import DataFormatter
+from raspberry_pi.navigation.nav_controller import NavController
 
 # Configuration
 def _load_config() -> tuple[dict, str]:
@@ -237,6 +238,23 @@ class RobotController:
                 logger.warning(f"Camera not available: {e}")
         
         self.command_poll_interval = CONFIG.get('command_poll_interval', 2)
+
+        # Pi-side Navigation Controller (replaces Mega-side nav)
+        # GPS provider: returns latest SIM7600E position
+        self._latest_gps = {}  # thread-safe via GIL for dict reads
+        self._latest_gps_lock = Lock()
+        self.nav_controller = None
+        if self.compass and self.robot_link:
+            try:
+                self.nav_controller = NavController(
+                    compass=self.compass,
+                    robot_link=self.robot_link,
+                    gps_provider=self._get_nav_gps,
+                    config=CONFIG
+                )
+                logger.info("Pi-side NavController initialized")
+            except Exception as e:
+                logger.warning(f"NavController init failed: {e}")
         
         # Thread management
         self.threads = []
@@ -349,11 +367,12 @@ class RobotController:
             instant_cmd_thread.start()
             self.threads.append(instant_cmd_thread)
 
-            # Start fast compass heading loop (200ms updates for navigation)
-            if self.compass and self.robot_link:
-                compass_thread = Thread(target=self.compass_heading_loop, daemon=True)
-                compass_thread.start()
-                self.threads.append(compass_thread)
+            # Start Pi-side navigation status broadcast loop (always runs —
+            # sends full nav status, compass-only, or heartbeat depending on
+            # which components are available)
+            nav_status_thread = Thread(target=self.nav_status_loop, daemon=True)
+            nav_status_thread.start()
+            self.threads.append(nav_status_thread)
             
             logger.info("All systems started successfully")
             return True
@@ -421,35 +440,82 @@ class RobotController:
             # Wait before next reading
             shutdown_event.wait(self.update_interval)
     
-    def compass_heading_loop(self):
-        """Send compass heading to Mega at high frequency for navigation.
-        
-        Runs at 200ms intervals (5 Hz) so autonomous navigation always has
-        a fresh heading for steering corrections.  This is decoupled from the
-        slow sensor_loop (5 s) which handles dashboard telemetry.
-        """
-        import struct
-        HEADING_INTERVAL = 0.2  # 200 ms
-        logger.info("Starting fast compass heading loop (200 ms interval)...")
+    def _get_nav_gps(self) -> dict:
+        """GPS provider for NavController — returns latest SIM7600E position."""
+        with self._latest_gps_lock:
+            data = self._latest_gps.copy()
+        if data.get('latitude') and data.get('longitude'):
+            return data
+        return None
 
+    def nav_status_loop(self):
+        """Broadcast Pi-side navigation status to dashboard.
+        2 Hz when nav is active, 1 Hz when idle (still shows compass heading).
+        Runs even without NavController — sends compass-only data if available."""
+        logger.info("Starting nav status broadcast loop...")
+        idle_counter = 0
         while not shutdown_event.is_set():
             try:
-                if self.compass and self.robot_link:
-                    heading = self.compass.read_heading()
-                    try:
-                        resp = self.robot_link._exchange(
-                            ord('D'),
-                            struct.pack('<f', float(heading)),
-                            expect=2
-                        )
-                        if not resp or resp[0] != getattr(self.robot_link, 'RESP_ACK', 0x80):
-                            logger.debug("Mega did not ACK heading update")
-                    except Exception as comm_err:
-                        logger.debug(f"Heading forward failed: {comm_err}")
-            except Exception as e:
-                logger.debug(f"Compass heading loop error: {e}")
+                status = None
+                is_active = False
 
-            shutdown_event.wait(HEADING_INTERVAL)
+                if self.nav_controller:
+                    # Full nav status from NavController
+                    is_active = self.nav_controller.is_active
+                    idle_counter += 1
+                    if is_active or idle_counter >= 2:
+                        idle_counter = 0
+                        status = self.nav_controller.get_status()
+                elif self.compass:
+                    # No NavController but compass is available — send heading-only
+                    idle_counter += 1
+                    if idle_counter >= 2:
+                        idle_counter = 0
+                        heading = None
+                        try:
+                            heading = self.compass.read_heading()
+                        except Exception:
+                            pass
+                        status = {
+                            'state': 'IDLE',
+                            'current_heading': round(heading, 1) if heading is not None else None,
+                            'target_bearing': None,
+                            'heading_error': None,
+                            'distance_to_wp': None,
+                            'current_wp_index': 0,
+                            'total_waypoints': 0,
+                        }
+                else:
+                    # Neither NavController nor compass — heartbeat only (every 5s)
+                    idle_counter += 1
+                    if idle_counter >= 10:
+                        idle_counter = 0
+                        status = {
+                            'state': 'IDLE',
+                            'current_heading': None,
+                            'target_bearing': None,
+                            'heading_error': None,
+                            'distance_to_wp': None,
+                            'current_wp_index': 0,
+                            'total_waypoints': 0,
+                        }
+
+                if status is not None:
+                    ts = datetime.utcnow().isoformat()
+                    status['device_id'] = self.device_id
+                    status['timestamp'] = ts
+                    try:
+                        self.api_client.send_event({
+                            'device_id': self.device_id,
+                            'type': 'NAV_STATUS',
+                            'nav': status,
+                            'timestamp': ts,
+                        })
+                    except Exception as exc:
+                        logger.debug("Nav status broadcast failed: %s", exc)
+            except Exception as e:
+                logger.debug("Nav status loop error: %s", e)
+            shutdown_event.wait(0.5)
 
     def gps_loop(self):
         """GPS loop: SIM7600E is the primary GPS source for the dashboard.
@@ -483,6 +549,14 @@ class RobotController:
                             logger.debug(f"Could not forward GPS to Mega: {e}")
                 
                 if gps_data and gps_data.get('latitude') is not None and gps_data.get('longitude') is not None:
+                    # Store for Pi-side nav controller (thread-safe)
+                    with self._latest_gps_lock:
+                        self._latest_gps = {
+                            'latitude': float(gps_data['latitude']),
+                            'longitude': float(gps_data['longitude']),
+                            'speed': float(gps_data.get('speed', 0) or 0),
+                        }
+
                     # Add compass heading (Pi-side) so the dashboard shows heading even when GPS is stationary.
                     if self.compass:
                         try:
@@ -749,13 +823,35 @@ class RobotController:
             if command_type == 'PING':
                 success = self.robot_link.ping() if self.robot_link else False
             elif command_type == 'NAV_START':
-                success = self.robot_link.start_navigation()
+                # Pi-side navigation: start nav controller (NOT Mega)
+                if self.nav_controller:
+                    success = self.nav_controller.start()
+                else:
+                    logger.warning("NavController not available")
+                    success = False
             elif command_type == 'NAV_PAUSE':
-                success = self.robot_link.pause_navigation()
+                if self.nav_controller:
+                    self.nav_controller.pause()
+                    success = True
+                else:
+                    success = False
             elif command_type == 'NAV_RESUME':
-                success = self.robot_link.resume_navigation()
+                if self.nav_controller:
+                    self.nav_controller.resume()
+                    success = True
+                else:
+                    success = False
             elif command_type == 'NAV_STOP':
-                success = self.robot_link.stop_navigation()
+                if self.nav_controller:
+                    self.nav_controller.stop()
+                    success = True
+                else:
+                    success = False
+            elif command_type == 'NAV_ACCEPT_HEADING':
+                if self.nav_controller:
+                    success = self.nav_controller.accept_heading()
+                else:
+                    success = False
             elif command_type == 'MANUAL_DRIVE':
                 success = self._handle_manual_drive(payload)
             elif command_type == 'MANUAL_OVERRIDE':
@@ -899,11 +995,19 @@ class RobotController:
         return bool(self.robot_link.set_auto_speed(speed))
 
     def _handle_waypoint_push(self) -> bool:
+        """Load waypoints from dashboard DB into Pi nav controller (NOT Mega)."""
         waypoints = self.api_client.get_waypoints()
         if not waypoints:
+            logger.warning("No waypoints to load")
             return False
         waypoints = sorted(waypoints, key=lambda w: w.get('sequence', 0))
-        return self.robot_link.send_waypoints(waypoints)
+        if self.nav_controller:
+            self.nav_controller.set_waypoints(waypoints)
+            logger.info("Loaded %d waypoints into Pi NavController", len(waypoints))
+            return True
+        else:
+            logger.warning("NavController not available — cannot load waypoints")
+            return False
     
     def camera_loop(self):
         """Capture and stream camera frames (simple synchronous version)"""

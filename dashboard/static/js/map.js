@@ -320,10 +320,19 @@ function setBackupMapMode(active) {
 // Initialize map when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     // Wait a bit for the map container to be ready
-    setTimeout(initMap, 100);
+    setTimeout(() => {
+        initMap();
+        // Tell Leaflet to recalculate container size after flex layout settles
+        if (map) map.invalidateSize();
+    }, 200);
     
     // Load GPS track history
     setTimeout(loadGPSTrack, 1000);
+});
+
+// Recalculate Leaflet size whenever the window resizes (panels are flex-based)
+window.addEventListener('resize', () => {
+    if (map) map.invalidateSize();
 });
 
 // Export functions to global scope
@@ -332,3 +341,5 @@ window.updateMapWaypoints = updateMapWaypoints;
 window.centerMapOnRobot = centerMapOnRobot;
 window.setBackupMapMode = setBackupMapMode;
 window.showObstacleIndicator = showObstacleIndicator;
+// Expose Leaflet map instance for layout toggle invalidateSize()
+Object.defineProperty(window, 'map', { get: () => map });

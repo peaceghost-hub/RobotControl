@@ -211,6 +211,7 @@ function connectWebSocket() {
         if (data.status) handleStatusUpdate(data.status);
         if (data.camera) handleCameraFrame(data.camera);
         if (data.backup) handleBackupUpdate(data.backup);
+        if (data.nav_status && data.nav_status.nav) updateNavStatusUI(data.nav_status.nav);
     });
     
     socket.on('connection_response', (data) => {
@@ -1420,6 +1421,12 @@ function applyHeadingUpdate(value, source = 'primary') {
     // Keep backup heading label in sync even when only primary data is available.
     updateElement('backup-heading', `${numeric.toFixed(1)}°`);
 
+    // Also feed the compass widget so heading shows even without NAV_STATUS events
+    if (compassState.heading === null || source === 'primary') {
+        compassState.heading = numeric;
+        drawCompass();
+    }
+
     if (!state.latestData.gps) {
         state.latestData.gps = {};
     }
@@ -1461,6 +1468,28 @@ function setupEventListeners() {
             window.location.reload();
         }
     });
+
+    // Layout toggle: fit-screen ↔ scroll
+    const toggleLayoutBtn = document.getElementById('toggle-layout-btn');
+    if (toggleLayoutBtn) {
+        // Restore saved preference
+        const savedLayout = localStorage.getItem('dashboardLayoutMode');
+        if (savedLayout === 'scroll') {
+            document.body.classList.add('layout-scroll');
+            toggleLayoutBtn.textContent = '📐 Scroll';
+            // Leaflet needs a size recalc after switching
+            setTimeout(() => { if (window.map) window.map.invalidateSize(); }, 100);
+        }
+        toggleLayoutBtn.addEventListener('click', () => {
+            const isScroll = document.body.classList.toggle('layout-scroll');
+            toggleLayoutBtn.textContent = isScroll ? '📐 Scroll' : '📐 Fit Screen';
+            localStorage.setItem('dashboardLayoutMode', isScroll ? 'scroll' : 'fit');
+            // Leaflet map must recalculate its container size
+            setTimeout(() => {
+                if (window.map) window.map.invalidateSize();
+            }, 150);
+        });
+    }
 
     // Add waypoint manually
     document.getElementById('add-waypoint-manual-btn').addEventListener('click', () => {
@@ -1508,6 +1537,20 @@ function setupEventListeners() {
     if (navResumeBtn) navResumeBtn.addEventListener('click', () => sendNavigationCommand('resume'));
     const navStopBtn = document.getElementById('nav-stop-btn');
     if (navStopBtn) navStopBtn.addEventListener('click', () => sendNavigationCommand('stop'));
+
+    const acceptHeadingBtn = document.getElementById('accept-heading-btn');
+    if (acceptHeadingBtn) {
+        acceptHeadingBtn.addEventListener('click', () => {
+            if (socket && socket.connected) {
+                socket.emit('instant_command', {
+                    command: 'NAV_ACCEPT_HEADING',
+                    payload: {},
+                    device_id: state.deviceId
+                });
+                addLog('info', 'Instant command: NAV_ACCEPT_HEADING');
+            }
+        });
+    }
 
     const sendWaypointsBtn = document.getElementById('send-waypoints-btn');
     if (sendWaypointsBtn) sendWaypointsBtn.addEventListener('click', sendWaypointsToRobot);
@@ -1737,6 +1780,260 @@ window.addEventListener('beforeunload', () => {
 window.deleteWaypoint = deleteWaypoint;
 window.addLog = addLog;
 
+/* ─── Compass Widget Drawing Engine ─── */
+const compassState = {
+    heading: null,         // current robot heading (degrees)
+    targetBearing: null,   // target waypoint bearing (degrees)
+    headingError: null,    // signed error (degrees)
+    acquired: false,       // heading acquired (error < 5°)
+    navState: 'IDLE',
+    distance: null,
+    waypointIndex: null,
+    waypointTotal: null
+};
+
+function drawCompass() {
+    const canvas = document.getElementById('compass-canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width;
+    const H = canvas.height;
+    const cx = W / 2;
+    const cy = H / 2;
+    const R = Math.min(cx, cy) - 16;
+
+    ctx.clearRect(0, 0, W, H);
+
+    // Outer ring
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, 2 * Math.PI);
+    ctx.strokeStyle = '#d1d5db';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Inner ring
+    ctx.beginPath();
+    ctx.arc(cx, cy, R - 8, 0, 2 * Math.PI);
+    ctx.strokeStyle = '#e5e7eb';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Cardinal labels and tick marks
+    const cardinals = [
+        { label: 'N', angle: 0, color: '#ef4444' },
+        { label: 'E', angle: 90, color: '#6b7280' },
+        { label: 'S', angle: 180, color: '#6b7280' },
+        { label: 'W', angle: 270, color: '#6b7280' }
+    ];
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    cardinals.forEach(c => {
+        const rad = (c.angle - 90) * Math.PI / 180;
+        const lx = cx + (R + 10) * Math.cos(rad);
+        const ly = cy + (R + 10) * Math.sin(rad);
+        ctx.fillStyle = c.color;
+        ctx.fillText(c.label, lx, ly);
+    });
+
+    // Degree ticks every 30°
+    for (let deg = 0; deg < 360; deg += 30) {
+        const rad = (deg - 90) * Math.PI / 180;
+        const inner = R - 8;
+        const outer = R;
+        ctx.beginPath();
+        ctx.moveTo(cx + inner * Math.cos(rad), cy + inner * Math.sin(rad));
+        ctx.lineTo(cx + outer * Math.cos(rad), cy + outer * Math.sin(rad));
+        ctx.strokeStyle = '#9ca3af';
+        ctx.lineWidth = deg % 90 === 0 ? 2 : 1;
+        ctx.stroke();
+    }
+
+    // Small ticks every 10°
+    for (let deg = 0; deg < 360; deg += 10) {
+        if (deg % 30 === 0) continue;
+        const rad = (deg - 90) * Math.PI / 180;
+        const inner = R - 4;
+        const outer = R;
+        ctx.beginPath();
+        ctx.moveTo(cx + inner * Math.cos(rad), cy + inner * Math.sin(rad));
+        ctx.lineTo(cx + outer * Math.cos(rad), cy + outer * Math.sin(rad));
+        ctx.strokeStyle = '#d1d5db';
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
+    }
+
+    const needleLen = R - 20;
+
+    // Determine if heading acquired (lines merge to orange)
+    const acquired = compassState.acquired ||
+        (compassState.heading !== null && compassState.targetBearing !== null &&
+         Math.abs(compassState.headingError) < 5);
+
+    // Draw TARGET BEARING line (red) — only when navigating
+    if (compassState.targetBearing !== null) {
+        const tRad = (compassState.targetBearing - 90) * Math.PI / 180;
+        const color = acquired ? '#f59e0b' : '#ef4444';
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + needleLen * Math.cos(tRad), cy + needleLen * Math.sin(tRad));
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 3;
+        ctx.setLineDash([6, 4]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Target arrowhead
+        const ax = cx + needleLen * Math.cos(tRad);
+        const ay = cy + needleLen * Math.sin(tRad);
+        ctx.beginPath();
+        ctx.arc(ax, ay, 5, 0, 2 * Math.PI);
+        ctx.fillStyle = color;
+        ctx.fill();
+    }
+
+    // Draw HEADING line (blue) — always when available
+    if (compassState.heading !== null) {
+        const hRad = (compassState.heading - 90) * Math.PI / 180;
+        const color = acquired ? '#f59e0b' : '#3b82f6';
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + needleLen * Math.cos(hRad), cy + needleLen * Math.sin(hRad));
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        // Heading arrowhead (triangle)
+        const tipX = cx + needleLen * Math.cos(hRad);
+        const tipY = cy + needleLen * Math.sin(hRad);
+        const arrowSize = 10;
+        ctx.beginPath();
+        ctx.moveTo(tipX, tipY);
+        ctx.lineTo(
+            tipX - arrowSize * Math.cos(hRad - 0.4),
+            tipY - arrowSize * Math.sin(hRad - 0.4)
+        );
+        ctx.lineTo(
+            tipX - arrowSize * Math.cos(hRad + 0.4),
+            tipY - arrowSize * Math.sin(hRad + 0.4)
+        );
+        ctx.closePath();
+        ctx.fillStyle = color;
+        ctx.fill();
+    }
+
+    // Center dot
+    ctx.beginPath();
+    ctx.arc(cx, cy, 4, 0, 2 * Math.PI);
+    ctx.fillStyle = '#374151';
+    ctx.fill();
+
+    // Heading text in center
+    ctx.font = 'bold 18px sans-serif';
+    ctx.fillStyle = '#111827';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const hdgText = compassState.heading !== null ? `${Math.round(compassState.heading)}°` : '--°';
+    ctx.fillText(hdgText, cx, cy + 30);
+}
+
+/** Map nav state string to CSS class and display label */
+const NAV_STATE_MAP = {
+    'IDLE':              { cls: 'nav-idle',       label: 'IDLE' },
+    'ACQUIRING_HEADING': { cls: 'nav-acquiring',  label: 'ACQUIRING' },
+    'HEADING_ACQUIRED':  { cls: 'nav-acquired',   label: 'ACQUIRED' },
+    'NAVIGATING':        { cls: 'nav-navigating', label: 'NAVIGATING' },
+    'OBSTACLE_DETECTED': { cls: 'nav-obstacle',   label: 'OBSTACLE' },
+    'OBSTACLE_AVOID':    { cls: 'nav-obstacle',   label: 'AVOIDING' },
+    'WAYPOINT_REACHED':  { cls: 'nav-reached',    label: 'REACHED' },
+    'COMPLETE':          { cls: 'nav-complete',    label: 'COMPLETE' },
+    'PAUSED':            { cls: 'nav-idle',        label: 'PAUSED' }
+};
+
+function updateNavStatusUI(nav) {
+    if (!nav) return;
+
+    // Update compass state — field names match nav_controller.get_status()
+    if (nav.current_heading !== undefined && nav.current_heading !== null) {
+        compassState.heading = Number(nav.current_heading);
+    }
+    if (nav.target_bearing !== undefined) {
+        compassState.targetBearing = nav.target_bearing !== null ? Number(nav.target_bearing) : null;
+    }
+    if (nav.heading_error !== undefined) {
+        compassState.headingError = nav.heading_error !== null ? Number(nav.heading_error) : null;
+    }
+    // Derive "acquired" from state name
+    const st = (nav.state || 'IDLE').toUpperCase();
+    compassState.acquired = (st === 'HEADING_ACQUIRED' || st === 'NAVIGATING' || st === 'WAYPOINT_REACHED');
+    compassState.navState = nav.state || 'IDLE';
+    // nav_controller sends distance_to_wp
+    const dist = nav.distance_to_wp !== undefined ? nav.distance_to_wp : nav.distance;
+    if (dist !== undefined) {
+        compassState.distance = dist !== null ? Number(dist) : null;
+    }
+    // nav_controller sends current_wp_index / total_waypoints
+    const wpIdx = nav.current_wp_index !== undefined ? nav.current_wp_index : nav.waypoint_index;
+    if (wpIdx !== undefined) {
+        compassState.waypointIndex = wpIdx;
+    }
+    const wpTotal = nav.total_waypoints !== undefined ? nav.total_waypoints : nav.waypoint_total;
+    if (wpTotal !== undefined) {
+        compassState.waypointTotal = wpTotal;
+    }
+
+    // Update text elements
+    const stateKey = (nav.state || 'IDLE').toUpperCase();
+    const mapped = NAV_STATE_MAP[stateKey] || { cls: 'nav-idle', label: stateKey };
+
+    updateElement('nav-state-text', mapped.label);
+
+    // State pill
+    const pill = document.getElementById('nav-state-pill');
+    if (pill) {
+        pill.textContent = mapped.label;
+        // Remove all nav-* classes then add current
+        pill.className = 'status-badge ' + mapped.cls;
+    }
+
+    updateElement('nav-heading-text',
+        compassState.heading !== null ? `${compassState.heading.toFixed(1)}°` : '--°');
+    updateElement('nav-bearing-text',
+        compassState.targetBearing !== null ? `${compassState.targetBearing.toFixed(1)}°` : '--°');
+    updateElement('nav-error-text',
+        compassState.headingError !== null ? `${compassState.headingError.toFixed(1)}°` : '--°');
+    updateElement('nav-distance-text',
+        compassState.distance !== null ? `${compassState.distance.toFixed(1)} m` : '-- m');
+
+    if (compassState.waypointIndex !== null && compassState.waypointTotal !== null) {
+        updateElement('nav-waypoint-text',
+            `${compassState.waypointIndex + 1} / ${compassState.waypointTotal}`);
+    } else {
+        updateElement('nav-waypoint-text', '--');
+    }
+
+    // Also update navigationActive state for control indicator
+    const navActive = stateKey !== 'IDLE' && stateKey !== 'COMPLETE';
+    state.navigationActive = navActive;
+    updateControlIndicators();
+
+    // Enable accept-heading button only during heading acquisition
+    const acceptBtn = document.getElementById('accept-heading-btn');
+    if (acceptBtn) {
+        acceptBtn.disabled = stateKey !== 'ACQUIRING_HEADING';
+    }
+
+    // Redraw compass
+    drawCompass();
+}
+
+// Draw initial empty compass on load, with resize handler
+document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(drawCompass, 100);
+    // Redraw on window resize so compass scales if panel resizes
+    window.addEventListener('resize', drawCompass);
+});
+
 /**
  * Handle robot events from backend
  */
@@ -1745,6 +2042,12 @@ function handleRobotEvent(event) {
     const type = (event.type || 'EVENT').toUpperCase();
     const device = event.device_id || state.deviceId || 'robot';
     const payload = event.payload || {};
+
+    // NAV_STATUS events: update compass + nav panel silently (no log/toast spam)
+    if (type === 'NAV_STATUS' && payload.nav) {
+        updateNavStatusUI(payload.nav);
+        return;
+    }
 
     // Rate limit UI spam for repeating obstacle events
     if (!state._obstacleUi) state._obstacleUi = { lastToastMs: 0 };
@@ -2034,6 +2337,33 @@ window.toggleOverlay = toggleOverlay;
 /**
  * Zoom Controls
  */
+// ── Camera zoom controls ──────────────────────────────────────
+(function initCameraZoom() {
+    const MIN = 1.0, MAX = 4.0, STEP = 0.5;
+    let camZoom = 1.0;
+
+    function apply() {
+        const feed = document.getElementById('camera-feed');
+        if (feed) feed.style.transform = `scale(${camZoom})`;
+        const label = document.getElementById('cam-zoom-level');
+        if (label) label.textContent = `${camZoom}×`;
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        const inBtn = document.getElementById('cam-zoom-in');
+        const outBtn = document.getElementById('cam-zoom-out');
+
+        if (inBtn) inBtn.addEventListener('click', () => {
+            camZoom = Math.min(MAX, +(camZoom + STEP).toFixed(1));
+            apply();
+        });
+        if (outBtn) outBtn.addEventListener('click', () => {
+            camZoom = Math.max(MIN, +(camZoom - STEP).toFixed(1));
+            apply();
+        });
+    });
+})();
+
 function initZoomControls() {
     const outBtn = document.getElementById('zoom-out-btn');
     const inBtn = document.getElementById('zoom-in-btn');

@@ -134,7 +134,8 @@ latest_data = {
         'last_location': None,
         'reason': None,
         'last_command': None
-    }
+    },
+    'nav_status': None
 }
 
 # Buffer robot events (optional, small ring buffer)
@@ -1277,9 +1278,15 @@ def receive_robot_event():
             'payload': {k: v for k, v in data.items() if k not in ('type','device_id','timestamp')}
         }
         with thread_lock:
-            recent_events.append(event)
-            if len(recent_events) > MAX_EVENTS:
-                del recent_events[0]
+            # Cache latest nav status for full_update snapshots
+            if event['type'] == 'NAV_STATUS':
+                latest_data['nav_status'] = event['payload']
+            else:
+                # Only store non-NAV_STATUS events in the ring buffer
+                # to avoid drowning out real events at 2 Hz
+                recent_events.append(event)
+                if len(recent_events) > MAX_EVENTS:
+                    del recent_events[0]
         try:
             socketio.emit('robot_event', event, namespace='/realtime')
         except Exception:
@@ -1376,7 +1383,8 @@ def handle_update_request(data):
                 'timestamp': camera_entry.get('timestamp'),
                 # We do not include large frame payloads here to keep event light
             },
-            'backup': latest_data.get('backup')
+            'backup': latest_data.get('backup'),
+            'nav_status': latest_data.get('nav_status')
         })
 
 

@@ -4,7 +4,7 @@
  *
  * Architecture v2:
  *   - Single NavState state machine (10 states) replaces old bool + AvoidStep
- *   - Phase 1: Turn in place when heading error > 25°
+ *   - Phase 1: Large error (>25°) — wide arc (outer fast, inner slow)
  *   - Phase 2: PD proportional steering (Kp=2, Kd=0.5)
  *   - Phase 3: Deadband < 5° — drive straight
  *   - Simplified 4-state obstacle avoidance (alternating L/R)

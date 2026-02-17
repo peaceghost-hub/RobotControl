@@ -133,7 +133,7 @@ extern int manualSpeed;
 // Constants for timing
 const unsigned long STATUS_INTERVAL = 2000;     // ms
 const unsigned long ZIGBEE_GPS_INTERVAL = 1200; // ms
-const unsigned long MANUAL_TIMEOUT = 7500;      // ms (x5 from 1500)
+const unsigned long MANUAL_TIMEOUT = 1500;      // ms — auto-stop if Pi stops sending (safety watchdog)
 const unsigned long HEARTBEAT_TIMEOUT = 25000;  // ms (x5 from 5000)
 
 // Maximum number of waypoints

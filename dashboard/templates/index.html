@@ -59,6 +59,7 @@
                     <button id="zoom-reset-btn" class="btn btn-small">100%</button>
                     <button id="zoom-in-btn" class="btn btn-small">➕</button>
                 </div>
+                <button id="toggle-layout-btn" class="btn btn-small" title="Toggle between fit-screen and scroll layout">📐 Fit Screen</button>
                 <button id="reset-layout-btn" class="btn btn-small" title="Reset overlay positions and sizes">♻ Reset layout</button>
                 <span class="toolbar-hint">Drag or resize windows. Use zoom to fit your screen.</span>
             </div>
@@ -73,6 +74,9 @@
                 <div class="panel-header">
                     <h2>Live Camera Feed</h2>
                     <div class="camera-controls">
+                        <button id="cam-zoom-out" class="btn btn-small btn-icon" title="Zoom Out">−</button>
+                        <span id="cam-zoom-level" class="status-badge subtle">1×</span>
+                        <button id="cam-zoom-in" class="btn btn-small btn-icon" title="Zoom In">+</button>
                         <button id="snapshot-btn" class="btn btn-small">Snapshot</button>
                         <span id="camera-status" class="status-badge">No Feed</span>
                         <span id="camera-mode-label" class="status-badge subtle">Relay</span>
@@ -90,7 +94,7 @@
                         <span id="camera-timestamp">--</span>
                         <span id="camera-fps">0 FPS</span>
                     </div>
-                    <div id="camera-direct-hint" class="camera-hint" style="display: none;">
+                    <div id="camera-direct-hint" class="camera-hint" style="display:none;">
                         Streaming directly from camera endpoint.
                         <a id="camera-direct-link" href="#" target="_blank">Open in new tab</a>
                     </div>
@@ -108,12 +112,13 @@
                     </div>
                 </div>
                 <div class="panel-content">
-                    <div id="map" class="map-container"></div>
-                    <div id="waypoint-notification" class="waypoint-notification hidden">
-                        <span id="waypoint-message"></span>
-                    </div>
-                    <div id="obstacle-notification" class="obstacle-notification hidden">
-                          <span id="obstacle-message"></span>
+                    <div id="map" class="map-container">
+                        <div id="waypoint-notification" class="waypoint-notification hidden">
+                            <span id="waypoint-message"></span>
+                        </div>
+                        <div id="obstacle-notification" class="obstacle-notification hidden">
+                            <span id="obstacle-message"></span>
+                        </div>
                     </div>
                     <div class="gps-info">
                         <div class="gps-item">
@@ -157,7 +162,7 @@
                                 <button id="nav-stop-btn" class="btn btn-small danger">⏹ Stop</button>
                             </div>
                         </div>
-                        <div class="control-help">Send current waypoint queue and command the Mega to run autonomously.</div>
+                        <div class="control-help">Navigation runs on Pi with direct compass feedback. Push waypoints, then Start.</div>
                         <div class="speed-control">
                             <label for="auto-speed-slider">Auto speed</label>
                             <input type="range" id="auto-speed-slider" min="80" max="255" value="120">
@@ -196,54 +201,64 @@
                 </div>
             </div>
 
-            <!-- LoRa Backup Control Panel (Bottom-right) -->
-            <div class="panel backup-panel bottom-right">
+            <!-- Compass & Navigation Status Panel (Bottom-right) -->
+            <div class="panel compass-panel bottom-right">
                 <div class="panel-header">
-                    <h2>🛰️ CC1101 Backup Control</h2>
-                    <span id="backup-status-pill" class="status-badge subtle">Standby</span>
+                    <h2>🧭 Compass & Navigation</h2>
+                    <span id="nav-state-pill" class="status-badge subtle">IDLE</span>
                 </div>
                 <div class="panel-content">
-                    <div class="control-help">Manual control via UNO CC1101 remote. Engage to override I2C and use wireless joystick.</div>
-
-                    <div class="control-section">
-                        <div class="button-group">
-                            <button id="engage-wireless-btn" class="btn btn-warning">🎮 Engage Wireless</button>
-                            <button id="disengage-wireless-btn" class="btn btn-secondary">🔌 Disengage</button>
+                    <div class="compass-widget">
+                        <canvas id="compass-canvas" width="240" height="240"></canvas>
+                        <div class="compass-legend">
+                            <span class="legend-item"><span class="legend-dot blue"></span> Heading</span>
+                            <span class="legend-item"><span class="legend-dot red"></span> Target</span>
+                            <span class="legend-item"><span class="legend-dot orange"></span> Acquired</span>
                         </div>
-                        <p class="status-text" id="wireless-status" style="margin-top: 10px; color: #4CAF50;">Status: I2C Priority (Normal)</p>
                     </div>
 
-                    <div class="backup-meta">
-                        <span>Device: <strong id="backup-device-id">--</strong></span>
-                        <span>Last update: <strong id="backup-last-update">--</strong></span>
-                        <span>Last command: <strong id="backup-last-command">--</strong></span>
+                    <div style="text-align:center; margin-bottom:8px;">
+                        <button id="accept-heading-btn" class="btn btn-small btn-outline" disabled title="Force-accept current heading when error is too large but path looks right">✔ Accept Heading</button>
                     </div>
 
-                    <div class="backup-actions">
-                        <button id="backup-engage-btn" class="btn btn-small"> Engage</button>
-                        <button id="backup-release-btn" class="btn btn-small"> Return</button>
+                    <div class="nav-status-grid">
+                        <div class="nav-status-item">
+                            <span class="nav-label">State</span>
+                            <span id="nav-state-text" class="nav-value">IDLE</span>
+                        </div>
+                        <div class="nav-status-item">
+                            <span class="nav-label">Heading</span>
+                            <span id="nav-heading-text" class="nav-value">--°</span>
+                        </div>
+                        <div class="nav-status-item">
+                            <span class="nav-label">Target Bearing</span>
+                            <span id="nav-bearing-text" class="nav-value">--°</span>
+                        </div>
+                        <div class="nav-status-item">
+                            <span class="nav-label">Heading Error</span>
+                            <span id="nav-error-text" class="nav-value">--°</span>
+                        </div>
+                        <div class="nav-status-item">
+                            <span class="nav-label">Distance</span>
+                            <span id="nav-distance-text" class="nav-value">-- m</span>
+                        </div>
+                        <div class="nav-status-item">
+                            <span class="nav-label">Waypoint</span>
+                            <span id="nav-waypoint-text" class="nav-value">--</span>
+                        </div>
                     </div>
 
-                    <div class="backup-grid">
-                        <button id="backup-forward-btn" class="control-key">▲</button>
-                        <button id="backup-left-btn" class="control-key">◀</button>
-                        <button id="backup-stop-btn" class="control-key">■</button>
-                        <button id="backup-right-btn" class="control-key">▶</button>
-                        <button id="backup-reverse-btn" class="control-key">▼</button>
-                    </div>
-
-                    <div class="speed-control">
-                        <label for="backup-speed-slider">Backup speed</label>
-                        <input type="range" id="backup-speed-slider" min="80" max="255" value="160">
-                        <span id="backup-speed-display">160</span>
-                    </div>
-
-                    <div class="backup-meta">
-                        <span>Lat: <strong id="backup-lat">--</strong></span>
-                        <span>Lon: <strong id="backup-lon">--</strong></span>
-                        <span>Heading: <strong id="backup-heading">--°</strong></span>
-                        <span>Speed: <strong id="backup-speed">-- m/s</strong></span>
-                    </div>
+                    <!-- CC1101 wireless controls (collapsed) -->
+                    <details class="cc1101-section">
+                        <summary>🛰️ CC1101 Wireless Control</summary>
+                        <div class="control-section" style="margin-top: 10px;">
+                            <div class="button-group">
+                                <button id="engage-wireless-btn" class="btn btn-warning btn-small">🎮 Engage</button>
+                                <button id="disengage-wireless-btn" class="btn btn-small">🔌 Disengage</button>
+                            </div>
+                            <p class="status-text" id="wireless-status" style="margin-top: 8px; font-size: 12px; color: #4CAF50;">I2C Priority (Normal)</p>
+                        </div>
+                    </details>
                 </div>
             </div>
 

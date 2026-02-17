@@ -348,16 +348,18 @@ void Navigation::handleDriveToTarget() {
         // PHASE 3: Deadband — drive straight
         motors->setMotors(baseSpeed, baseSpeed);
     } else if (absError >= TURN_IN_PLACE_THRESH) {
-        // LARGE ERROR (>25°): Sharp arc — outer motor forward, inner motor STOPPED
-        // Robot arcs tightly toward target while still making forward progress.
-        // No counter-rotation, no spin, no compass-lag oscillation.
+        // LARGE ERROR (>25°): Wide arc — outer motor fast, inner motor SLOW
+        // Robot arcs toward target while ALWAYS making forward progress.
+        // Inner motor runs at ~30% of outer to prevent pivot-in-place.
         int outerSpeed = constrain(baseSpeed, MIN_TURN_SPEED, MAX_TURN_SPEED);
+        int innerSpeed = outerSpeed * 30 / 100;   // 30% — enough to crawl forward
+        if (innerSpeed < 50) innerSpeed = 50;      // floor so wheel actually turns
         if (error > 0) {
-            // Target RIGHT → left motor forward, right motor stopped
-            motors->setMotors(outerSpeed, 0);
+            // Target RIGHT → left motor fast, right motor slow
+            motors->setMotors(outerSpeed, innerSpeed);
         } else {
-            // Target LEFT → right motor forward, left motor stopped
-            motors->setMotors(0, outerSpeed);
+            // Target LEFT → right motor fast, left motor slow
+            motors->setMotors(innerSpeed, outerSpeed);
         }
     } else {
         // PHASE 2 (5°–25°): PD proportional steering

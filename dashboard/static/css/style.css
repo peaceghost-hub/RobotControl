@@ -32,7 +32,7 @@ body {
 .container {
     max-width: 1920px;
     margin: 0 auto;
-    padding: 20px;
+    padding: 10px;
 }
 
 /* Connection Status */
@@ -92,8 +92,8 @@ body {
 .toolbar {
     background: var(--card-bg);
     border-radius: 10px;
-    padding: 10px 16px;
-    margin-bottom: 16px;
+    padding: 6px 12px;
+    margin-bottom: 8px;
     box-shadow: var(--shadow-lg);
     display: flex;
     justify-content: space-between;
@@ -115,8 +115,8 @@ body {
 .header {
     background: var(--card-bg);
     border-radius: 12px;
-    padding: 20px 30px;
-    margin-bottom: 20px;
+    padding: 10px 20px;
+    margin-bottom: 8px;
     box-shadow: var(--shadow-lg);
 }
 
@@ -160,35 +160,37 @@ body {
     50% { opacity: 0.5; }
 }
 
-/* Dashboard Grid */
+/* Dashboard Grid — all 4 panels visible in one viewport */
 .dashboard-grid {
     display: grid;
-    grid-template-columns: repeat(12, 1fr);
-    gap: 20px;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 12px;
+    height: calc(100vh - 160px);   /* fill viewport minus header+toolbar */
 }
 
 /* Panel Layout Classes */
 .top-left {
-    grid-column: span 6;
+    grid-column: 1;
     grid-row: 1;
 }
 
 .top-right {
-    grid-column: span 6;
+    grid-column: 2;
     grid-row: 1;
 }
 
 .full-width {
-    grid-column: span 12;
+    grid-column: span 2;
 }
 
 .bottom-left {
-    grid-column: span 6;
+    grid-column: 1;
     grid-row: 2;
 }
 
 .bottom-right {
-    grid-column: span 6;
+    grid-column: 2;
     grid-row: 2;
 }
 
@@ -204,15 +206,17 @@ body {
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    min-height: 0;        /* allow grid row shrinking */
 }
 
 .panel-header {
     background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
     color: white;
-    padding: 15px 20px;
+    padding: 8px 14px;
     display: flex;
     justify-content: space-between;
     align-items: center;
+    flex-shrink: 0;
 }
 
 .panel-header h2 {
@@ -221,9 +225,10 @@ body {
 }
 
 .panel-content {
-    padding: 20px;
+    padding: 10px;
     flex: 1;
     overflow: auto;
+    min-height: 0;
 }
 
 /* Panel Grid Layout - Now handled by classes */
@@ -353,24 +358,47 @@ body {
     margin-top: 20px;
 }
 
-/* Camera Panel */
+/* Camera Panel — feed fills the entire panel */
+.camera-panel > .panel-content {
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+}
+
 .camera-container {
     position: relative;
     background: #000;
-    border-radius: 8px;
+    border-radius: 0;
     overflow: hidden;
-    height: 360px;
+    flex: 1;
+    min-height: 0;
 }
 
 #camera-feed {
+    position: absolute;
+    inset: 0;
     width: 100%;
     height: 100%;
-    object-fit: contain;
+    object-fit: cover;
     display: none;
+    transform-origin: center center;
+    transition: transform 0.2s ease;
 }
 
 #camera-feed.active {
     display: block;
+}
+
+/* Camera zoom buttons */
+.btn-icon {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    font-size: 16px;
+    font-weight: bold;
+    line-height: 26px;
+    text-align: center;
+    border-radius: 4px;
 }
 
 .no-feed-message {
@@ -383,17 +411,24 @@ body {
 }
 
 .no-feed-message span {
-    font-size: 64px;
+    font-size: 48px;
     display: block;
-    margin-bottom: 10px;
+    margin-bottom: 6px;
 }
 
 .camera-info {
     display: flex;
     justify-content: space-between;
-    margin-top: 10px;
-    font-size: 12px;
+    padding: 4px 10px;
+    font-size: 11px;
     color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.camera-hint {
+    padding: 2px 10px 4px;
+    font-size: 11px;
+    flex-shrink: 0;
 }
 
 .camera-controls {
@@ -420,35 +455,44 @@ body {
 }
 
 /* Map Panel */
+/* Map Panel — map fills entire panel */
+.map-panel > .panel-content {
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+}
+
 .map-container {
-    height: 360px;
-    border-radius: 8px;
+    flex: 1;
+    min-height: 0;
+    border-radius: 0;
     overflow: hidden;
-    margin-bottom: 15px;
 }
 
 .gps-info {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 15px;
+    grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+    gap: 4px;
+    padding: 6px 10px;
+    flex-shrink: 0;
 }
 
 .gps-item {
     background: #f9fafb;
-    padding: 10px;
-    border-radius: 6px;
+    padding: 4px 6px;
+    border-radius: 4px;
 }
 
 .gps-label {
     display: block;
-    font-size: 11px;
+    font-size: 10px;
     color: var(--text-secondary);
-    margin-bottom: 3px;
+    margin-bottom: 1px;
 }
 
 .gps-value {
     display: block;
-    font-size: 16px;
+    font-size: 13px;
     font-weight: 600;
 }
 
@@ -580,8 +624,8 @@ tr:hover {
 }
 
 .control-section {
-    margin-bottom: 25px;
-    padding: 15px;
+    margin-bottom: 10px;
+    padding: 10px;
     background: #f9fafb;
     border-radius: 8px;
     border: 1px solid var(--border-color);
@@ -808,13 +852,31 @@ tr:hover {
     width: 100%;
 }
 
-/* Ensure the map and camera containers are responsive */
+/* Camera & Map containers fill available flex space */
 .map-container, .camera-container {
     position: relative;
     width: 100%;
-    height: 0;
-    padding-bottom: 75%; /* 4:3 aspect ratio */
+    height: auto;
+    padding-bottom: 0;
     overflow: hidden;
+}
+
+/* ─── Scroll-mode layout (toggle) ─── */
+body.layout-scroll .dashboard-grid {
+    height: auto;
+    grid-template-rows: auto auto;
+}
+
+body.layout-scroll .camera-container {
+    min-height: 360px;
+}
+
+body.layout-scroll .map-container {
+    min-height: 360px;
+}
+
+body.layout-scroll .panel-content {
+    overflow: visible;
 }
 
 /* Toast Notifications */
@@ -863,32 +925,13 @@ tr:hover {
 @keyframes fadeOut { from { opacity: 0.95 } to { opacity: 0 } }
 
 .map-container iframe,
-.map-container .leaflet-container,
-.camera-container img,
-.camera-container video {
+.map-container .leaflet-container {
     position: absolute;
     top: 0;
     left: 0;
     width: 100%;
     height: 100%;
     border: none;
-}
-
-/* Responsive styles */
-@media (max-width: 1400px) {
-    .top-left, .top-right {
-        grid-column: span 6;
-    }
-    .bottom-left, .bottom-right { grid-column: span 6; }
-}
-
-@media (max-width: 1200px) {
-    .dashboard-grid {
-        grid-template-columns: 1fr 1fr;
-        grid-template-areas: 
-            "camera map"
-            "control backup";
-    }
 }
 
 @media (max-width: 992px) {
@@ -908,8 +951,14 @@ tr:hover {
 }
 
 @media (max-width: 768px) {
+    .dashboard-grid {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto;
+        height: auto;
+    }
     .dashboard-grid > * {
-        grid-column: span 12 !important;
+        grid-column: 1 !important;
+        grid-row: auto !important;
     }
     
     .header-content {
@@ -923,15 +972,6 @@ tr:hover {
     
     .gps-info {
         grid-template-columns: 1fr 1fr;
-    }
-    
-    .dashboard-grid {
-        grid-template-columns: 1fr;
-        grid-template-areas: 
-            "camera"
-            "map"
-            "control"
-            "backup";
     }
     
     .toolbar {
@@ -996,14 +1036,6 @@ tr:hover {
     font-size: 14px;
 }
 
-/* Responsive */
-@media (max-width: 1400px) {
-    .top-left, .top-right {
-        grid-column: span 6;
-    }
-    .bottom-left, .bottom-right { grid-column: span 6; }
-}
-
 /* Waypoint Notification */
 .waypoint-notification {
     position: absolute;
@@ -1066,21 +1098,94 @@ tr:hover {
     font-size: 12px;
 }
 
-@media (max-width: 768px) {
-    .dashboard-grid > * {
-        grid-column: span 12 !important;
-    }
-    
-    .header-content {
-        flex-direction: column;
-        gap: 15px;
-    }
-    
-    .sensor-grid {
-        grid-template-columns: 1fr 1fr;
-    }
-    
-    .gps-info {
-        grid-template-columns: 1fr 1fr;
-    }
+/* ─── Compass & Navigation Panel ─── */
+.compass-widget {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin-bottom: 16px;
+}
+
+#compass-canvas {
+    display: block;
+    max-width: 100%;
+    height: auto;
+}
+
+.compass-legend {
+    display: flex;
+    gap: 16px;
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.legend-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+}
+
+.legend-dot.blue { background: #3b82f6; }
+.legend-dot.red { background: #ef4444; }
+.legend-dot.orange { background: #f59e0b; }
+
+.nav-status-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.nav-status-item {
+    background: #f9fafb;
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+}
+
+.nav-label {
+    display: block;
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-bottom: 2px;
+}
+
+.nav-value {
+    display: block;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+/* Nav state pill colours */
+#nav-state-pill.nav-idle { background: rgba(107, 114, 128, 0.2); color: #6b7280; }
+#nav-state-pill.nav-acquiring { background: rgba(245, 158, 11, 0.2); color: #b45309; animation: pulse 1.5s infinite; }
+#nav-state-pill.nav-acquired { background: rgba(16, 185, 129, 0.2); color: #047857; }
+#nav-state-pill.nav-navigating { background: rgba(37, 99, 235, 0.2); color: #1d4ed8; }
+#nav-state-pill.nav-obstacle { background: rgba(239, 68, 68, 0.2); color: #b91c1c; animation: pulse 1s infinite; }
+#nav-state-pill.nav-reached { background: rgba(16, 185, 129, 0.3); color: #047857; }
+#nav-state-pill.nav-complete { background: rgba(16, 185, 129, 0.4); color: #047857; }
+
+.cc1101-section {
+    margin-top: 8px;
+    font-size: 13px;
+}
+
+.cc1101-section summary {
+    cursor: pointer;
+    color: var(--text-secondary);
+    padding: 6px 0;
+}
+
+.cc1101-section .button-group {
+    display: flex;
+    gap: 8px;
 }
