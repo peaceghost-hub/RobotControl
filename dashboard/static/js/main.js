@@ -1940,12 +1940,13 @@ function drawCompass() {
 /** Map nav state string to CSS class and display label */
 const NAV_STATE_MAP = {
     'IDLE':              { cls: 'nav-idle',       label: 'IDLE' },
+    'PREPARING':         { cls: 'nav-preparing',  label: 'PREPARING' },
     'ACQUIRING_HEADING': { cls: 'nav-acquiring',  label: 'ACQUIRING' },
-    'HEADING_ACQUIRED':  { cls: 'nav-acquired',   label: 'ACQUIRED' },
+    'HEADING_ACQUIRED':  { cls: 'nav-acquired',   label: 'ACQUIRED — HOLD' },
     'NAVIGATING':        { cls: 'nav-navigating', label: 'NAVIGATING' },
     'OBSTACLE_DETECTED': { cls: 'nav-obstacle',   label: 'OBSTACLE' },
     'OBSTACLE_AVOID':    { cls: 'nav-obstacle',   label: 'AVOIDING' },
-    'WAYPOINT_REACHED':  { cls: 'nav-reached',    label: 'REACHED' },
+    'WAYPOINT_REACHED':  { cls: 'nav-reached',    label: 'WP REACHED' },
     'COMPLETE':          { cls: 'nav-complete',    label: 'COMPLETE' },
     'PAUSED':            { cls: 'nav-idle',        label: 'PAUSED' }
 };
@@ -2005,6 +2006,29 @@ function updateNavStatusUI(nav) {
     updateElement('nav-distance-text',
         compassState.distance !== null ? `${compassState.distance.toFixed(1)} m` : '-- m');
 
+    // Countdown display (visible during HEADING_ACQUIRED, PREPARING, WAYPOINT_REACHED)
+    const countdownRow = document.getElementById('nav-countdown-row');
+    if (countdownRow) {
+        const hasCountdown = nav.countdown !== undefined && nav.countdown !== null;
+        const isTimedState = stateKey === 'HEADING_ACQUIRED' || stateKey === 'PREPARING' || stateKey === 'WAYPOINT_REACHED';
+        if (isTimedState && hasCountdown) {
+            countdownRow.style.display = '';
+            let countdownLabel = 'Starting in';
+            if (stateKey === 'PREPARING') countdownLabel = 'Preparing in';
+            if (stateKey === 'WAYPOINT_REACHED') countdownLabel = 'Next WP in';
+            const labelEl = countdownRow.querySelector('.nav-label');
+            if (labelEl) labelEl.textContent = countdownLabel;
+            updateElement('nav-countdown-text', `${nav.countdown}s`);
+        } else {
+            countdownRow.style.display = 'none';
+        }
+    }
+
+    // Neo-6M satellite count
+    if (nav.neo_satellites !== undefined) {
+        updateElement('nav-neo-sats', `${nav.neo_satellites}`);
+    }
+
     if (compassState.waypointIndex !== null && compassState.waypointTotal !== null) {
         updateElement('nav-waypoint-text',
             `${compassState.waypointIndex + 1} / ${compassState.waypointTotal}`);
@@ -2017,10 +2041,20 @@ function updateNavStatusUI(nav) {
     state.navigationActive = navActive;
     updateControlIndicators();
 
-    // Enable accept-heading button only during heading acquisition
+    // Enable accept-heading button during preparation and heading acquisition
     const acceptBtn = document.getElementById('accept-heading-btn');
     if (acceptBtn) {
-        acceptBtn.disabled = stateKey !== 'ACQUIRING_HEADING';
+        acceptBtn.disabled = (stateKey !== 'ACQUIRING_HEADING' && stateKey !== 'PREPARING');
+    }
+
+    // Show navigation toast notifications from Pi
+    if (nav.notification) {
+        const lvl = nav.notification.level || 'info';
+        const msg = nav.notification.msg || '';
+        if (msg) {
+            showToast(lvl, 'Navigation', msg);
+            addLog(lvl === 'success' ? 'info' : lvl, `NAV: ${msg}`);
+        }
     }
 
     // Redraw compass

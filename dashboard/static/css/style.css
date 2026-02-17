@@ -1167,12 +1167,21 @@ body.layout-scroll .panel-content {
 
 /* Nav state pill colours */
 #nav-state-pill.nav-idle { background: rgba(107, 114, 128, 0.2); color: #6b7280; }
+#nav-state-pill.nav-preparing { background: rgba(139, 92, 246, 0.2); color: #6d28d9; animation: pulse 1.5s infinite; }
 #nav-state-pill.nav-acquiring { background: rgba(245, 158, 11, 0.2); color: #b45309; animation: pulse 1.5s infinite; }
-#nav-state-pill.nav-acquired { background: rgba(16, 185, 129, 0.2); color: #047857; }
+#nav-state-pill.nav-acquired { background: rgba(16, 185, 129, 0.2); color: #047857; animation: pulse 1.5s infinite; }
 #nav-state-pill.nav-navigating { background: rgba(37, 99, 235, 0.2); color: #1d4ed8; }
 #nav-state-pill.nav-obstacle { background: rgba(239, 68, 68, 0.2); color: #b91c1c; animation: pulse 1s infinite; }
-#nav-state-pill.nav-reached { background: rgba(16, 185, 129, 0.3); color: #047857; }
+#nav-state-pill.nav-reached { background: rgba(16, 185, 129, 0.3); color: #047857; animation: pulse 1.5s infinite; }
 #nav-state-pill.nav-complete { background: rgba(16, 185, 129, 0.4); color: #047857; }
+
+/* Countdown pulse for HEADING_ACQUIRED timer */
+.countdown-pulse {
+    font-weight: bold;
+    font-size: 16px;
+    color: #047857;
+    animation: pulse 1s infinite;
+}
 
 .cc1101-section {
     margin-top: 8px;

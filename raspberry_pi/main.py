@@ -252,6 +252,9 @@ class RobotController:
                     gps_provider=self._get_nav_gps,
                     config=CONFIG
                 )
+                # Wire up Neo-6M GPS fallback (polls Mega over I2C)
+                if self.robot_link:
+                    self.nav_controller._mega_gps_provider = self._get_mega_gps
                 logger.info("Pi-side NavController initialized")
             except Exception as e:
                 logger.warning(f"NavController init failed: {e}")
@@ -446,6 +449,20 @@ class RobotController:
             data = self._latest_gps.copy()
         if data.get('latitude') and data.get('longitude'):
             return data
+        return None
+
+    def _get_mega_gps(self) -> dict:
+        """Fallback GPS provider — polls Neo-6M via Mega I2C.
+
+        Called by NavController when primary SIM7600E GPS has no fix.
+        Returns dict with 'valid', 'latitude', 'longitude', 'speed',
+        'satellites' or None on failure.
+        """
+        try:
+            if self.robot_link and not self.wireless_backup_active:
+                return self.robot_link.request_gps_data()
+        except Exception as e:
+            logger.debug("Mega GPS poll failed: %s", e)
         return None
 
     def nav_status_loop(self):

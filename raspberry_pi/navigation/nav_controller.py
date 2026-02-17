@@ -8,9 +8,10 @@ commands to the Arduino Mega over I2C — the Mega acts as a motor driver
 only, no navigation math.
 
 State machine:
-    IDLE → ACQUIRING_HEADING → NAVIGATING → WAYPOINT_REACHED → (next) → COMPLETE
-                ↑                    |
-          OBSTACLE_AVOID  ←  OBSTACLE_DETECTED
+    IDLE → PREPARING (3s) → ACQUIRING_HEADING → HEADING_ACQUIRED (10s)
+         → NAVIGATING → WAYPOINT_REACHED (3s) → PREPARING → ...
+              ↑                    |
+        OBSTACLE_AVOID  ←  OBSTACLE_DETECTED → PREPARING → ...
 
 GOLDEN RULE: NO FREEZING.  Every step is non-blocking.
 """
@@ -27,12 +28,13 @@ logger = logging.getLogger("nav_controller")
 
 class NavState(Enum):
     IDLE               = auto()
+    PREPARING           = auto()  # 3s pause before acquiring — user can review
     ACQUIRING_HEADING   = auto()
-    HEADING_ACQUIRED    = auto()  # brief transition — shown on dashboard
+    HEADING_ACQUIRED    = auto()  # 10s countdown before forward drive
     NAVIGATING          = auto()
     OBSTACLE_DETECTED   = auto()
     OBSTACLE_AVOID      = auto()
-    WAYPOINT_REACHED    = auto()
+    WAYPOINT_REACHED    = auto()  # 3s hold — notification shown
     COMPLETE            = auto()
     PAUSED              = auto()
 
@@ -48,13 +50,16 @@ class NavController:
     WAYPOINT_RADIUS      = 3.0    # meters — "reached"
     HEADING_DEADBAND     = 5.0    # degrees — close enough → go straight
     ACQUIRE_SLOW_THRESH  = 15.0   # degrees — switch to slow rotation
-    ROTATION_SPEED_FAST  = 150    # PWM for big heading error
-    ROTATION_SPEED_SLOW  = 100    # PWM for small heading error
+    ROTATION_SPEED_FAST  = 80     # PWM for big heading error
+    ROTATION_SPEED_SLOW  = 50     # PWM for small heading error
     DRIVE_SPEED          = 120    # PWM forward
     OBSTACLE_TURN_TIME   = 1.0    # seconds — rotate away from obstacle
     OBSTACLE_CHECK_PAUSE = 0.3    # seconds — pause after stop before turning
     COURSE_DRIFT_THRESH  = 12.0   # degrees — re-acquire heading while driving
     HEADING_ACQUIRE_TIMEOUT = 30.0  # seconds — give up if can't acquire
+    HEADING_HOLD_TIME    = 10.0   # seconds — countdown before forward drive
+    PREPARE_TIME         = 3.0    # seconds — pause before acquiring heading
+    WAYPOINT_HOLD_TIME   = 3.0    # seconds — pause after waypoint reached
     NAV_LOOP_HZ         = 10     # control loop frequency
 
     def __init__(self, compass, robot_link, gps_provider, config: dict = None):
@@ -69,6 +74,13 @@ class NavController:
         self.compass = compass
         self.robot_link = robot_link
         self._gps_provider = gps_provider
+        self._mega_gps_provider = None  # set externally for Neo-6M fallback
+
+        # Dashboard notification (consumed once per read)
+        self._notification = None   # e.g. {'level': 'info', 'msg': '...'}
+
+        # Neo-6M satellite count (polled from Mega)
+        self._neo_satellites = 0
 
         # Waypoints
         self._waypoints: List[Dict[str, Any]] = []
@@ -133,6 +145,22 @@ class NavController:
             except Exception:
                 pass
         with self._lock:
+            # Compute countdown remaining for timed states
+            countdown = None
+            if self._state == NavState.HEADING_ACQUIRED:
+                remaining = self.HEADING_HOLD_TIME - (time.time() - self._state_entry_time)
+                countdown = max(0, round(remaining))
+            elif self._state == NavState.PREPARING:
+                remaining = self.PREPARE_TIME - (time.time() - self._state_entry_time)
+                countdown = max(0, round(remaining))
+            elif self._state == NavState.WAYPOINT_REACHED:
+                remaining = self.WAYPOINT_HOLD_TIME - (time.time() - self._state_entry_time)
+                countdown = max(0, round(remaining))
+
+            # Pop one-shot notification
+            notif = self._notification
+            self._notification = None
+
             return {
                 'state': self._state.name,
                 'current_heading': round(heading, 1),
@@ -143,6 +171,9 @@ class NavController:
                 'total_waypoints': len(self._waypoints),
                 'completed_waypoints': list(self._completed_waypoints),
                 'avoid_attempts': self._avoid_attempts,
+                'countdown': countdown,
+                'notification': notif,
+                'neo_satellites': self._neo_satellites,
             }
 
     def set_waypoints(self, waypoints: List[Dict[str, Any]]):
@@ -164,7 +195,9 @@ class NavController:
             self._avoid_attempts = 0
             self._avoid_direction = 'left'
         self._running = True
-        self._enter_state(NavState.ACQUIRING_HEADING)
+        self._send_stop()
+        self._notification = {'level': 'info', 'msg': 'Navigation started — preparing...'}
+        self._enter_state(NavState.PREPARING)
 
         if not self._thread or not self._thread.is_alive():
             self._thread = threading.Thread(target=self._nav_loop, daemon=True)
@@ -190,7 +223,9 @@ class NavController:
         if self._state != NavState.PAUSED:
             return
         self._running = True
-        self._enter_state(NavState.ACQUIRING_HEADING)
+        self._send_stop()
+        self._notification = {'level': 'info', 'msg': 'Navigation resumed — preparing...'}
+        self._enter_state(NavState.PREPARING)
         if not self._thread or not self._thread.is_alive():
             self._thread = threading.Thread(target=self._nav_loop, daemon=True)
             self._thread.start()
@@ -204,11 +239,14 @@ class NavController:
         Stops rotation immediately and transitions to HEADING_ACQUIRED → NAVIGATING.
         """
         with self._lock:
-            if self._state not in (NavState.ACQUIRING_HEADING,):
+            if self._state not in (NavState.PREPARING, NavState.ACQUIRING_HEADING):
                 logger.info("accept_heading ignored — state is %s", self._state.name)
                 return False
+        # Send stop multiple times to guarantee Mega processes it
         self._send_stop()
-        logger.info("Heading manually accepted (error=%.1f°)", self._last_heading_error)
+        self._send_stop()
+        logger.info("Heading manually accepted (error=%.1f°) — motors stopped, %.0fs countdown",
+                     self._last_heading_error, self.HEADING_HOLD_TIME)
         self._enter_state(NavState.HEADING_ACQUIRED)
         return True
 
@@ -242,6 +280,12 @@ class NavController:
 
         # Read sensors every tick
         self._current_heading = self._read_heading()
+
+        # PREPARING state: motors stopped, waiting for timer — no GPS needed
+        if state == NavState.PREPARING:
+            self._handle_preparing()
+            return
+
         gps = self._get_gps()
         if not gps:
             return  # no GPS fix — wait
@@ -281,6 +325,21 @@ class NavController:
     #  STATE HANDLERS
     # ================================================================
 
+    def _handle_preparing(self):
+        """3-second hold before heading acquisition.
+
+        Motors stay stopped.  Dashboard shows 'PREPARING' with countdown.
+        User can click Accept Heading during this window if already aligned.
+        """
+        elapsed = time.time() - self._state_entry_time
+        # Reinforce motor stop every second
+        if int(elapsed) != getattr(self, '_prep_last_sec', -1):
+            self._prep_last_sec = int(elapsed)
+            self._send_stop()
+        if elapsed >= self.PREPARE_TIME:
+            logger.info("Prepare phase complete — acquiring heading")
+            self._enter_state(NavState.ACQUIRING_HEADING)
+
     def _handle_acquiring_heading(self):
         """Rotate robot until heading matches target bearing (within deadband)."""
         error = self._last_heading_error
@@ -294,8 +353,11 @@ class NavController:
             return
 
         if abs_error <= self.HEADING_DEADBAND:
-            # Heading acquired!
+            # Heading acquired! — stop motors and begin countdown
             self._send_stop()
+            self._send_stop()  # double-send for reliability
+            logger.info("Heading auto-acquired (error=%.1f°) — %.0fs countdown",
+                         abs_error, self.HEADING_HOLD_TIME)
             self._enter_state(NavState.HEADING_ACQUIRED)
             return
 
@@ -310,9 +372,18 @@ class NavController:
             self._send_rotate_left(speed)
 
     def _handle_heading_acquired(self):
-        """Brief pause state for dashboard display, then start navigating."""
+        """Hold state with countdown — motors stay stopped.
+
+        Dashboard shows 'Starting navigation in N…' countdown.
+        After HEADING_HOLD_TIME seconds, transitions to NAVIGATING.
+        """
         elapsed = time.time() - self._state_entry_time
-        if elapsed >= 0.5:  # show "HEADING ACQUIRED" for 0.5s
+        # Reinforce stop every ~1s (at 10Hz, every 10th tick) as safety
+        tick_num = int(elapsed * self.NAV_LOOP_HZ)
+        if tick_num % self.NAV_LOOP_HZ == 0:
+            self._send_stop()
+        if elapsed >= self.HEADING_HOLD_TIME:
+            logger.info("Countdown complete — starting NAVIGATING")
             self._enter_state(NavState.NAVIGATING)
 
     def _handle_navigating(self):
@@ -320,6 +391,13 @@ class NavController:
         # Check waypoint reached
         if self._distance_to_wp <= self.WAYPOINT_RADIUS:
             self._send_stop()
+            self._send_stop()
+            wp_num = self._current_wp_index + 1
+            wp_total = len(self._waypoints)
+            self._notification = {
+                'level': 'success',
+                'msg': f'Waypoint {wp_num}/{wp_total} reached! Holding...'
+            }
             self._enter_state(NavState.WAYPOINT_REACHED)
             return
 
@@ -377,14 +455,20 @@ class NavController:
                         logger.warning("Too many obstacle attempts — skipping waypoint")
                         self._advance_waypoint()
                 else:
-                    # Clear — re-acquire heading then navigate
-                    logger.info("Obstacle cleared — re-acquiring heading")
-                    self._enter_state(NavState.ACQUIRING_HEADING)
+                    # Clear — pause before re-acquiring heading
+                    logger.info("Obstacle cleared — preparing before re-acquire")
+                    self._send_stop()
+                    self._notification = {'level': 'info', 'msg': 'Obstacle cleared — preparing...'}
+                    self._enter_state(NavState.PREPARING)
 
     def _handle_waypoint_reached(self):
-        """Mark waypoint complete, advance to next."""
+        """Hold for WAYPOINT_HOLD_TIME, show notification, then advance."""
         elapsed = time.time() - self._state_entry_time
-        if elapsed >= 0.5:  # brief pause
+        # Send stop reinforcement
+        if int(elapsed) != getattr(self, '_wr_last_sec', -1):
+            self._wr_last_sec = int(elapsed)
+            self._send_stop()
+        if elapsed >= self.WAYPOINT_HOLD_TIME:
             self._advance_waypoint()
 
     # ================================================================
@@ -429,15 +513,44 @@ class NavController:
             return self._current_heading  # return last known
 
     def _get_gps(self) -> Optional[dict]:
-        """Get current GPS position."""
+        """Get current GPS position.
+
+        Primary: SIM7600E on Pi (via gps_provider callback).
+        Fallback: Neo-6M on Mega (via mega_gps_provider callback) if primary
+        returns None — also updates _neo_satellites.
+        """
+        # Primary GPS
         try:
             if callable(self._gps_provider):
-                return self._gps_provider()
+                result = self._gps_provider()
             elif hasattr(self._gps_provider, 'get_position'):
-                return self._gps_provider.get_position()
-            return None
+                result = self._gps_provider.get_position()
+            else:
+                result = None
         except Exception:
-            return None
+            result = None
+
+        if result:
+            return result
+
+        # Fallback: poll Mega Neo-6M
+        if self._mega_gps_provider:
+            try:
+                mega = self._mega_gps_provider()
+                if mega and mega.get('valid') and mega.get('latitude') and mega.get('longitude'):
+                    self._neo_satellites = mega.get('satellites', 0)
+                    logger.debug("Using Neo-6M GPS fallback (sats=%d)", self._neo_satellites)
+                    return {
+                        'latitude': mega['latitude'],
+                        'longitude': mega['longitude'],
+                        'speed': mega.get('speed', 0),
+                    }
+                elif mega:
+                    self._neo_satellites = mega.get('satellites', 0)
+            except Exception:
+                pass
+
+        return None
 
     def _check_obstacle(self) -> bool:
         """Poll Mega for obstacle status."""
@@ -475,6 +588,10 @@ class NavController:
 
             if self._current_wp_index >= len(self._waypoints):
                 self._send_stop()
+                self._notification = {
+                    'level': 'success',
+                    'msg': 'All waypoints complete! Navigation finished.'
+                }
                 self._enter_state(NavState.COMPLETE)
                 self._running = False
                 logger.info("ALL WAYPOINTS COMPLETE!")
@@ -482,7 +599,12 @@ class NavController:
 
         # Reset per-waypoint counters
         self._avoid_attempts = 0
-        self._enter_state(NavState.ACQUIRING_HEADING)
+        self._send_stop()
+        self._notification = {
+            'level': 'info',
+            'msg': f'Waypoint {self._current_wp_index}/{len(self._waypoints)} — preparing next...'
+        }
+        self._enter_state(NavState.PREPARING)
 
     @staticmethod
     def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
