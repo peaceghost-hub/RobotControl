@@ -131,10 +131,12 @@ class RobotController:
         except Exception as e:
             logger.warning(f"Sensor Manager not available: {e}")
         
-        # Compass (HMC5883L on I2C)
+        # Compass (HMC5883L on I2C) — pass full config for calibration
         self.compass = None
         try:
-            self.compass = Compass()
+            compass_cal = CONFIG.get('compass', {})
+            decl = compass_cal.get('declination_deg', -0.5)
+            self.compass = Compass(declination_deg=decl, config=CONFIG)
             logger.info("Compass initialized")
         except Exception as e:
             logger.warning(f"Compass not available: {e}")

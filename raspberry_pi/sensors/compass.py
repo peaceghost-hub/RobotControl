@@ -27,7 +27,7 @@ def deg_to_rad(deg: float) -> float:
 
 
 class Compass:
-    def __init__(self, bus=1, declination_deg=-0.5):
+    def __init__(self, bus=1, declination_deg=-0.5, config=None):
         self.bus = SMBus(bus)
         self._bus_num = bus
         self.address = None
@@ -37,6 +37,22 @@ class Compass:
 
         # declination stored in radians
         self.declination = deg_to_rad(declination_deg)
+
+        # --- Calibration offsets (loaded from config or defaults) ---
+        # Hard-iron:  centres the raw ellipse at (0,0)
+        # Soft-iron:  scales the axes so the ellipse becomes a circle
+        # Heading offset: rotates 0° to align with magnetic North
+        cal = (config or {}).get('compass', {})
+        self._cal_offset_x = float(cal.get('offset_x', 0.0))
+        self._cal_offset_y = float(cal.get('offset_y', 0.0))
+        self._cal_scale_x  = float(cal.get('scale_x', 1.0))
+        self._cal_scale_y  = float(cal.get('scale_y', 1.0))
+        self._cal_heading_offset = float(cal.get('heading_offset', 0.0))
+        self._calibrated = bool(cal.get('calibrated', False))
+        if self._calibrated:
+            logger.info(f"Compass calibration loaded: offset=({self._cal_offset_x:.1f}, "
+                        f"{self._cal_offset_y:.1f}), scale=({self._cal_scale_x:.4f}, "
+                        f"{self._cal_scale_y:.4f}), heading_offset={self._cal_heading_offset:.1f}°")
 
         # Try raw fd for ioctl fallback
         try:
@@ -241,26 +257,39 @@ class Compass:
         if x == 0 and y == 0:
             return 0.0
 
-        # Heading formula: atan2(Y, X)
-        # Y-axis is physically inverted (points LEFT instead of RIGHT),
-        # so negate Y to correct the heading direction.
-        heading = math.atan2(-y, x)
+        # --- Apply calibration (hard-iron + soft-iron) ---
+        # Subtract hard-iron offsets (centres the ellipse at origin)
+        cx = (x - self._cal_offset_x) * self._cal_scale_x
+        cy = (y - self._cal_offset_y) * self._cal_scale_y
 
-        # Apply declination (already in radians)
-        heading += self.declination
+        if cx == 0 and cy == 0:
+            return 0.0
 
-        # Normalize 0–2π
-        if heading < 0:
-            heading += 2 * math.pi
-        elif heading >= 2 * math.pi:
-            heading -= 2 * math.pi
+        # atan2(Y, X) gives angle from X-axis (robot front)
+        # The calibration heading_offset rotates the reference so 0° = North
+        heading_deg = math.atan2(cy, cx) * 180.0 / math.pi
 
-        return heading * 180 / math.pi
+        # Subtract the calibration heading offset (aligned during calibration)
+        heading_deg -= self._cal_heading_offset
+
+        # Apply magnetic declination
+        heading_deg += self.declination * 180.0 / math.pi
+
+        # Normalize to 0–360°
+        heading_deg %= 360.0
+
+        return heading_deg
 
     # --------------------------------------------------------------
     # CALIBRATION
     # --------------------------------------------------------------
     def calibrate(self):
+        """Legacy calibrate - use scripts/calibrate_compass.py instead.
+        
+        This only prints min/max offsets but does NOT apply correction.
+        For full hard-iron + soft-iron + heading offset calibration,
+        run:  python3 scripts/calibrate_compass.py
+        """
         logger.info("Rotate compass 360° for 30 seconds")
 
         min_x = 99999
@@ -279,6 +308,8 @@ class Compass:
 
         off_x = (max_x + min_x) / 2
         off_y = (max_y + min_y) / 2
+        logger.info(f"Offsets: X={off_x:.1f}, Y={off_y:.1f}")
+        logger.info("For full calibration, run: python3 scripts/calibrate_compass.py")
 
         logger.info(f"Calibration offsets: X={off_x}, Y={off_y}")
         return off_x, off_y
