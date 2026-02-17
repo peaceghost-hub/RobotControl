@@ -56,6 +56,7 @@ class NavController:
     OBSTACLE_TURN_TIME   = 1.0    # seconds — rotate away from obstacle
     OBSTACLE_CHECK_PAUSE = 0.3    # seconds — pause after stop before turning
     COURSE_DRIFT_THRESH  = 12.0   # degrees — re-acquire heading while driving
+    NAV_GRACE_PERIOD     = 2.0    # seconds — skip drift check at start of NAVIGATING
     HEADING_ACQUIRE_TIMEOUT = 30.0  # seconds — give up if can't acquire
     HEADING_HOLD_TIME    = 10.0   # seconds — countdown before forward drive
     PREPARE_TIME         = 3.0    # seconds — pause before acquiring heading
@@ -408,11 +409,15 @@ class NavController:
             return
 
         # Check course drift — if heading drifted too far, re-acquire
-        if abs(self._last_heading_error) > self.COURSE_DRIFT_THRESH:
-            logger.info("Course drift %.1f° — re-acquiring heading", self._last_heading_error)
-            self._send_stop()
-            self._enter_state(NavState.ACQUIRING_HEADING)
-            return
+        # Grace period: skip drift check for first NAV_GRACE_PERIOD seconds
+        # so the robot actually drives forward after heading countdown.
+        nav_elapsed = time.time() - self._state_entry_time
+        if nav_elapsed >= self.NAV_GRACE_PERIOD:
+            if abs(self._last_heading_error) > self.COURSE_DRIFT_THRESH:
+                logger.info("Course drift %.1f° — re-acquiring heading", self._last_heading_error)
+                self._send_stop()
+                self._enter_state(NavState.ACQUIRING_HEADING)
+                return
 
         # All clear — drive forward
         self._send_forward(self.DRIVE_SPEED)

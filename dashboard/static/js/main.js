@@ -2026,7 +2026,7 @@ function updateNavStatusUI(nav) {
 
     // Neo-6M satellite count
     if (nav.neo_satellites !== undefined) {
-        updateElement('nav-neo-sats', `${nav.neo_satellites}`);
+        updateElement('neo-satellites', `${nav.neo_satellites}`);
     }
 
     if (compassState.waypointIndex !== null && compassState.waypointTotal !== null) {
