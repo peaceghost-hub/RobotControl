@@ -7,6 +7,10 @@ compass sensor lives (zero-latency heading reads).  Sends simple drive
 commands to the Arduino Mega over I2C — the Mega acts as a motor driver
 only, no navigation math.
 
+Geodesic calculations use GeographicLib (Karney's algorithm) on the
+WGS-84 ellipsoid for sub-millimetre bearing & distance accuracy.
+Falls back to spherical haversine if the library is unavailable.
+
 State machine:
     IDLE → PREPARING (3s) → ACQUIRING_HEADING → HEADING_ACQUIRED (10s)
          → NAVIGATING → WAYPOINT_REACHED (3s) → PREPARING → ...
@@ -23,7 +27,20 @@ import threading
 from enum import Enum, auto
 from typing import Optional, Dict, List, Any
 
+# Karney's WGS-84 geodesic — gold-standard bearing & distance
+try:
+    from geographiclib.geodesic import Geodesic
+    _geod = Geodesic.WGS84
+    _HAS_GEOGRAPHICLIB = True
+except ImportError:
+    _geod = None
+    _HAS_GEOGRAPHICLIB = False
+
 logger = logging.getLogger("nav_controller")
+if _HAS_GEOGRAPHICLIB:
+    logger.info("GeographicLib loaded — using Karney WGS-84 geodesic (sub-mm precision)")
+else:
+    logger.warning("geographiclib not installed — falling back to spherical haversine")
 
 
 class NavState(Enum):
@@ -50,9 +67,9 @@ class NavController:
     WAYPOINT_RADIUS      = 3.0    # meters — "reached"
     HEADING_DEADBAND     = 5.0    # degrees — close enough → go straight
     ACQUIRE_SLOW_THRESH  = 15.0   # degrees — switch to slow rotation
-    ROTATION_SPEED_FAST  = 80     # PWM for big heading error
-    ROTATION_SPEED_SLOW  = 50     # PWM for small heading error
-    DRIVE_SPEED          = 120    # PWM forward
+    ROTATION_SPEED_FAST  = 150    # PWM for big heading error
+    ROTATION_SPEED_SLOW  = 100    # PWM for small heading error
+    DRIVE_SPEED          = 150    # PWM forward
     OBSTACLE_TURN_TIME   = 1.0    # seconds — rotate away from obstacle
     OBSTACLE_CHECK_PAUSE = 0.3    # seconds — pause after stop before turning
     COURSE_DRIFT_THRESH  = 12.0   # degrees — re-acquire heading while driving
@@ -176,6 +193,33 @@ class NavController:
                 'notification': notif,
                 'neo_satellites': self._neo_satellites,
             }
+
+    def return_home(self):
+        """Reverse the completed + remaining waypoints and navigate back to start.
+
+        Takes the full waypoint list (in original order), reverses it,
+        and begins navigation so the robot retraces its path.
+        """
+        with self._lock:
+            if not self._waypoints:
+                logger.warning("Cannot return home — no waypoints")
+                return False
+            # Reverse the FULL waypoint list (already visited + remaining)
+            reversed_wps = list(reversed(self._waypoints))
+            self._waypoints = reversed_wps
+            self._current_wp_index = 0
+            self._completed_waypoints = []
+            self._avoid_attempts = 0
+            self._avoid_direction = 'left'
+        self._running = True
+        self._send_stop()
+        self._notification = {'level': 'info', 'msg': 'Returning home — preparing...'}
+        self._enter_state(NavState.PREPARING)
+        if not self._thread or not self._thread.is_alive():
+            self._thread = threading.Thread(target=self._nav_loop, daemon=True)
+            self._thread.start()
+        logger.info("RETURN HOME started (%d waypoints, reversed)", len(reversed_wps))
+        return True
 
     def set_waypoints(self, waypoints: List[Dict[str, Any]]):
         """Load waypoints from dashboard.  Each: {latitude, longitude, id, description}."""
@@ -307,6 +351,13 @@ class NavController:
         self._distance_to_wp = self._haversine(cur_lat, cur_lon, wp_lat, wp_lon)
         self._target_bearing = self._bearing(cur_lat, cur_lon, wp_lat, wp_lon)
         self._last_heading_error = self._normalize_error(self._target_bearing - self._current_heading)
+
+        # Debug log bearing calculation periodically (every ~2s at 10Hz)
+        if int(time.time()) % 2 == 0 and int(time.time() * self.NAV_LOOP_HZ) % self.NAV_LOOP_HZ == 0:
+            logger.debug("NAV bearing: cur=(%.6f,%.6f) wp=(%.6f,%.6f) → bearing=%.1f° heading=%.1f° error=%.1f° dist=%.1fm",
+                         cur_lat, cur_lon, wp_lat, wp_lon,
+                         self._target_bearing, self._current_heading,
+                         self._last_heading_error, self._distance_to_wp)
 
         # ---- Dispatch to state handler ----
         if state == NavState.ACQUIRING_HEADING:
@@ -613,8 +664,16 @@ class NavController:
 
     @staticmethod
     def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Distance in meters between two GPS coordinates."""
-        R = 6371000.0  # Earth radius in meters
+        """Distance in meters between two GPS coordinates.
+
+        Primary:  Karney's geodesic on WGS-84 ellipsoid (< 0.5 mm error).
+        Fallback: Haversine on sphere (if geographiclib unavailable).
+        """
+        if _HAS_GEOGRAPHICLIB:
+            result = _geod.Inverse(lat1, lon1, lat2, lon2)
+            return result['s12']  # distance in metres
+        # Spherical fallback
+        R = 6371000.0
         phi1 = math.radians(lat1)
         phi2 = math.radians(lat2)
         dphi = math.radians(lat2 - lat1)
@@ -624,7 +683,16 @@ class NavController:
 
     @staticmethod
     def _bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Bearing in degrees (0–360) from point 1 to point 2."""
+        """Initial bearing (azimuth) in degrees (0–360) from point 1 to point 2.
+
+        Primary:  Karney's geodesic on WGS-84 ellipsoid (< 0.5 mm error).
+        Fallback: Spherical great-circle bearing (if geographiclib unavailable).
+        """
+        if _HAS_GEOGRAPHICLIB:
+            result = _geod.Inverse(lat1, lon1, lat2, lon2)
+            azi = result['azi1']  # initial azimuth, -180..+180
+            return azi % 360.0
+        # Spherical fallback
         phi1 = math.radians(lat1)
         phi2 = math.radians(lat2)
         dlam = math.radians(lon2 - lon1)

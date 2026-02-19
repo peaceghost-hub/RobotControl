@@ -1353,7 +1353,7 @@ function updateControlIndicators() {
         releaseBtn.disabled = !state.manualOverride || state.backup.active;
     }
 
-    const navButtonIds = ['nav-start-btn', 'nav-pause-btn', 'nav-resume-btn', 'nav-stop-btn', 'send-waypoints-btn'];
+    const navButtonIds = ['nav-start-btn', 'nav-pause-btn', 'nav-resume-btn', 'nav-stop-btn', 'send-waypoints-btn', 'nav-return-home-btn'];
     navButtonIds.forEach(id => {
         const button = document.getElementById(id);
         if (button) {
@@ -1554,6 +1554,25 @@ function setupEventListeners() {
 
     const sendWaypointsBtn = document.getElementById('send-waypoints-btn');
     if (sendWaypointsBtn) sendWaypointsBtn.addEventListener('click', sendWaypointsToRobot);
+
+    const returnHomeBtn = document.getElementById('nav-return-home-btn');
+    if (returnHomeBtn) returnHomeBtn.addEventListener('click', async () => {
+        if (state.backup.active) {
+            addLog('warning', 'Cannot return home while backup control is active');
+            return;
+        }
+        if (!confirm('Return home? The robot will navigate back through all waypoints in reverse.')) return;
+        if (socket && socket.connected) {
+            socket.emit('instant_command', {
+                command: 'NAV_RETURN_HOME',
+                payload: {},
+                device_id: state.deviceId
+            });
+            addLog('info', 'Instant command: NAV_RETURN_HOME');
+        } else {
+            await sendRobotCommand('NAV_RETURN_HOME');
+        }
+    });
 
     // Line follower removed — no line follower hardware connected
 
@@ -2373,12 +2392,33 @@ window.toggleOverlay = toggleOverlay;
  */
 // ── Camera zoom controls ──────────────────────────────────────
 (function initCameraZoom() {
-    const MIN = 1.0, MAX = 4.0, STEP = 0.5;
+    const MIN = 0.25, MAX = 4.0, STEP = 0.25;
     let camZoom = 1.0;
 
     function apply() {
         const feed = document.getElementById('camera-feed');
-        if (feed) feed.style.transform = `scale(${camZoom})`;
+        if (feed) {
+            if (camZoom <= 1.0) {
+                // Below 1×: use contain so the full frame is visible (no crop)
+                feed.style.objectFit = 'contain';
+                feed.style.transform = 'none';
+                // Use width/height percentage to shrink within container
+                feed.style.width = `${camZoom * 100}%`;
+                feed.style.height = `${camZoom * 100}%`;
+                feed.style.inset = 'auto';
+                feed.style.position = 'relative';
+                feed.style.margin = 'auto';
+            } else {
+                // Above 1×: zoom in with cover (original behavior)
+                feed.style.objectFit = 'cover';
+                feed.style.transform = `scale(${camZoom})`;
+                feed.style.width = '100%';
+                feed.style.height = '100%';
+                feed.style.inset = '0';
+                feed.style.position = 'absolute';
+                feed.style.margin = '';
+            }
+        }
         const label = document.getElementById('cam-zoom-level');
         if (label) label.textContent = `${camZoom}×`;
     }

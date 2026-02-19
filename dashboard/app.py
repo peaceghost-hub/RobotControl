@@ -848,21 +848,52 @@ def complete_waypoint(waypoint_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+@app.route('/api/waypoints/<int:waypoint_id>', methods=['DELETE'])
+def delete_waypoint(waypoint_id):
+    """Delete a single waypoint by ID"""
+    try:
+        waypoint = Waypoint.query.get(waypoint_id)
+        if not waypoint:
+            return jsonify({'status': 'error', 'message': 'Waypoint not found'}), 404
+
+        device_id = waypoint.device_id
+        db.session.delete(waypoint)
+        db.session.commit()
+
+        # Resequence remaining waypoints
+        remaining = Waypoint.query.filter_by(device_id=device_id, completed=False)\
+            .order_by(Waypoint.sequence).all()
+        for idx, wp in enumerate(remaining, 1):
+            wp.sequence = idx
+        db.session.commit()
+
+        socketio.emit('waypoint_update', {
+            'action': 'deleted',
+            'waypoint_id': waypoint_id
+        }, namespace='/realtime')
+
+        return jsonify({'status': 'success', 'message': f'Waypoint {waypoint_id} deleted'}), 200
+
+    except Exception as e:
+        logger.error(f"Error deleting waypoint: {str(e)}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 @app.route('/api/waypoints/clear', methods=['POST'])
 def clear_waypoints():
-    """Clear all waypoints for a device"""
+    """Clear ALL waypoints for a device (including completed)"""
     try:
         device_id = request.get_json().get('device_id', 'robot_01')
-        
-        Waypoint.query.filter_by(device_id=device_id, completed=False).delete()
+
+        Waypoint.query.filter_by(device_id=device_id).delete()
         db.session.commit()
-        
+
         socketio.emit('waypoint_update', {
             'action': 'cleared'
         }, namespace='/realtime')
-        
+
         return jsonify({'status': 'success', 'message': 'All waypoints cleared'}), 200
-        
+
     except Exception as e:
         logger.error(f"Error clearing waypoints: {str(e)}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
