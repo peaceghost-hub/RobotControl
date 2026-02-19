@@ -535,13 +535,17 @@ class RobotController:
             shutdown_event.wait(0.5)
 
     def gps_loop(self):
-        """GPS loop: SIM7600E is the primary GPS source for the dashboard.
-        Always forwards position to Mega as a seed so navigation can start
-        before the Neo-6M gets its own fix.  Once Neo-6M locks, the Mega
-        ignores the seed automatically.
+        """GPS loop: reads position and sends to dashboard.
+
+        Primary:  SIM7600E GPS on Pi (high-accuracy, cellular module).
+        Fallback: Neo-6M GPS via Mega I2C (when SIM7600E has no fix).
+
+        Also stores the latest fix in _latest_gps for the Pi-side
+        NavController, and forwards SIM7600E data to Mega as a seed.
         """
         logger.info("Starting GPS loop...")
-        
+        neo_consecutive_fails = 0  # throttle Neo-6M error logging
+
         while not shutdown_event.is_set():
             try:
                 # Skip I2C GPS polling if wireless backup control is active
@@ -549,22 +553,60 @@ class RobotController:
                     logger.debug("GPS loop paused (wireless backup active)")
                     shutdown_event.wait(self.gps_interval)
                     continue
-                
+
                 gps_data = None
-                
-                # Primary source: SIM7600E GPS
+                gps_source = None
+
+                # ── Primary: SIM7600E GPS ─────────────────────────────
                 if self.sim7600e:
-                    gps_data = self.sim7600e.get_gps_data()
-                    if gps_data and self.robot_link:
-                        # Always forward to Mega — seeds its position until
-                        # the Neo-6M gets its own fix (seedPosition is a no-op
-                        # once Neo-6M has locked).
-                        try:
-                            self.robot_link.send_gps_data(gps_data)
-                            logger.debug("Forwarded SIM7600E GPS to Mega")
-                        except Exception as e:
-                            logger.debug(f"Could not forward GPS to Mega: {e}")
-                
+                    try:
+                        gps_data = self.sim7600e.get_gps_data()
+                    except Exception as e:
+                        logger.debug(f"SIM7600E GPS read failed: {e}")
+                        gps_data = None
+
+                    if gps_data and gps_data.get('latitude') is not None and gps_data.get('longitude') is not None:
+                        gps_source = 'SIM7600E'
+                        # Forward to Mega as seed for Neo-6M
+                        if self.robot_link:
+                            try:
+                                self.robot_link.send_gps_data(gps_data)
+                                logger.debug("Forwarded SIM7600E GPS to Mega")
+                            except Exception as e:
+                                logger.debug(f"Could not forward GPS to Mega: {e}")
+                    else:
+                        gps_data = None  # ensure clean None for fallback
+
+                # ── Fallback: Neo-6M via Mega I2C ─────────────────────
+                if gps_data is None and self.robot_link and not self.wireless_backup_active:
+                    try:
+                        mega_gps = self.robot_link.request_gps_data()
+                        if mega_gps and mega_gps.get('valid') and mega_gps.get('latitude') and mega_gps.get('longitude'):
+                            # Neo-6M returns valid coordinates
+                            gps_data = {
+                                'latitude': float(mega_gps['latitude']),
+                                'longitude': float(mega_gps['longitude']),
+                                'altitude': 0.0,
+                                'speed': float(mega_gps.get('speed', 0) or 0),
+                                'heading': float(mega_gps.get('heading', 0) or 0),
+                                'satellites': int(mega_gps.get('satellites', 0) or 0),
+                                'source': 'Neo-6M',
+                            }
+                            gps_source = 'Neo-6M'
+                            neo_consecutive_fails = 0
+                            logger.debug("Neo-6M fallback GPS: %.6f, %.6f (sats=%d)",
+                                         gps_data['latitude'], gps_data['longitude'],
+                                         gps_data['satellites'])
+                        else:
+                            neo_consecutive_fails += 1
+                            if neo_consecutive_fails <= 3 or neo_consecutive_fails % 30 == 0:
+                                logger.debug("Neo-6M GPS: no valid fix (attempt %d)", neo_consecutive_fails)
+                    except Exception as e:
+                        neo_consecutive_fails += 1
+                        if neo_consecutive_fails <= 3 or neo_consecutive_fails % 30 == 0:
+                            logger.debug("Neo-6M GPS poll failed: %s", e)
+
+                # ── Process valid GPS data ────────────────────────────
                 if gps_data and gps_data.get('latitude') is not None and gps_data.get('longitude') is not None:
                     # Store for Pi-side nav controller (thread-safe)
                     with self._latest_gps_lock:
@@ -580,28 +622,30 @@ class RobotController:
                             gps_data['heading'] = float(self.compass.read_heading())
                         except Exception as e:
                             logger.debug(f"Compass read failed: {e}")
-                            gps_data['heading'] = 0.0
-                    
+                            gps_data['heading'] = gps_data.get('heading', 0.0)
+
+                    # Tag source for dashboard display
+                    if gps_source:
+                        gps_data['source'] = gps_source
+
                     # Add timestamp and device ID
                     gps_data['timestamp'] = datetime.now().isoformat()
                     gps_data['device_id'] = self.device_id
-                    
+
                     # Send to dashboard
                     success = self.api_client.send_gps_data(gps_data)
-                    
+
                     if success:
-                        try:
-                            logger.debug(f"GPS data sent: {gps_data['latitude']:.6f}, {gps_data['longitude']:.6f}")
-                        except Exception:
-                            logger.debug("GPS data sent (values present)")
+                        logger.debug("GPS data sent [%s]: %.6f, %.6f",
+                                     gps_source, gps_data['latitude'], gps_data['longitude'])
                     else:
                         logger.warning("Failed to send GPS data")
                 else:
-                    logger.debug("No valid GPS data available")
-                
+                    logger.debug("No valid GPS data from any source")
+
             except Exception as e:
                 logger.error(f"Error in GPS loop: {e}")
-            
+
             # Wait before next request
             shutdown_event.wait(self.gps_interval)
     

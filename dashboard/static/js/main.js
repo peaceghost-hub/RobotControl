@@ -352,7 +352,12 @@ function handleGPSUpdate(data) {
     }
     updateElement('gps-speed', payload.speed !== undefined ? `${Number(payload.speed).toFixed(2)} m/s` : '--');
     updateElement('gps-satellites', payload.satellites !== undefined ? `${payload.satellites}` : '--');
-    updateElement('gps-source', source === 'backup' ? 'Backup (LoRa)' : 'Primary (Pi)');
+    // Show GPS source: SIM7600E (primary), Neo-6M (fallback), or Backup (LoRa)
+    let srcLabel = 'Primary (Pi)';
+    if (source === 'backup') srcLabel = 'Backup (LoRa)';
+    else if (payload.source === 'Neo-6M') srcLabel = 'Neo-6M (Mega)';
+    else if (payload.source === 'SIM7600E') srcLabel = 'SIM7600E (Pi)';
+    updateElement('gps-source', srcLabel);
 
     // Update map only when coordinates are valid
     if (hasValidFix && window.updateRobotPosition) {
