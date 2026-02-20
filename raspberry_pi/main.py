@@ -258,7 +258,13 @@ class RobotController:
                 logger.info("Pi-side NavController initialized")
             except Exception as e:
                 logger.warning(f"NavController init failed: {e}")
-        
+
+        # AI auto-drive: epoch counter to cancel stale delayed-resume threads.
+        # Bumped every time the user explicitly sends NAV_PAUSE / NAV_STOP /
+        # NAV_RESUME / NAV_START.  A delayed-resume thread captures the epoch
+        # at spawn time and only acts if the epoch hasn't changed.
+        self._ai_resume_epoch = 0
+
         # Thread management
         self.threads = []
         
@@ -885,24 +891,28 @@ class RobotController:
                 success = self.robot_link.ping() if self.robot_link else False
             elif command_type == 'NAV_START':
                 # Pi-side navigation: start nav controller (NOT Mega)
+                self._ai_resume_epoch += 1   # cancel stale AI resumes
                 if self.nav_controller:
                     success = self.nav_controller.start()
                 else:
                     logger.warning("NavController not available")
                     success = False
             elif command_type == 'NAV_PAUSE':
+                self._ai_resume_epoch += 1   # cancel stale AI resumes
                 if self.nav_controller:
                     self.nav_controller.pause()
                     success = True
                 else:
                     success = False
             elif command_type == 'NAV_RESUME':
+                self._ai_resume_epoch += 1   # cancel stale AI resumes
                 if self.nav_controller:
                     self.nav_controller.resume()
                     success = True
                 else:
                     success = False
             elif command_type == 'NAV_STOP':
+                self._ai_resume_epoch += 1   # cancel stale AI resumes
                 if self.nav_controller:
                     self.nav_controller.stop()
                     success = True
@@ -932,6 +942,7 @@ class RobotController:
                     success = False
                     logger.warning("Wireless control command not supported")
             elif command_type == 'NAV_RETURN_HOME':
+                self._ai_resume_epoch += 1   # cancel stale AI resumes
                 if self.nav_controller:
                     success = self.nav_controller.return_home()
                 else:
@@ -982,27 +993,34 @@ class RobotController:
                 # NavController resumes on the next analysis cycle when
                 # AI sends SAFE+FORWARD (which is filtered on the dashboard
                 # side so NavController takes back control naturally).
+                #
+                # EPOCH GUARD: capture the epoch at spawn time.  If the
+                # user sends NAV_PAUSE / NAV_STOP / NAV_RESUME / NAV_START
+                # before the sleep expires, the epoch will have changed
+                # and this thread harmlessly no-ops.  This prevents the
+                # AI resume from overriding the user's explicit command.
                 if nav_was_active and ai_safety != 'DANGER':
-                    # Schedule resume after ~2s so the avoidance manoeuvre
-                    # has time to execute before NavController takes over.
-                    def _delayed_resume():
+                    epoch = self._ai_resume_epoch
+                    def _delayed_resume(_epoch=epoch):
                         import time as _t
                         _t.sleep(2.0)
+                        if _epoch != self._ai_resume_epoch:
+                            logger.info("AI delayed-resume cancelled (user intervened)")
+                            return
                         if (self.nav_controller
                                 and not self.nav_controller.is_active):
-                            # Stop the manual drive latch first
                             self._handle_manual_drive({'direction': 'stop'})
                             self.nav_controller.resume()
                             logger.info("NavController resumed after AI override")
                     Thread(target=_delayed_resume, daemon=True).start()
                 elif nav_was_active and ai_safety == 'DANGER':
-                    # DANGER: keep NavController paused until next AI cycle
-                    # resolves the situation. If AI sends SAFE, dashboard
-                    # won't send a command (filtered), so NavController
-                    # resumes naturally via the delayed resume.
-                    def _danger_resume():
+                    epoch = self._ai_resume_epoch
+                    def _danger_resume(_epoch=epoch):
                         import time as _t
                         _t.sleep(4.0)
+                        if _epoch != self._ai_resume_epoch:
+                            logger.info("AI DANGER-resume cancelled (user intervened)")
+                            return
                         if (self.nav_controller
                                 and not self.nav_controller.is_active):
                             self._handle_manual_drive({'direction': 'stop'})

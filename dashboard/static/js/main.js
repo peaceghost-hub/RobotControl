@@ -2546,13 +2546,8 @@ function initZoomControls() {
         currentBaseNav = mode || 'none';
         const active = currentBaseNav !== 'none';
 
-        // Enable/disable auto-drive toggle
-        if (driveToggle) {
-            driveToggle.disabled = !active;
-            if (!active && driveToggle.checked) {
-                driveToggle.checked = false;  // auto-uncheck when nav stops
-            }
-        }
+        // Auto-drive toggle is NEVER disabled — user can toggle freely.
+        // Commands are gated server-side (no base nav = no commands sent).
 
         // Update base-nav label
         if (baseNavLabel) {
@@ -2652,12 +2647,6 @@ function initZoomControls() {
     });
 
     if (driveToggle) driveToggle.addEventListener('change', () => {
-        if (driveToggle.checked && currentBaseNav === 'none') {
-            // Reject — no base navigation active
-            driveToggle.checked = false;
-            addLog('warning', 'Auto-drive requires active navigation (forward arrow or waypoint nav) first');
-            return;
-        }
         apiPost('/api/ai/drive', { enabled: driveToggle.checked }).then(r => {
             if (r && typeof r.auto_drive === 'boolean') {
                 driveToggle.checked = r.auto_drive;

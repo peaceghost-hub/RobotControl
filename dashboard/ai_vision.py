@@ -265,17 +265,15 @@ class MoondreamVision:
         return self._base_nav_mode
 
     def set_auto_drive(self, enabled: bool) -> None:
-        """Toggle auto-drive: navigate mode sends commands to the Pi.
+        """Toggle auto-drive on/off.  Can be toggled freely at any time.
 
-        RULE: Auto-drive can ONLY be enabled when a base navigation
-        method is already active (manual forward or waypoint nav).
-        It never works alone or as the first action.
+        Auto-drive never initiates movement on its own.  The server-side
+        ``_send_drive_command`` gates on ``base_nav_mode`` so no commands
+        reach the Pi unless a base navigation method (manual forward or
+        waypoint nav) is already running.  This means the user can
+        pre-enable auto-drive and it quietly waits until navigation
+        starts, or toggle it mid-navigation without locking anything.
         """
-        if enabled and self._base_nav_mode == "none":
-            logger.warning("Auto-drive rejected — no base navigation active")
-            self._auto_drive = False
-            self._broadcast_status()
-            return
         self._auto_drive = enabled
         if enabled:
             if self._mode != "navigate":
@@ -295,16 +293,16 @@ class MoondreamVision:
         - Waypoint nav is started    → 'waypoint'
         - Navigation/driving stops   → 'none'
 
-        When base nav goes to 'none', auto-drive auto-disables.
+        Auto-drive is NOT disabled when base nav goes to 'none'.
+        It stays toggled on but quietly stops sending commands
+        (gated in ``_send_drive_command``).  This gives the user
+        full flexibility — they can stop, steer manually, restart
+        nav, and auto-drive seamlessly picks back up.
         """
         prev = self._base_nav_mode
         self._base_nav_mode = mode if mode in ("manual", "waypoint") else "none"
-        logger.info("Base nav: %s → %s", prev, self._base_nav_mode)
-
-        # Auto-disable auto-drive when base navigation stops
-        if self._base_nav_mode == "none" and self._auto_drive:
-            logger.info("Auto-drive auto-disabled — base navigation stopped")
-            self._auto_drive = False
+        if prev != self._base_nav_mode:
+            logger.info("Base nav: %s → %s", prev, self._base_nav_mode)
         self._broadcast_status()
 
     # ─── Navigation decision parser ───────────────────────────────────

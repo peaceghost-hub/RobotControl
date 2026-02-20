@@ -1254,7 +1254,7 @@ def set_instant_command():
             if direction in ('forward', 'reverse'):
                 ai_vision.set_base_nav('manual')
             elif direction in ('stop', 'brake', ''):
-                if ai_vision.base_nav_mode == 'manual':
+                if ai_vision.base_nav_mode == 'manual' and not ai_vision.auto_drive:
                     ai_vision.set_base_nav('none')
 
         return jsonify({'status': 'success', 'seq': seq}), 200
@@ -1635,7 +1635,9 @@ def handle_instant_command(data):
                 data['command'], seq, len(_instant_queue))
 
     # Track base navigation state for AI auto-drive gating.
-    # Auto-drive only works when a base navigation method is active.
+    # Auto-drive commands are gated server-side — no base nav = no commands.
+    # RULE: manual arrows (left/right/stop) do NOT clear base nav, so
+    # the user can steer freely without disrupting auto-drive.
     cmd = data['command']
     if cmd == 'NAV_START' or cmd == 'NAV_RESUME':
         ai_vision.set_base_nav('waypoint')
@@ -1646,8 +1648,10 @@ def handle_instant_command(data):
         if direction in ('forward', 'reverse'):
             ai_vision.set_base_nav('manual')
         elif direction in ('stop', 'brake', ''):
-            # Only clear if currently in manual mode (don't clear waypoint nav)
-            if ai_vision.base_nav_mode == 'manual':
+            # Only clear manual base nav if auto-drive is OFF.
+            # If auto-drive is ON, let user press stop freely —
+            # they're just temporarily intervening.
+            if ai_vision.base_nav_mode == 'manual' and not ai_vision.auto_drive:
                 ai_vision.set_base_nav('none')
 
 
