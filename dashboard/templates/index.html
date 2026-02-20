@@ -51,6 +51,7 @@
                 <button id="open-data-btn" class="btn btn-small">Data History</button>
                 <button id="open-waypoints-btn" class="btn btn-small">Waypoints</button>
                 <button id="open-status-btn" class="btn btn-small">Status</button>
+                <button id="open-ai-btn" class="btn btn-small">🤖 AI Vision</button>
                 <button id="toggle-logs-btn" class="btn btn-small">Logs</button>
             </div>
             <div class="toolbar-right">
@@ -414,6 +415,94 @@
                     <button id="prev-page-btn" class="btn btn-small" disabled>← Previous</button>
                     <span id="page-info">Page 1</span>
                     <button id="next-page-btn" class="btn btn-small">Next →</button>
+                </div>
+            </div>
+            <div class="resize-handle" data-resize="se"></div>
+        </div>
+
+        <!-- AI Vision Overlay (Moondream 2) -->
+        <div class="panel ai-panel overlay-window hidden" data-overlay-id="ai" style="width: 520px; height: 560px; left: 520px; top: 80px;">
+            <div class="panel-header overlay-header">
+                <h2>🤖 AI Vision</h2>
+                <div class="overlay-actions">
+                    <span id="ai-model-status" class="status-badge subtle">Not Loaded</span>
+                    <button class="btn btn-small overlay-close" data-overlay-target="ai">✖</button>
+                </div>
+            </div>
+            <div class="panel-content ai-vision-content">
+                <!-- Model control -->
+                <div class="ai-control-row">
+                    <button id="ai-load-btn" class="btn btn-small btn-primary">Load Model</button>
+                    <button id="ai-unload-btn" class="btn btn-small">Unload</button>
+                    <label class="ai-toggle-label">
+                        <input type="checkbox" id="ai-enable-toggle">
+                        <span>Auto Analyse</span>
+                    </label>
+                </div>
+
+                <!-- Mode selector -->
+                <div class="ai-control-row">
+                    <label for="ai-mode-select">Mode:</label>
+                    <select id="ai-mode-select">
+                        <option value="navigate">🚗 Navigate (Auto-Drive)</option>
+                        <option value="scene">🏞️ Scene Description</option>
+                        <option value="obstacles">🚧 Obstacle Check</option>
+                        <option value="direction">🧭 Direction Advice</option>
+                        <option value="terrain">🌍 Terrain Analysis</option>
+                        <option value="detect">🔍 Object Detection</option>
+                        <option value="custom">✏️ Custom Question</option>
+                    </select>
+                </div>
+
+                <!-- Detect target (shown when mode=detect) -->
+                <div id="ai-detect-row" class="ai-control-row" style="display:none;">
+                    <label for="ai-detect-target">Find:</label>
+                    <input type="text" id="ai-detect-target" placeholder="obstacle" value="obstacle">
+                </div>
+
+                <!-- Custom prompt (shown when mode=custom) -->
+                <div id="ai-custom-row" class="ai-control-row" style="display:none;">
+                    <label for="ai-custom-prompt">Prompt:</label>
+                    <input type="text" id="ai-custom-prompt" placeholder="Ask anything about the image...">
+                </div>
+
+                <!-- Interval -->
+                <div class="ai-control-row">
+                    <label for="ai-interval-slider">Interval:</label>
+                    <input type="range" id="ai-interval-slider" min="1" max="15" step="0.5" value="3">
+                    <span id="ai-interval-display">3.0s</span>
+                    <button id="ai-query-once-btn" class="btn btn-small" title="Analyse current frame once">📸 Analyse Now</button>
+                </div>
+
+                <!-- Auto-Drive toggle (requires active navigation first) -->
+                <div id="ai-drive-row" class="ai-control-row ai-drive-row">
+                    <label class="ai-toggle-label">
+                        <input type="checkbox" id="ai-drive-toggle" disabled>
+                        <span>🚗 Auto-Drive</span>
+                    </label>
+                    <span id="ai-base-nav-label" class="ai-base-nav-label">No nav active</span>
+                    <span id="ai-safety-badge" class="ai-safety-badge ai-safety-unknown">--</span>
+                    <span id="ai-drive-direction" class="ai-drive-direction">--</span>
+                    <span id="ai-drive-count" class="ai-meta">#0</span>
+                </div>
+                <div id="ai-drive-hint" class="ai-info-hint" style="margin-top:0;">
+                    ⚠️ Start waypoint navigation or press forward arrow first, then enable auto-drive.
+                </div>
+
+                <!-- Results area -->
+                <div class="ai-result-area">
+                    <div class="ai-result-header">
+                        <span id="ai-result-mode" class="status-badge subtle">--</span>
+                        <span id="ai-result-time" class="ai-meta">--</span>
+                        <span id="ai-result-count" class="ai-meta">#0</span>
+                    </div>
+                    <div id="ai-result-text" class="ai-result-text">No analysis yet. Load the model and enable auto-analyse, or click Analyse Now.</div>
+                    <!-- Detection overlay info -->
+                    <div id="ai-detections-list" class="ai-detections-list" style="display:none;"></div>
+                </div>
+
+                <div class="ai-info-hint">
+                    Moondream 2 VLM runs on the dashboard server. Requires <code>torch</code> + <code>transformers</code>.
                 </div>
             </div>
             <div class="resize-handle" data-resize="se"></div>

@@ -1463,6 +1463,8 @@ function setupEventListeners() {
     if (statusBtn) statusBtn.addEventListener('click', () => toggleOverlay('status'));
     const logsBtn = document.getElementById('toggle-logs-btn');
     if (logsBtn) logsBtn.addEventListener('click', () => toggleOverlay('logs'));
+    const aiBtn = document.getElementById('open-ai-btn');
+    if (aiBtn) aiBtn.addEventListener('click', () => toggleOverlay('ai', true));
 
     const resetLayoutBtn = document.getElementById('reset-layout-btn');
     if (resetLayoutBtn) resetLayoutBtn.addEventListener('click', () => {
@@ -2495,3 +2497,285 @@ function initZoomControls() {
 
     applyZoom();
 }
+
+/**
+ * ─── AI Vision Controller (Moondream 2) ────────────────────────────
+ * Manages the AI Vision overlay: model loading, mode switching,
+ * interval control, manual queries, and live result updates.
+ * Non-blocking — all inference runs server-side in a background thread.
+ *
+ * AUTO-DRIVE RULE: can only be enabled when a base navigation method
+ * is already active (manual forward arrow or waypoint navigation).
+ * It never works alone or as the first action.
+ */
+(function initAiVision() {
+    'use strict';
+
+    // ── DOM references ───────────────────────────────────────────────
+    const loadBtn       = document.getElementById('ai-load-btn');
+    const unloadBtn     = document.getElementById('ai-unload-btn');
+    const enableToggle  = document.getElementById('ai-enable-toggle');
+    const modeSelect    = document.getElementById('ai-mode-select');
+    const detectRow     = document.getElementById('ai-detect-row');
+    const detectTarget  = document.getElementById('ai-detect-target');
+    const customRow     = document.getElementById('ai-custom-row');
+    const customPrompt  = document.getElementById('ai-custom-prompt');
+    const intervalSlider= document.getElementById('ai-interval-slider');
+    const intervalDisp  = document.getElementById('ai-interval-display');
+    const queryOnceBtn  = document.getElementById('ai-query-once-btn');
+    const modelStatus   = document.getElementById('ai-model-status');
+    const resultMode    = document.getElementById('ai-result-mode');
+    const resultTime    = document.getElementById('ai-result-time');
+    const resultCount   = document.getElementById('ai-result-count');
+    const resultText    = document.getElementById('ai-result-text');
+    const detectionsList= document.getElementById('ai-detections-list');
+    const driveRow      = document.getElementById('ai-drive-row');
+    const driveToggle   = document.getElementById('ai-drive-toggle');
+    const safetyBadge   = document.getElementById('ai-safety-badge');
+    const driveDir      = document.getElementById('ai-drive-direction');
+    const driveCount    = document.getElementById('ai-drive-count');
+    const baseNavLabel  = document.getElementById('ai-base-nav-label');
+    const driveHint     = document.getElementById('ai-drive-hint');
+
+    if (!loadBtn) return; // AI panel not in DOM
+
+    // ── Base-nav state (tracked from server + local events) ──────────
+    let currentBaseNav = 'none';  // 'none' | 'manual' | 'waypoint'
+
+    function updateBaseNavUI(mode) {
+        currentBaseNav = mode || 'none';
+        const active = currentBaseNav !== 'none';
+
+        // Enable/disable auto-drive toggle
+        if (driveToggle) {
+            driveToggle.disabled = !active;
+            if (!active && driveToggle.checked) {
+                driveToggle.checked = false;  // auto-uncheck when nav stops
+            }
+        }
+
+        // Update base-nav label
+        if (baseNavLabel) {
+            const labels = { none: 'No nav active', manual: '↑ Manual Fwd', waypoint: '🎯 Waypoint Nav' };
+            baseNavLabel.textContent = labels[currentBaseNav] || 'No nav active';
+            baseNavLabel.className = 'ai-base-nav-label' + (active ? ' nav-' + currentBaseNav : '');
+        }
+
+        // Visual cue on the drive row
+        if (driveRow) driveRow.setAttribute('data-nav-active', active ? 'true' : 'false');
+
+        // Show/hide hint
+        if (driveHint) driveHint.style.display = active ? 'none' : '';
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────
+    function apiPost(path, body) {
+        return fetch(path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        }).then(r => r.json()).catch(e => { console.error('AI API', e); return null; });
+    }
+
+    function setModelBadge(status) {
+        if (!modelStatus) return;
+        const labels = {
+            not_loaded: 'Not Loaded', loading: 'Loading…',
+            ready: 'Ready', error: 'Error', unavailable: 'Unavailable'
+        };
+        modelStatus.textContent = labels[status] || status;
+        modelStatus.className = 'status-badge subtle ai-' + (status || 'not_loaded').replace('not_loaded', 'subtle');
+    }
+
+    function setSafetyBadge(safety) {
+        if (!safetyBadge) return;
+        safetyBadge.textContent = safety || '--';
+        safetyBadge.className = 'ai-safety-badge ai-safety-' + (safety || 'unknown');
+    }
+
+    function setDriveDirection(dir) {
+        if (!driveDir) return;
+        driveDir.textContent = dir || '--';
+        driveDir.className = 'ai-drive-direction' + (dir ? ' dir-' + dir : '');
+    }
+
+    function updateResult(data) {
+        if (!data) return;
+        if (resultMode) resultMode.textContent = data.mode || '--';
+        if (resultTime) resultTime.textContent = data.inference_time != null ? data.inference_time + 's' : '--';
+        if (resultCount) resultCount.textContent = '#' + (data.count || 0);
+        if (resultText) resultText.textContent = data.response || '(no response)';
+
+        // Navigate mode: show safety + direction
+        if (data.nav_decision) {
+            setSafetyBadge(data.nav_decision.safety);
+            setDriveDirection(data.nav_decision.direction);
+            if (data.drive_count != null && driveCount) driveCount.textContent = '#' + data.drive_count;
+        }
+
+        // Show detection boxes if applicable
+        if (detectionsList) {
+            if (data.mode === 'detect' && data.detections && data.detections.length > 0) {
+                detectionsList.style.display = '';
+                detectionsList.innerHTML = data.detections.map((d, i) => {
+                    const pct = (x) => (x * 100).toFixed(1) + '%';
+                    return `<div class="ai-detection-item">
+                        <span>#${i+1}</span>
+                        <span>x: ${pct(d.x_min)}-${pct(d.x_max)} y: ${pct(d.y_min)}-${pct(d.y_max)}</span>
+                    </div>`;
+                }).join('');
+            } else {
+                detectionsList.style.display = 'none';
+                detectionsList.innerHTML = '';
+            }
+        }
+    }
+
+    // ── Mode visibility toggles ──────────────────────────────────────
+    function syncModeRows() {
+        const m = modeSelect ? modeSelect.value : 'scene';
+        if (detectRow) detectRow.style.display = m === 'detect' ? '' : 'none';
+        if (customRow) customRow.style.display = m === 'custom' ? '' : 'none';
+        // Drive row is always visible (shows base-nav requirement)
+    }
+
+    // ── Event handlers ───────────────────────────────────────────────
+    loadBtn.addEventListener('click', () => {
+        setModelBadge('loading');
+        apiPost('/api/ai/load', {});
+    });
+
+    if (unloadBtn) unloadBtn.addEventListener('click', () => {
+        apiPost('/api/ai/unload', {});
+        if (enableToggle) enableToggle.checked = false;
+        if (driveToggle) driveToggle.checked = false;
+    });
+
+    if (driveToggle) driveToggle.addEventListener('change', () => {
+        if (driveToggle.checked && currentBaseNav === 'none') {
+            // Reject — no base navigation active
+            driveToggle.checked = false;
+            addLog('warning', 'Auto-drive requires active navigation (forward arrow or waypoint nav) first');
+            return;
+        }
+        apiPost('/api/ai/drive', { enabled: driveToggle.checked }).then(r => {
+            if (r && typeof r.auto_drive === 'boolean') {
+                driveToggle.checked = r.auto_drive;
+                if (r.auto_drive && modeSelect) {
+                    modeSelect.value = 'navigate';
+                    syncModeRows();
+                }
+            }
+        });
+    });
+
+    if (enableToggle) enableToggle.addEventListener('change', () => {
+        apiPost('/api/ai/enable', { enabled: enableToggle.checked });
+    });
+
+    if (modeSelect) modeSelect.addEventListener('change', () => {
+        syncModeRows();
+        const body = { mode: modeSelect.value };
+        if (modeSelect.value === 'detect' && detectTarget) {
+            body.detect_target = detectTarget.value || 'obstacle';
+        }
+        if (modeSelect.value === 'custom' && customPrompt) {
+            body.custom_prompt = customPrompt.value || '';
+        }
+        apiPost('/api/ai/mode', body);
+    });
+
+    if (detectTarget) detectTarget.addEventListener('change', () => {
+        apiPost('/api/ai/mode', { mode: 'detect', detect_target: detectTarget.value });
+    });
+
+    if (customPrompt) customPrompt.addEventListener('change', () => {
+        apiPost('/api/ai/mode', { mode: 'custom', custom_prompt: customPrompt.value });
+    });
+
+    if (intervalSlider) intervalSlider.addEventListener('input', () => {
+        const v = parseFloat(intervalSlider.value).toFixed(1);
+        if (intervalDisp) intervalDisp.textContent = v + 's';
+    });
+    if (intervalSlider) intervalSlider.addEventListener('change', () => {
+        apiPost('/api/ai/interval', { interval: parseFloat(intervalSlider.value) });
+    });
+
+    if (queryOnceBtn) queryOnceBtn.addEventListener('click', () => {
+        const mode = modeSelect ? modeSelect.value : 'scene';
+        if (resultText) resultText.textContent = 'Analysing…';
+        if (mode === 'detect') {
+            apiPost('/api/ai/detect', { target: detectTarget ? detectTarget.value : 'obstacle' })
+                .then(r => { if (r) updateResult(r); });
+        } else {
+            let prompt = '';
+            if (mode === 'custom' && customPrompt) {
+                prompt = customPrompt.value;
+            }
+            // For built-in modes, let the server use the stored prompt
+            const body = prompt ? { prompt } : { prompt: 'Describe what you see in 2-3 sentences.' };
+            apiPost('/api/ai/query', body).then(r => { if (r) updateResult(r); });
+        }
+    });
+
+    syncModeRows();
+    updateBaseNavUI('none');  // initial state
+
+    // ── WebSocket listeners ──────────────────────────────────────────
+    if (typeof socket !== 'undefined') {
+        socket.on('ai_vision_update', (data) => {
+            updateResult(data);
+        });
+
+        socket.on('ai_vision_status', (data) => {
+            if (data.status) setModelBadge(data.status);
+            if (enableToggle && typeof data.enabled === 'boolean') {
+                enableToggle.checked = data.enabled;
+            }
+            if (typeof data.auto_drive === 'boolean') {
+                if (driveToggle) driveToggle.checked = data.auto_drive;
+            }
+            if (data.base_nav_mode != null) {
+                updateBaseNavUI(data.base_nav_mode);
+            }
+            if (data.last_nav) {
+                setSafetyBadge(data.last_nav.safety);
+                setDriveDirection(data.last_nav.direction);
+            }
+            if (data.drive_count != null && driveCount) driveCount.textContent = '#' + data.drive_count;
+            if (data.mode && modeSelect) {
+                modeSelect.value = data.mode;
+                syncModeRows();
+            }
+        });
+
+        socket.on('full_update', (data) => {
+            if (data && data.ai_vision) {
+                setModelBadge(data.ai_vision.status);
+                if (enableToggle && typeof data.ai_vision.enabled === 'boolean') {
+                    enableToggle.checked = data.ai_vision.enabled;
+                }
+                if (typeof data.ai_vision.auto_drive === 'boolean') {
+                    if (driveToggle) driveToggle.checked = data.ai_vision.auto_drive;
+                }
+                if (data.ai_vision.base_nav_mode != null) {
+                    updateBaseNavUI(data.ai_vision.base_nav_mode);
+                }
+                if (data.ai_vision.last_nav) {
+                    setSafetyBadge(data.ai_vision.last_nav.safety);
+                    setDriveDirection(data.ai_vision.last_nav.direction);
+                }
+                if (data.ai_vision.drive_count != null && driveCount) {
+                    driveCount.textContent = '#' + data.ai_vision.drive_count;
+                }
+                if (data.ai_vision.mode && modeSelect) {
+                    modeSelect.value = data.ai_vision.mode;
+                    syncModeRows();
+                }
+                if (data.ai_vision.last_result) {
+                    updateResult(data.ai_vision.last_result);
+                }
+            }
+        });
+    }
+})();

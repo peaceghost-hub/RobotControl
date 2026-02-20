@@ -12,3 +12,18 @@ requests==2.32.3
 Pillow==11.0.0
 opencv-python==4.10.0.84
 numpy==1.26.4
+
+# ── AI Vision (Moondream 2) ──────────────────────────────────────
+# Runs on the dashboard server, NOT on the Pi.
+# GPU:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# CPU:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+transformers>=4.44.0
+einops>=0.8.0
+timm>=1.0.0
+accelerate>=1.0.0
+safetensors>=0.4.0
+sentencepiece>=0.2.0
+protobuf>=4.0.0
+scipy>=1.10.0

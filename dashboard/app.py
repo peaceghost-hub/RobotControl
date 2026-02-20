@@ -96,6 +96,16 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     ZigbeeBridge = None
 
+# Optional Moondream AI Vision
+try:
+    from ai_vision import MoondreamVision, NullVision
+except ImportError:
+    try:
+        from .ai_vision import MoondreamVision, NullVision
+    except ImportError:
+        MoondreamVision = None
+        NullVision = None
+
 # Initialize Flask app
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -160,6 +170,56 @@ backup_state = {
 }
 
 zigbee_bridge = None
+
+# ---- AI Vision Engine (Moondream 2) ----
+# Runs on the dashboard server (GPU/CPU), NOT on the Pi.
+# Model loads lazily in background on first enable — no startup delay.
+if MoondreamVision is not None:
+    ai_vision = MoondreamVision()
+else:
+    ai_vision = NullVision() if NullVision is not None else type('_NV', (), {
+        'status': 'unavailable', 'enabled': False, 'is_ready': False,
+        'last_result': None, 'load_model': lambda s: None,
+        'unload_model': lambda s: None, 'set_enabled': lambda s, e: None,
+        'set_mode': lambda s, *a: None, 'set_interval': lambda s, f: None,
+        'query_once': lambda s, *a: None, 'detect_once': lambda s, *a: None,
+        'get_status': lambda s: {'status': 'unavailable', 'enabled': False},
+    })()
+
+def _get_latest_frame_bytes():
+    """Provide the AI engine with the latest JPEG frame."""
+    with thread_lock:
+        entry = latest_data.get('camera_frame')
+    if entry and entry.get('frame_bytes'):
+        return entry['frame_bytes']
+    return None
+
+# Wire frame provider + SocketIO emitter into the vision engine
+if hasattr(ai_vision, '_frame_provider'):
+    ai_vision._frame_provider = _get_latest_frame_bytes
+if hasattr(ai_vision, '_emit_fn'):
+    def _ai_emit(event, data):
+        socketio.emit(event, data, namespace='/realtime')
+    ai_vision._emit_fn = _ai_emit
+
+# Wire drive-command sender so navigate mode can push AI_DRIVE to the Pi
+if hasattr(ai_vision, '_drive_command_fn'):
+    def _ai_push_drive(cmd_data):
+        """Push an AI_DRIVE command into the instant queue for the Pi."""
+        global _instant_command_seq
+        with thread_lock:
+            _instant_command_seq += 1
+            seq = _instant_command_seq
+            _instant_queue.append({
+                'command_type': cmd_data.get('command', 'AI_DRIVE'),
+                'payload': cmd_data.get('payload', {}),
+                'device_id': app.config.get('DEFAULT_DEVICE_ID', 'robot_01'),
+                'seq': seq,
+                'timestamp': datetime.utcnow().isoformat(),
+            })
+        logger.info("AI_DRIVE queued: %s seq=%d",
+                    cmd_data.get('payload', {}).get('direction', '?'), seq)
+    ai_vision._drive_command_fn = _ai_push_drive
 
 # Helper to set latest camera frame (bytes)
 def _store_camera_frame_bytes(frame_bytes: bytes, timestamp: Optional[str] = None, device_id: Optional[str] = None):
@@ -1183,6 +1243,20 @@ def set_instant_command():
             })
 
         logger.info("Instant command queued (POST): %s seq=%d", command_type, seq)
+
+        # Track base navigation state for AI auto-drive gating
+        if command_type == 'NAV_START' or command_type == 'NAV_RESUME':
+            ai_vision.set_base_nav('waypoint')
+        elif command_type in ('NAV_STOP', 'NAV_PAUSE'):
+            ai_vision.set_base_nav('none')
+        elif command_type == 'MANUAL_DRIVE':
+            direction = data.get('payload', {}).get('direction', '')
+            if direction in ('forward', 'reverse'):
+                ai_vision.set_base_nav('manual')
+            elif direction in ('stop', 'brake', ''):
+                if ai_vision.base_nav_mode == 'manual':
+                    ai_vision.set_base_nav('none')
+
         return jsonify({'status': 'success', 'seq': seq}), 200
     except Exception as e:
         logger.error("Error in instant command: %s", e)
@@ -1312,6 +1386,11 @@ def receive_robot_event():
             # Cache latest nav status for full_update snapshots
             if event['type'] == 'NAV_STATUS':
                 latest_data['nav_status'] = event['payload']
+                # If nav reached IDLE or COMPLETE, clear waypoint base nav
+                nav_state = event['payload'].get('nav', {}).get('state', '')
+                if nav_state in ('IDLE', 'COMPLETE'):
+                    if ai_vision.base_nav_mode == 'waypoint':
+                        ai_vision.set_base_nav('none')
             else:
                 # Only store non-NAV_STATUS events in the ring buffer
                 # to avoid drowning out real events at 2 Hz
@@ -1386,6 +1465,121 @@ def mjpeg_stream():
     return resp
 
 
+# ============= AI VISION API =============
+
+@app.route('/api/ai/status', methods=['GET'])
+def ai_status():
+    """Current AI Vision engine status."""
+    return jsonify(ai_vision.get_status())
+
+
+@app.route('/api/ai/enable', methods=['POST'])
+def ai_enable():
+    """Enable / disable continuous AI analysis."""
+    data = request.get_json(silent=True) or {}
+    enabled = bool(data.get('enabled', False))
+    ai_vision.set_enabled(enabled)
+    return jsonify({'status': 'ok', 'enabled': ai_vision.enabled})
+
+
+@app.route('/api/ai/mode', methods=['POST'])
+def ai_set_mode():
+    """Change analysis mode: scene | obstacles | direction | terrain | detect | custom."""
+    data = request.get_json(silent=True) or {}
+    mode = data.get('mode', 'scene')
+    ai_vision.set_mode(
+        mode,
+        detect_target=data.get('detect_target'),
+        custom_prompt=data.get('custom_prompt'),
+    )
+    return jsonify({'status': 'ok', 'mode': mode})
+
+
+@app.route('/api/ai/interval', methods=['POST'])
+def ai_set_interval():
+    """Set seconds between analyses (1–30)."""
+    data = request.get_json(silent=True) or {}
+    seconds = float(data.get('interval', 3.0))
+    ai_vision.set_interval(seconds)
+    return jsonify({'status': 'ok', 'interval': ai_vision._interval})
+
+
+@app.route('/api/ai/query', methods=['POST'])
+def ai_query():
+    """One-shot manual query with optional custom prompt."""
+    if not ai_vision.is_ready:
+        return jsonify({'status': 'error', 'message': 'Model not loaded'}), 503
+    data = request.get_json(silent=True) or {}
+    prompt = data.get('prompt', 'Describe what you see.')
+    frame = _get_latest_frame_bytes()
+    if not frame:
+        return jsonify({'status': 'error', 'message': 'No camera frame available'}), 404
+    result = ai_vision.query_once(frame, prompt)
+    if result:
+        socketio.emit('ai_vision_update', result, namespace='/realtime')
+        return jsonify(result)
+    return jsonify({'status': 'error', 'message': 'Inference failed'}), 500
+
+
+@app.route('/api/ai/detect', methods=['POST'])
+def ai_detect():
+    """One-shot object detection."""
+    if not ai_vision.is_ready:
+        return jsonify({'status': 'error', 'message': 'Model not loaded'}), 503
+    data = request.get_json(silent=True) or {}
+    target = data.get('target', 'obstacle')
+    frame = _get_latest_frame_bytes()
+    if not frame:
+        return jsonify({'status': 'error', 'message': 'No camera frame available'}), 404
+    result = ai_vision.detect_once(frame, target)
+    if result:
+        socketio.emit('ai_vision_update', result, namespace='/realtime')
+        return jsonify(result)
+    return jsonify({'status': 'error', 'message': 'Detection failed'}), 500
+
+
+@app.route('/api/ai/load', methods=['POST'])
+def ai_load_model():
+    """Trigger model download & load (runs in background)."""
+    ai_vision.load_model()
+    return jsonify({'status': 'ok', 'model_status': ai_vision.status})
+
+
+@app.route('/api/ai/unload', methods=['POST'])
+def ai_unload_model():
+    """Unload model and free memory."""
+    ai_vision.unload_model()
+    return jsonify({'status': 'ok', 'model_status': ai_vision.status})
+
+
+@app.route('/api/ai/drive', methods=['POST'])
+def ai_drive_toggle():
+    """Toggle auto-drive: in navigate mode, AI sends drive commands to the Pi.
+    RULE: Only works when a base navigation method is already active."""
+    data = request.get_json(silent=True) or {}
+    enabled = bool(data.get('enabled', False))
+    ai_vision.set_auto_drive(enabled)
+    return jsonify({
+        'status': 'ok',
+        'auto_drive': ai_vision.auto_drive,
+        'base_nav_mode': ai_vision.base_nav_mode,
+        'mode': ai_vision._mode,
+    })
+
+
+@app.route('/api/ai/base_nav', methods=['POST'])
+def ai_set_base_nav():
+    """Explicitly set the base navigation mode (for JS-side tracking)."""
+    data = request.get_json(silent=True) or {}
+    mode = data.get('mode', 'none')
+    ai_vision.set_base_nav(mode)
+    return jsonify({
+        'status': 'ok',
+        'base_nav_mode': ai_vision.base_nav_mode,
+        'auto_drive': ai_vision.auto_drive,
+    })
+
+
 # ============= WEBSOCKET EVENTS =============
 
 @socketio.on('connect', namespace='/realtime')
@@ -1415,7 +1609,8 @@ def handle_update_request(data):
                 # We do not include large frame payloads here to keep event light
             },
             'backup': latest_data.get('backup'),
-            'nav_status': latest_data.get('nav_status')
+            'nav_status': latest_data.get('nav_status'),
+            'ai_vision': ai_vision.get_status()
         })
 
 
@@ -1438,6 +1633,22 @@ def handle_instant_command(data):
         })
     logger.info("Instant command queued (WS): %s seq=%d  (queue depth: %d)",
                 data['command'], seq, len(_instant_queue))
+
+    # Track base navigation state for AI auto-drive gating.
+    # Auto-drive only works when a base navigation method is active.
+    cmd = data['command']
+    if cmd == 'NAV_START' or cmd == 'NAV_RESUME':
+        ai_vision.set_base_nav('waypoint')
+    elif cmd in ('NAV_STOP', 'NAV_PAUSE'):
+        ai_vision.set_base_nav('none')
+    elif cmd == 'MANUAL_DRIVE':
+        direction = (data.get('payload') or {}).get('direction', '')
+        if direction in ('forward', 'reverse'):
+            ai_vision.set_base_nav('manual')
+        elif direction in ('stop', 'brake', ''):
+            # Only clear if currently in manual mode (don't clear waypoint nav)
+            if ai_vision.base_nav_mode == 'manual':
+                ai_vision.set_base_nav('none')
 
 
 # ============= DATABASE INITIALIZATION =============
