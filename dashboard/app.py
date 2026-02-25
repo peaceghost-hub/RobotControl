@@ -199,7 +199,12 @@ if hasattr(ai_vision, '_frame_provider'):
     ai_vision._frame_provider = _get_latest_frame_bytes
 if hasattr(ai_vision, '_emit_fn'):
     def _ai_emit(event, data):
-        socketio.emit(event, data, namespace='/realtime')
+        try:
+            socketio.emit(event, data, namespace='/realtime')
+        except Exception:
+            # Fallback: emit with explicit app context (needed from bg threads)
+            with app.app_context():
+                socketio.emit(event, data, namespace='/realtime')
     ai_vision._emit_fn = _ai_emit
 
 # Wire drive-command sender so navigate mode can push AI_DRIVE to the Pi

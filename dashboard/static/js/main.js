@@ -2711,7 +2711,16 @@ function initZoomControls() {
     updateBaseNavUI('none');  // initial state
 
     // ── WebSocket listeners ──────────────────────────────────────────
-    if (typeof socket !== 'undefined') {
+    // Socket is initialised in initDashboard() on DOMContentLoaded,
+    // which fires AFTER this IIFE runs.  We defer registration so the
+    // socket variable is assigned before we attach handlers.
+    function _attachAiSocketListeners() {
+        if (typeof socket === 'undefined' || !socket) {
+            // Retry shortly — socket may not be ready yet
+            setTimeout(_attachAiSocketListeners, 200);
+            return;
+        }
+
         socket.on('ai_vision_update', (data) => {
             updateResult(data);
         });
@@ -2765,6 +2774,22 @@ function initZoomControls() {
                     updateResult(data.ai_vision.last_result);
                 }
             }
+        });
+
+        // If model is already loaded, fetch current status
+        fetch('/api/ai/status').then(r => r.json()).then(data => {
+            if (data && data.status) setModelBadge(data.status);
+        }).catch(() => {});
+        console.log('AI Vision socket listeners attached');
+    }
+
+    // Kick off deferred attachment
+    if (typeof socket !== 'undefined' && socket) {
+        _attachAiSocketListeners();
+    } else {
+        document.addEventListener('DOMContentLoaded', () => {
+            // Small delay to let initDashboard() create the socket first
+            setTimeout(_attachAiSocketListeners, 100);
         });
     }
 })();

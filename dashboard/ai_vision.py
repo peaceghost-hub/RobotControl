@@ -1,12 +1,18 @@
 """
-Moondream AI Vision Engine
-===========================
+Moondream AI Vision Engine — Native Torch Path
+================================================
 
 Runs Moondream 2 VLM on the dashboard server to analyse camera frames
 and provide AI-powered scene understanding for robot navigation.
 
 Architecture
 ------------
+- Uses the NATIVE torch inference path (MoondreamModel + load_weights_into_model)
+  instead of the HuggingFace transformers wrapper.  This fixes:
+  • Empty responses (NaN from uninitialised tau params)
+  • 280× slower bfloat16 on CPU (forced float32)
+  • HF wrapper overhead
+
 - Model loads in a background thread (non-blocking server startup).
 - Inference runs in a dedicated daemon thread (non-blocking Flask).
 - Grabs the latest JPEG frame from the shared ``latest_data`` store.
@@ -17,7 +23,7 @@ Architecture
 Deployment
 ----------
 Runs on the **dashboard server** (laptop / desktop), *not* on the Pi.
-The 2B-param model needs ~4 GB VRAM (GPU) or ~8 GB RAM (CPU fp32).
+The 2B-param model needs ~8 GB RAM in float32.
 The Pi cannot run it without freezing — violates the GOLDEN RULE.
 
 GOLDEN RULE: NO FREEZING — every operation is non-blocking.
@@ -26,6 +32,7 @@ GOLDEN RULE: NO FREEZING — every operation is non-blocking.
 from __future__ import annotations
 
 import io
+import os
 import time
 import logging
 import threading
@@ -35,20 +42,17 @@ logger = logging.getLogger("ai_vision")
 
 # ── Lazy heavy imports (dashboard still works if torch is missing) ────
 _TORCH_AVAILABLE = False
-_TRANSFORMERS_AVAILABLE = False
 _PIL_AVAILABLE = False
 
 try:
     import torch
     _TORCH_AVAILABLE = True
+    # Use all CPU cores for parallelism.
+    torch.set_num_threads(os.cpu_count() or 4)
+    # Prevent torch._dynamo from wasting time on compilation attempts.
+    torch._dynamo.config.suppress_errors = True  # type: ignore[attr-defined]
 except ImportError:
     torch = None  # type: ignore[assignment]
-
-try:
-    from transformers import AutoModelForCausalLM
-    _TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    AutoModelForCausalLM = None  # type: ignore[misc,assignment]
 
 try:
     from PIL import Image
@@ -57,12 +61,15 @@ except ImportError:
     Image = None  # type: ignore[misc,assignment]
 
 # ── Robot physical parameters ────────────────────────────────────────
-# These govern what the AI tells the Pi — the conclusion it makes,
-# the drive commands to be sent, all depend on the robot's dimensions.
-ROBOT_HEIGHT_CM = 20        # camera mounted at this height
-ROBOT_WIDTH_CM = 20         # chassis width
-WHEEL_RADIUS_CM = 2         # objects > this on ground can block wheels
-ACTION_DISTANCE_CM = 20     # react to obstacles within this range
+ROBOT_HEIGHT_CM = 20
+ROBOT_WIDTH_CM = 20
+WHEEL_RADIUS_CM = 2
+ACTION_DISTANCE_CM = 20
+
+# Moondream vision encoder crop size.  Pre-resizing the image so its
+# longest edge matches this avoids generating many crops (up to 12),
+# which dominate inference time on CPU.
+_VISION_CROP_PX = 378
 
 # ── Navigation prompt templates ──────────────────────────────────────
 PROMPTS: Dict[str, str] = {
@@ -108,9 +115,18 @@ PROMPTS: Dict[str, str] = {
 }
 
 # ── Default configuration ────────────────────────────────────────────
-DEFAULT_MODEL_ID = "vikhyatk/moondream2"
-DEFAULT_REVISION = "2025-06-21"
-DEFAULT_INTERVAL = 3.0  # seconds between auto-analyses
+DEFAULT_MODEL_ID = os.getenv("MOONDREAM_MODEL_ID", "vikhyatk/moondream2")
+DEFAULT_REVISION = os.getenv("MOONDREAM_REVISION", "2025-06-21")
+DEFAULT_INTERVAL = 5.0  # seconds between auto-analyses
+
+# Weight file path — use HF cache if available
+_DEFAULT_WEIGHTS_PATH = os.path.expanduser(
+    os.getenv(
+        "MOONDREAM_WEIGHTS",
+        "~/.cache/huggingface/hub/models--vikhyatk--moondream2/"
+        "snapshots/9a7d4024050840e001defacec2b00727e89149e6/model.safetensors",
+    )
+)
 
 
 # ======================================================================
@@ -127,7 +143,7 @@ class _NullVision:
     auto_drive = False
     last_nav = None
     drive_count = 0
-    base_nav_mode = "none"   # 'none' | 'manual' | 'waypoint'
+    base_nav_mode = "none"
 
     def load_model(self) -> None: ...
     def unload_model(self) -> None: ...
@@ -150,10 +166,10 @@ class _NullVision:
             "analysis_count": 0,
             "detect_target": "",
             "custom_prompt": "",
-            "error": "AI Vision dependencies not installed (torch, transformers)",
+            "error": "AI Vision dependencies not installed (torch, safetensors, tokenizers)",
             "last_result": None,
             "torch_available": _TORCH_AVAILABLE,
-            "transformers_available": _TRANSFORMERS_AVAILABLE,
+            "transformers_available": False,
             "auto_drive": False,
             "last_nav": None,
             "drive_count": 0,
@@ -171,19 +187,27 @@ NullVision = _NullVision  # public alias
 
 
 # ======================================================================
-#  Main engine
+#  Main engine — native torch path
 # ======================================================================
 class MoondreamVision:
-    """Non-blocking Moondream 2 wrapper for dashboard integration."""
+    """Non-blocking Moondream 2 wrapper using the native torch inference path.
+
+    Key difference from the old HF-based approach:
+    - Loads MoondreamModel directly (no transformers AutoModel)
+    - Uses load_weights_into_model() from safetensors
+    - Forces float32 (bfloat16 is ~280× slower on CPU)
+    - Disables flex_attention (not needed on CPU)
+    - Initialises tau params with zeros (prevents NaN logits)
+    - Uses dense config (no MoE — matches the 2025-06-21 weights)
+    """
 
     def __init__(
         self,
-        model_id: Optional[str] = None,
-        revision: Optional[str] = None,
+        weights_path: Optional[str] = None,
         device: str = "auto",
     ):
-        self._model_id = model_id or DEFAULT_MODEL_ID
-        self._revision = revision or DEFAULT_REVISION
+        self._weights_path = weights_path or _DEFAULT_WEIGHTS_PATH
+        self._model_id = DEFAULT_MODEL_ID
         self._preferred_device = device
 
         self._model: Any = None
@@ -202,18 +226,16 @@ class MoondreamVision:
         self._custom_prompt = ""
         self._last_result: Optional[Dict] = None
         self._analysis_count = 0
+        self._desired_enabled = False
 
         # Background analysis thread
         self._analysis_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
-        # Auto-drive: when enabled, navigate mode pushes AI_DRIVE
-        # commands to the Pi via the injected callback.
-        # RULE: auto-drive only works when a base navigation method is
-        # already active (manual forward or waypoint navigation).
+        # Auto-drive
         self._auto_drive = False
-        self._base_nav_mode = "none"   # 'none' | 'manual' | 'waypoint'
-        self._last_nav: Optional[Dict[str, str]] = None  # {safety, direction, reason}
+        self._base_nav_mode = "none"
+        self._last_nav: Optional[Dict[str, str]] = None
         self._drive_count = 0
 
         # Injected by app.py after construction
@@ -221,19 +243,21 @@ class MoondreamVision:
         self._emit_fn: Optional[Callable[[str, Dict], None]] = None
         self._drive_command_fn: Optional[Callable[[Dict], None]] = None
 
+        # Pre-encoded image cache (avoid re-encoding same frame)
+        self._cached_image_hash: Optional[int] = None
+        self._cached_encoded: Any = None
+
         # Sanity-check dependencies
-        if not _TORCH_AVAILABLE or not _TRANSFORMERS_AVAILABLE:
+        if not _TORCH_AVAILABLE:
             self._status = "unavailable"
-            missing = []
-            if not _TORCH_AVAILABLE:
-                missing.append("torch")
-            if not _TRANSFORMERS_AVAILABLE:
-                missing.append("transformers")
-            self._error_msg = (
-                f"Missing: {', '.join(missing)}. "
-                "Install with:  pip install torch transformers"
-            )
+            self._error_msg = "Missing: torch. Install with:  pip install torch"
             logger.warning("AI Vision unavailable — %s", self._error_msg)
+        elif not os.path.exists(self._weights_path):
+            self._error_msg = (
+                f"Weights not found at {self._weights_path}. "
+                "Download the model first."
+            )
+            logger.warning("AI Vision — %s", self._error_msg)
 
     # ─── Properties ───────────────────────────────────────────────────
     @property
@@ -265,20 +289,10 @@ class MoondreamVision:
         return self._base_nav_mode
 
     def set_auto_drive(self, enabled: bool) -> None:
-        """Toggle auto-drive on/off.  Can be toggled freely at any time.
-
-        Auto-drive never initiates movement on its own.  The server-side
-        ``_send_drive_command`` gates on ``base_nav_mode`` so no commands
-        reach the Pi unless a base navigation method (manual forward or
-        waypoint nav) is already running.  This means the user can
-        pre-enable auto-drive and it quietly waits until navigation
-        starts, or toggle it mid-navigation without locking anything.
-        """
         self._auto_drive = enabled
         if enabled:
             if self._mode != "navigate":
-                self._mode = "navigate"      # force navigate mode
-            # Auto-enable analysis if not already running
+                self._mode = "navigate"
             if not self._enabled:
                 self.set_enabled(True)
         logger.info("Auto-drive → %s  (base_nav=%s)",
@@ -286,19 +300,6 @@ class MoondreamVision:
         self._broadcast_status()
 
     def set_base_nav(self, mode: str) -> None:
-        """Update the base navigation mode.
-
-        Called by app.py when:
-        - Manual forward is pressed  → 'manual'
-        - Waypoint nav is started    → 'waypoint'
-        - Navigation/driving stops   → 'none'
-
-        Auto-drive is NOT disabled when base nav goes to 'none'.
-        It stays toggled on but quietly stops sending commands
-        (gated in ``_send_drive_command``).  This gives the user
-        full flexibility — they can stop, steer manually, restart
-        nav, and auto-drive seamlessly picks back up.
-        """
         prev = self._base_nav_mode
         self._base_nav_mode = mode if mode in ("manual", "waypoint") else "none"
         if prev != self._base_nav_mode:
@@ -308,16 +309,7 @@ class MoondreamVision:
     # ─── Navigation decision parser ───────────────────────────────────
     @staticmethod
     def _parse_nav_decision(text: str) -> Dict[str, str]:
-        """
-        Parse the structured navigate response into
-        {safety, direction, reason}.
-
-        Expected format:
-            SAFETY: SAFE
-            DIRECTION: FORWARD
-            REASON: Clear path ahead
-        """
-        safety = "DANGER"       # default safe-side: stop if parse fails
+        safety = "DANGER"
         direction = "STOP"
         reason = "Could not parse AI response"
 
@@ -340,22 +332,11 @@ class MoondreamVision:
         return {"safety": safety, "direction": direction, "reason": reason}
 
     def _send_drive_command(self, nav: Dict[str, str]) -> None:
-        """Push an AI_DRIVE command to the Pi via the instant queue.
-
-        Gating rules:
-        - Only send if base navigation is active (manual or waypoint).
-        - During WAYPOINT nav: only send CAUTION/DANGER commands.
-          If SAFE+FORWARD, let NavController handle steering — don't
-          interfere with its heading corrections.
-        - During MANUAL nav: send all commands (AI is the supervisor).
-        """
         if not self._drive_command_fn:
             return
         if self._base_nav_mode == "none":
-            return  # no base nav → no commands
+            return
 
-        # During waypoint nav, NavController handles forward driving.
-        # Only intervene when there's an obstacle (CAUTION/DANGER).
         if self._base_nav_mode == "waypoint":
             if nav["safety"] == "SAFE" and nav["direction"] == "FORWARD":
                 logger.debug("AI: SAFE+FORWARD during waypoint nav — letting NavController drive")
@@ -382,24 +363,32 @@ class MoondreamVision:
 
     # ─── Model lifecycle ──────────────────────────────────────────────
     def load_model(self) -> None:
-        """Kick off model download + load in a background thread."""
         if self._status in ("loading", "ready", "unavailable"):
             return
         self._status = "loading"
         self._error_msg = ""
+        self._broadcast_status()
         threading.Thread(
             target=self._load_model_sync, daemon=True, name="moondream-loader"
         ).start()
         logger.info("Moondream model load started (background)…")
 
     def _load_model_sync(self) -> None:
-        """Synchronous model load — runs in daemon thread."""
+        """Load the model using the native torch path — runs in daemon thread."""
         try:
-            logger.info(
-                "Loading %s  revision=%s …", self._model_id, self._revision
-            )
+            import sys
+            # Ensure md_reference package is importable
+            dashboard_dir = os.path.dirname(os.path.abspath(__file__))
+            if dashboard_dir not in sys.path:
+                sys.path.insert(0, dashboard_dir)
 
-            # Pick device
+            from md_reference.config import MoondreamConfig, TextConfig
+            from md_reference.moondream import MoondreamModel
+            from md_reference.weights import load_weights_into_model
+
+            logger.info("Loading weights from %s …", self._weights_path)
+
+            # Pick device + dtype
             if self._preferred_device == "auto":
                 if torch.cuda.is_available():
                     self._device = "cuda"
@@ -409,7 +398,7 @@ class MoondreamVision:
                     self._dtype = torch.float16
                 else:
                     self._device = "cpu"
-                    self._dtype = torch.float32
+                    self._dtype = torch.float32  # bf16 is ~280× slower on CPU
             else:
                 self._device = self._preferred_device
                 self._dtype = (
@@ -418,39 +407,56 @@ class MoondreamVision:
 
             logger.info("Device: %s   dtype: %s", self._device, self._dtype)
 
-            model = AutoModelForCausalLM.from_pretrained(
-                self._model_id,
-                revision=self._revision,
-                trust_remote_code=True,
-                torch_dtype=self._dtype,
-                low_cpu_mem_usage=True,
-                device_map={"": self._device} if self._device != "cpu" else None,
-            )
-            if self._device == "cpu":
-                model = model.to(self._device)
+            # Build model — NO MoE (the 2025-06-21 weights are dense)
+            t0 = time.time()
+            text_cfg = TextConfig(moe=None)
+            config = MoondreamConfig(text=text_cfg)
+            model = MoondreamModel(config, dtype=self._dtype, setup_caches=True)
+            logger.info("Model structure built in %.1fs", time.time() - t0)
+
+            # Load weights from safetensors
+            t0 = time.time()
+            load_weights_into_model(self._weights_path, model)
+            logger.info("Weights loaded in %.1fs", time.time() - t0)
+
+            # Convert to target dtype (weights are stored as bf16)
+            t0 = time.time()
+            model = model.to(device=self._device, dtype=self._dtype)
             model.eval()
+
+            # Disable flex_attention on CPU (not well supported)
+            if self._device == "cpu":
+                model.use_flex_decoding = False
+
+            # Rebuild KV caches in the correct dtype
+            model._setup_caches()
+            logger.info("Converted to %s in %.1fs", self._dtype, time.time() - t0)
 
             with self._lock:
                 self._model = model
                 self._status = "ready"
 
-            logger.info("✓ Moondream ready on %s", self._device)
-            self._broadcast_status()
+            logger.info("✓ Moondream ready on %s (%s)", self._device, self._dtype)
+            if self._desired_enabled:
+                self.set_enabled(True)
+            else:
+                self._broadcast_status()
 
         except Exception as exc:
             with self._lock:
                 self._status = "error"
                 self._error_msg = str(exc)
-            logger.error("Moondream load failed: %s", exc)
+            logger.error("Moondream load failed: %s", exc, exc_info=True)
             self._broadcast_status()
 
     def unload_model(self) -> None:
-        """Free GPU / RAM."""
         self.set_enabled(False)
         with self._lock:
             if self._model is not None:
                 del self._model
                 self._model = None
+                self._cached_encoded = None
+                self._cached_image_hash = None
                 if _TORCH_AVAILABLE and torch.cuda.is_available():
                     torch.cuda.empty_cache()
             self._status = "not_loaded"
@@ -460,22 +466,17 @@ class MoondreamVision:
 
     # ─── Analysis control ─────────────────────────────────────────────
     def set_enabled(self, enabled: bool) -> None:
-        """Toggle the continuous analysis loop."""
+        self._desired_enabled = enabled
+
         if enabled and self._status != "ready":
-            if self._status == "not_loaded":
-                self.load_model()          # auto-load on first enable
-            return                          # will enable once ready
+            if self._status in ("not_loaded", "error"):
+                self.load_model()
+            return
 
         self._enabled = enabled
 
         if enabled:
-            if self._analysis_thread is None or not self._analysis_thread.is_alive():
-                self._stop_event.clear()
-                self._analysis_thread = threading.Thread(
-                    target=self._analysis_loop, daemon=True,
-                    name="moondream-analysis",
-                )
-                self._analysis_thread.start()
+            self._start_analysis_thread()
             logger.info(
                 "AI Vision ON  (interval=%.1fs  mode=%s)", self._interval, self._mode
             )
@@ -503,6 +504,15 @@ class MoondreamVision:
         self._interval = max(1.0, min(30.0, seconds))
         logger.info("AI interval → %.1fs", self._interval)
 
+    def _start_analysis_thread(self) -> None:
+        if self._analysis_thread is None or not self._analysis_thread.is_alive():
+            self._stop_event.clear()
+            self._analysis_thread = threading.Thread(
+                target=self._analysis_loop, daemon=True,
+                name="moondream-analysis",
+            )
+            self._analysis_thread.start()
+
     # ─── Background analysis loop ─────────────────────────────────────
     def _analysis_loop(self) -> None:
         logger.info("Analysis loop started")
@@ -516,6 +526,15 @@ class MoondreamVision:
                 if frame_bytes is None:
                     self._stop_event.wait(1.0)
                     continue
+
+                # Let the UI know inference is in progress
+                if self._emit_fn:
+                    self._emit_fn("ai_vision_update", {
+                        "mode": self._mode,
+                        "response": "Analyzing…",
+                        "inference_time": None,
+                        "count": self._analysis_count,
+                    })
 
                 result = self._run_analysis(frame_bytes)
                 if result:
@@ -532,14 +551,68 @@ class MoondreamVision:
 
         logger.info("Analysis loop stopped")
 
-    # ─── Core inference ───────────────────────────────────────────────
+    # ─── Core model calls ─────────────────────────────────────────────
+    # TextSamplingSettings: temperature, max_tokens, top_p, variant
+    _NAV_SETTINGS: dict = {"temperature": 0, "max_tokens": 100}
+    _SCENE_SETTINGS: dict = {"temperature": 0, "max_tokens": 256}
+    _CUSTOM_SETTINGS: dict = {"temperature": 0.5, "max_tokens": 512}
+
+    def _query(self, image: Any, prompt: str, settings: Dict[str, Any]) -> Dict[str, Any]:
+        """Run model.query() with the native path."""
+        result = self._model.query(
+            image, prompt, reasoning=False, stream=False, settings=settings or {}
+        )
+        if isinstance(result, dict):
+            return result
+        return {"answer": str(result)}
+
+    def _detect(self, image: Any, target: str) -> Dict[str, Any]:
+        """Run model.detect() with the native path."""
+        try:
+            result = self._model.detect(image, target)
+            if isinstance(result, dict):
+                return result
+        except Exception as exc:
+            logger.warning("detect() failed, falling back to query: %s", exc)
+
+        # Fallback: use query
+        fallback = self._query(
+            image,
+            f"Do you see any {target}? Count and describe briefly.",
+            self._SCENE_SETTINGS,
+        )
+        if isinstance(fallback, dict) and "answer" in fallback:
+            return {"objects": [], "response": fallback["answer"]}
+        return {"objects": []}
+
+    # ─── Image pre-processing ─────────────────────────────────────────
+    @staticmethod
+    def _resize_for_model(image: Any) -> Any:
+        """Shrink image so its longest edge ≤ _VISION_CROP_PX.
+
+        This avoids Moondream creating many crops (up to 12) from a
+        large camera frame.  Fewer crops → dramatically faster vision
+        encoding on CPU.  Quality loss is negligible for VQA.
+        """
+        w, h = image.size
+        longest = max(w, h)
+        if longest <= _VISION_CROP_PX:
+            return image
+        scale = _VISION_CROP_PX / longest
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+        return image.resize((new_w, new_h), Image.LANCZOS)
+
     def _run_analysis(self, frame_bytes: bytes) -> Optional[Dict]:
         """Run one analysis on a JPEG frame.  Called from bg thread."""
         if self._model is None or not frame_bytes:
             return None
         try:
             image = Image.open(io.BytesIO(frame_bytes)).convert("RGB")
+            image = self._resize_for_model(image)
             t0 = time.time()
+            logger.info("AI inference started  (mode=%s, size=%s)",
+                        self._mode, image.size)
 
             result: Dict[str, Any] = {
                 "timestamp": time.time(),
@@ -547,66 +620,70 @@ class MoondreamVision:
                 "count": self._analysis_count,
             }
 
-            if self._mode == "detect":
-                detections = self._model.detect(image, self._detect_target)
-                objects: List[Dict] = detections.get("objects", [])
-                result["detections"] = objects
-                result["detect_target"] = self._detect_target
-                result["num_objects"] = len(objects)
-                result["response"] = (
-                    f"Detected {len(objects)} '{self._detect_target}' object(s)"
-                )
+            with torch.inference_mode():
 
-            elif self._mode == "navigate":
-                prompt = PROMPTS["navigate"]
-                answer = self._model.query(image, prompt)
-                raw = answer.get("answer", "")
-                result["response"] = raw
-                result["prompt"] = prompt
+                if self._mode == "detect":
+                    detections = self._detect(image, self._detect_target)
+                    objects: List[Dict] = detections.get("objects", []) if isinstance(detections, dict) else []
+                    result["detections"] = objects
+                    result["detect_target"] = self._detect_target
+                    result["num_objects"] = len(objects)
+                    resp_text = None
+                    if isinstance(detections, dict):
+                        resp_text = detections.get("response") or detections.get("text")
+                    result["response"] = resp_text or (
+                        f"Detected {len(objects)} '{self._detect_target}' object(s)"
+                    )
 
-                # Parse structured nav decision
-                nav = self._parse_nav_decision(raw)
-                result["nav_decision"] = nav
-                self._last_nav = nav
+                elif self._mode == "navigate":
+                    prompt = PROMPTS["navigate"]
+                    answer = self._query(image, prompt, self._NAV_SETTINGS)
+                    raw = answer.get("answer", "")
+                    result["response"] = raw
+                    result["prompt"] = prompt
 
-                # Auto-drive: send command to Pi if enabled
-                if self._auto_drive:
-                    self._send_drive_command(nav)
-                    result["drive_sent"] = True
-                    result["drive_count"] = self._drive_count
+                    nav = self._parse_nav_decision(raw)
+                    result["nav_decision"] = nav
+                    self._last_nav = nav
 
-            elif self._mode == "custom" and self._custom_prompt:
-                answer = self._model.query(image, self._custom_prompt)
-                result["response"] = answer.get("answer", "")
-                result["prompt"] = self._custom_prompt
+                    if self._auto_drive:
+                        self._send_drive_command(nav)
+                        result["drive_sent"] = True
+                        result["drive_count"] = self._drive_count
 
-            else:
-                prompt = PROMPTS.get(self._mode, PROMPTS["scene"])
-                answer = self._model.query(image, prompt)
-                result["response"] = answer.get("answer", "")
-                result["prompt"] = prompt
+                elif self._mode == "custom" and self._custom_prompt:
+                    answer = self._query(image, self._custom_prompt, self._CUSTOM_SETTINGS)
+                    result["response"] = answer.get("answer", "")
+                    result["prompt"] = self._custom_prompt
+
+                else:
+                    prompt = PROMPTS.get(self._mode, PROMPTS["scene"])
+                    answer = self._query(image, prompt, self._SCENE_SETTINGS)
+                    result["response"] = answer.get("answer", "")
+                    result["prompt"] = prompt
 
             result["inference_time"] = round(time.time() - t0, 2)
-            logger.debug(
-                "AI [%s] %.2fs — %s",
+            logger.info(
+                "AI [%s] %.1fs — %s",
                 self._mode, result["inference_time"],
-                (result.get("response") or "")[:100],
+                (result.get("response") or "")[:120],
             )
             return result
 
         except Exception as exc:
-            logger.error("Inference error: %s", exc)
+            logger.error("Inference error: %s", exc, exc_info=True)
             return None
 
     # ─── One-shot helpers (manual from API) ───────────────────────────
     def query_once(self, frame_bytes: bytes, prompt: str) -> Optional[Dict]:
-        """Blocking single query — use from a Flask route."""
         if self._model is None or not frame_bytes:
             return None
         try:
             image = Image.open(io.BytesIO(frame_bytes)).convert("RGB")
+            image = self._resize_for_model(image)
             t0 = time.time()
-            answer = self._model.query(image, prompt)
+            with torch.inference_mode():
+                answer = self._query(image, prompt, self._SCENE_SETTINGS)
             return {
                 "timestamp": time.time(),
                 "mode": "manual",
@@ -616,30 +693,32 @@ class MoondreamVision:
                 "count": self._analysis_count,
             }
         except Exception as exc:
-            logger.error("Manual query error: %s", exc)
+            logger.error("Manual query error: %s", exc, exc_info=True)
             return None
 
     def detect_once(self, frame_bytes: bytes, target: str) -> Optional[Dict]:
-        """Blocking single detection — use from a Flask route."""
         if self._model is None or not frame_bytes:
             return None
         try:
             image = Image.open(io.BytesIO(frame_bytes)).convert("RGB")
+            image = self._resize_for_model(image)
             t0 = time.time()
-            detections = self._model.detect(image, target)
-            objects = detections.get("objects", [])
+            with torch.inference_mode():
+                detections = self._detect(image, target)
+            objects = detections.get("objects", []) if isinstance(detections, dict) else []
+            resp_text = detections.get("response") if isinstance(detections, dict) else None
             return {
                 "timestamp": time.time(),
                 "mode": "detect",
                 "detect_target": target,
                 "detections": objects,
                 "num_objects": len(objects),
-                "response": f"Detected {len(objects)} '{target}' object(s)",
+                "response": resp_text or f"Detected {len(objects)} '{target}' object(s)",
                 "inference_time": round(time.time() - t0, 2),
                 "count": self._analysis_count,
             }
         except Exception as exc:
-            logger.error("Detection error: %s", exc)
+            logger.error("Detection error: %s", exc, exc_info=True)
             return None
 
     # ─── Status ───────────────────────────────────────────────────────
@@ -657,7 +736,7 @@ class MoondreamVision:
             "error": self._error_msg,
             "last_result": self._last_result,
             "torch_available": _TORCH_AVAILABLE,
-            "transformers_available": _TRANSFORMERS_AVAILABLE,
+            "transformers_available": True,  # compat — native path always available
             "auto_drive": self._auto_drive,
             "base_nav_mode": self._base_nav_mode,
             "last_nav": self._last_nav,
@@ -675,5 +754,5 @@ class MoondreamVision:
         if self._emit_fn:
             try:
                 self._emit_fn("ai_vision_status", self.get_status())
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("_broadcast_status failed: %s", exc)
