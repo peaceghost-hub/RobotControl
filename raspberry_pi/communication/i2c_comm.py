@@ -46,6 +46,7 @@ class I2CComm:
     CMD_MANUAL_OVERRIDE = ord('V')   # New: Manual control signal with joystick data
     CMD_EMERGENCY_STOP = ord('E')    # New: Emergency stop
     CMD_WIRELESS_BROADCAST = ord('Z') # New: Broadcast position via wireless
+    CMD_SET_AI_OVERRIDE = ord('I')   # New: Enable/disable AI obstacle override on Mega
     # CMD_FOLLOW_LINE removed — no line follower hardware
 
     # Response opcodes returned by Mega
@@ -375,6 +376,22 @@ class I2CComm:
         return self._is_ack(resp)
 
     # set_line_follow() removed — no line follower hardware
+
+    def set_ai_override(self, enabled: bool) -> bool:
+        """Enable/disable AI obstacle override on Mega.
+
+        When enabled:  Mega stops on obstacle but does NOT run its own
+                       avoidance.  It waits for Pi/AI drive commands.
+                       Forward commands are allowed despite obstacle.
+        When disabled: Normal behaviour — Mega handles obstacles itself.
+        """
+        resp = self._exchange(self.CMD_SET_AI_OVERRIDE, bytes([1 if enabled else 0]), expect=2)
+        ok = self._is_ack(resp)
+        if ok:
+            logger.info("AI override on Mega: %s", "ON" if enabled else "OFF")
+        else:
+            logger.warning("Failed to set AI override on Mega")
+        return ok
 
     def request_obstacle_status(self) -> Optional[Dict[str, Any]]:
         """Request obstacle detection flag and distance from Mega."""

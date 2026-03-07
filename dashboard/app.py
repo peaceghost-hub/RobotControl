@@ -1406,6 +1406,30 @@ def receive_robot_event():
             socketio.emit('robot_event', event, namespace='/realtime')
         except Exception:
             logger.debug("Failed to emit robot_event")
+
+        # ── Obstacle-triggered AI analysis ────────────────────────────
+        # When the Pi signals ai_override_active=True (auto-drive is ON
+        # and Mega is deferring obstacle handling to the AI), grab the
+        # latest camera frame and trigger an immediate AI analysis.
+        if (event['type'] == 'OBSTACLE_DETECTED'
+                and event['payload'].get('ai_override_active')
+                and hasattr(ai_vision, 'obstacle_trigger')):
+            dist_cm = -1
+            try:
+                dist_cm = int(event['payload'].get('distance_cm', -1))
+            except (TypeError, ValueError):
+                pass
+            frame = _get_latest_frame_bytes()
+            # Fire-and-forget in a daemon thread so the HTTP response
+            # returns immediately (AI analysis takes ~2-3 s on cloud).
+            import threading as _threading
+            _threading.Thread(
+                target=ai_vision.obstacle_trigger,
+                args=(frame, dist_cm),
+                daemon=True,
+                name='obstacle-ai-trigger',
+            ).start()
+
         return jsonify({'status': 'success', 'event': event}), 200
     except Exception as exc:
         logger.exception("Error receiving robot event: %s", exc)
@@ -1560,10 +1584,28 @@ def ai_unload_model():
 @app.route('/api/ai/drive', methods=['POST'])
 def ai_drive_toggle():
     """Toggle auto-drive: in navigate mode, AI sends drive commands to the Pi.
-    RULE: Only works when a base navigation method is already active."""
+    RULE: Only works when a base navigation method is already active.
+    When enabled: pushes AI_OVERRIDE ON to Pi → Mega defers obstacle handling.
+    When disabled: pushes AI_OVERRIDE OFF → Mega resumes normal obstacle avoidance."""
+    global _instant_command_seq
     data = request.get_json(silent=True) or {}
     enabled = bool(data.get('enabled', False))
     ai_vision.set_auto_drive(enabled)
+
+    # Sync AI override flag on Pi/Mega via the instant command queue.
+    with thread_lock:
+        _instant_command_seq += 1
+        seq = _instant_command_seq
+        _instant_queue.append({
+            'command_type': 'AI_OVERRIDE',
+            'payload': {'enabled': enabled},
+            'device_id': app.config.get('DEFAULT_DEVICE_ID', 'robot_01'),
+            'seq': seq,
+            'timestamp': datetime.utcnow().isoformat(),
+        })
+    logger.info("AI_OVERRIDE queued for Pi: %s seq=%d",
+                'ON' if enabled else 'OFF', seq)
+
     return jsonify({
         'status': 'ok',
         'auto_drive': ai_vision.auto_drive,

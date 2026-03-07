@@ -34,6 +34,30 @@ from typing import Optional, Dict, Any, Callable, List
 
 logger = logging.getLogger("ai_vision")
 
+# ── Load .env file (so MOONDREAM_API_KEY persists across restarts) ───
+def _load_dotenv() -> None:
+    """Read dashboard/.env into os.environ (no dependency needed)."""
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.isfile(env_path):
+        return
+    try:
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip().strip("'\"")
+                    if key and key not in os.environ:  # don't override explicit exports
+                        os.environ[key] = value
+                        logger.debug(".env → %s=***", key)
+    except Exception as exc:
+        logger.warning("Failed to read .env: %s", exc)
+
+_load_dotenv()
+
 # ── Lazy heavy imports ───────────────────────────────────────────────
 _TORCH_AVAILABLE = False
 _PIL_AVAILABLE = False
@@ -154,6 +178,7 @@ class _NullVision:
     def set_interval(self, _s: float) -> None: ...
     def set_auto_drive(self, _e: bool) -> None: ...
     def set_base_nav(self, _m: str) -> None: ...
+    def obstacle_trigger(self, _f: bytes, _d: int) -> None: ...
     def query_once(self, *_a: Any) -> None: return None
     def detect_once(self, *_a: Any) -> None: return None
 
@@ -252,6 +277,15 @@ class MoondreamVision:
         self._base_nav_mode = "none"
         self._last_nav: Optional[Dict[str, str]] = None
         self._drive_count = 0
+
+        # ── Obstacle-triggered analysis (event-driven when auto-drive ON) ──
+        # When auto_drive is enabled the analysis loop does NOT poll on a
+        # timer.  Instead it waits on this Event, which is set by
+        # ``obstacle_trigger()`` when the Pi reports OBSTACLE_DETECTED.
+        self._obstacle_event = threading.Event()
+        self._obstacle_frame: Optional[bytes] = None
+        self._obstacle_distance: int = -1
+        self._obstacle_lock = threading.Lock()  # guards frame/distance
 
         # ── Injected by app.py ────────────────────────────────────────
         self._frame_provider: Optional[Callable[[], Optional[bytes]]] = None
@@ -425,6 +459,22 @@ class MoondreamVision:
         if prev != self._base_nav_mode:
             logger.info("Base nav: %s → %s", prev, self._base_nav_mode)
         self._broadcast_status()
+
+    def obstacle_trigger(self, frame_bytes: Optional[bytes] = None, distance_cm: int = -1) -> None:
+        """Called by app.py when OBSTACLE_DETECTED arrives and auto-drive is ON.
+
+        Stashes the frame + distance and signals the analysis thread to run
+        an immediate navigate-mode analysis instead of waiting for the next
+        timer tick.  If ``frame_bytes`` is None, the analysis loop will grab
+        the latest frame via ``_frame_provider`` as usual.
+        """
+        if not self._auto_drive or not self._enabled:
+            return
+        with self._obstacle_lock:
+            self._obstacle_frame = frame_bytes
+            self._obstacle_distance = distance_cm
+        self._obstacle_event.set()
+        logger.info("Obstacle trigger: dist=%dcm — AI analysis queued", distance_cm)
 
     # ══════════════════════════════════════════════════════════════════
     #  NAVIGATION DECISION PARSER & DRIVE COMMAND
@@ -615,6 +665,53 @@ class MoondreamVision:
                 self._stop_event.wait(0.5)
                 continue
 
+            # ── EVENT-DRIVEN PATH (auto-drive ON) ───────────────────
+            # When auto-drive is enabled we do NOT poll on a timer.
+            # We block until obstacle_trigger() fires the event.
+            if self._auto_drive:
+                # Wait for obstacle event (or stop event / timeout)
+                triggered = self._obstacle_event.wait(timeout=1.0)
+                if self._stop_event.is_set():
+                    break
+                if not triggered:
+                    continue  # timeout — loop back and check flags
+                self._obstacle_event.clear()
+
+                # Grab the stashed obstacle frame (or fall back to live frame)
+                with self._obstacle_lock:
+                    frame_bytes = self._obstacle_frame
+                    obs_dist = self._obstacle_distance
+                    self._obstacle_frame = None
+                if frame_bytes is None:
+                    frame_bytes = (
+                        self._frame_provider() if self._frame_provider else None
+                    )
+                if frame_bytes is None:
+                    continue
+
+                # Broadcast "analysing" to the UI
+                if self._emit_fn:
+                    self._emit_fn("ai_vision_update", {
+                        "mode": "navigate",
+                        "response": f"Obstacle at {obs_dist}cm — AI analysing… ({self._active_backend})",
+                        "inference_time": None,
+                        "count": self._analysis_count,
+                        "backend": self._active_backend,
+                        "obstacle_triggered": True,
+                    })
+
+                result = self._run_analysis(frame_bytes)
+                if result:
+                    result["obstacle_triggered"] = True
+                    result["obstacle_distance_cm"] = obs_dist
+                    with self._lock:
+                        self._last_result = result
+                        self._analysis_count += 1
+                    if self._emit_fn:
+                        self._emit_fn("ai_vision_update", result)
+                continue  # loop back — don't fall through to timer path
+
+            # ── TIMER-BASED PATH (auto-drive OFF, normal modes) ─────
             try:
                 frame_bytes = (
                     self._frame_provider() if self._frame_provider else None

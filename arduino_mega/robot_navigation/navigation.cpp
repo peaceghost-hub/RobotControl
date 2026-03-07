@@ -10,6 +10,11 @@
 
 #include "navigation.h"
 
+// Access the AI override flag declared in the main .ino / globals.h
+extern bool aiOverrideActive;
+extern unsigned long aiOverrideWaitStart;
+extern bool aiOverrideWaiting;
+
 #ifndef DEG_TO_RAD
 #define DEG_TO_RAD (PI/180.0)
 #endif
@@ -241,6 +246,26 @@ void Navigation::update() {
         navState != NAV_AVOID_DRIVE && navState != NAV_AVOID_RECHECK &&
         navState != NAV_STALLED) {
         if (obstacleAvoid->isObstacleDetected()) {
+            // When AI override is active, just stop and let Pi/AI handle it.
+            // Do NOT enter the autonomous avoidance state machine.
+            // TIMEOUT: After 10s with no Pi command, fall through to
+            // Mega's own avoidance so the robot is never stuck.
+            if (aiOverrideActive) {
+                if (!aiOverrideWaiting) {
+                    aiOverrideWaiting = true;
+                    aiOverrideWaitStart = millis();
+                    motors->stop();
+                    Serial.println(F("# NAV: AI override — stopped, waiting for Pi"));
+                    return;
+                }
+                if ((millis() - aiOverrideWaitStart) < AI_OVERRIDE_TIMEOUT_MS) {
+                    motors->stop();
+                    return;  // Still waiting — Pi may send AI_DRIVE any moment
+                }
+                // Timeout expired — fall through to autonomous avoidance
+                aiOverrideWaiting = false;
+                Serial.println(F("# NAV: AI override timeout — Mega taking over"));
+            }
             motors->stop();
             avoidAttempts++;
             Serial.print(F("# NAV: obstacle! attempt #"));
