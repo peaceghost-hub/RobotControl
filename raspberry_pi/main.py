@@ -265,6 +265,11 @@ class RobotController:
         # at spawn time and only acts if the epoch hasn't changed.
         self._ai_resume_epoch = 0
 
+        # AI obstacle override: when True, Mega defers obstacle handling to
+        # the Pi/AI.  Set via AI_OVERRIDE command from the dashboard when
+        # auto-drive is toggled.  Mega's aiOverrideActive mirrors this.
+        self._ai_override_active = False
+
         # Thread management
         self.threads = []
         
@@ -776,6 +781,7 @@ class RobotController:
                         'type': 'OBSTACLE_DETECTED',
                         'distance_cm': dist_cm,
                         'direction': 'FRONT',
+                        'ai_override_active': self._ai_override_active,
                         'timestamp': datetime.utcnow().isoformat(),
                     }
                     try:
@@ -952,6 +958,19 @@ class RobotController:
             elif command_type == 'SOUND_BUZZER':
                 duration = int((payload or {}).get('duration', 3))
                 success = self.robot_link.sound_buzzer(duration) if hasattr(self.robot_link, 'sound_buzzer') else False
+            elif command_type == 'AI_OVERRIDE':
+                # Dashboard toggling AI obstacle override on/off.
+                # When enabled, Mega defers obstacle avoidance to the AI.
+                enabled = bool(payload.get('enabled', False))
+                self._ai_override_active = enabled
+                if self.robot_link and hasattr(self.robot_link, 'set_ai_override'):
+                    success = self.robot_link.set_ai_override(enabled)
+                    logger.info("AI_OVERRIDE → Mega: %s (I2C %s)",
+                                'ON' if enabled else 'OFF',
+                                'ok' if success else 'FAILED')
+                else:
+                    logger.warning("AI_OVERRIDE: no robot_link / set_ai_override")
+                    success = False
             elif command_type == 'AI_DRIVE':
                 # AI Vision direction command — dashboard's Moondream analysed
                 # the camera feed and derived a drive direction.
