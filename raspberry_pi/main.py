@@ -267,11 +267,6 @@ class RobotController:
         # at spawn time and only acts if the epoch hasn't changed.
         self._ai_resume_epoch = 0
 
-        # AI obstacle override: when True, Mega defers obstacle handling to
-        # the Pi/AI.  Set via AI_OVERRIDE command from the dashboard when
-        # auto-drive is toggled.  Mega's aiOverrideActive mirrors this.
-        self._ai_override_active = False
-
         # Thread management
         self.threads = []
         
@@ -803,12 +798,17 @@ class RobotController:
                         'type': 'OBSTACLE_DETECTED',
                         'distance_cm': dist_cm,
                         'direction': 'FRONT',
-                        'ai_override_active': self._ai_override_active,
                         'timestamp': datetime.utcnow().isoformat(),
                     }
                     try:
-                        self.api_client.send_event(payload)
+                        resp = self.api_client.send_event(payload)
                         last_emit = now
+                        # Only tell NavController to wait for AI if
+                        # the dashboard actually triggered AI analysis
+                        if (resp and resp.get('ai_triggered')
+                                and self.nav_controller
+                                and self.nav_controller.is_active):
+                            self.nav_controller.notify_ai_triggered()
                     except Exception as exc:
                         logger.debug(f"Failed to send obstacle event: {exc}")
 
@@ -989,93 +989,41 @@ class RobotController:
                 duration = int((payload or {}).get('duration', 3))
                 success = self.robot_link.sound_buzzer(duration) if hasattr(self.robot_link, 'sound_buzzer') else False
             elif command_type == 'AI_OVERRIDE':
-                # Dashboard toggling AI obstacle override on/off.
-                # When enabled, Mega defers obstacle avoidance to the AI.
-                enabled = bool(payload.get('enabled', False))
-                self._ai_override_active = enabled
-                if self.robot_link and hasattr(self.robot_link, 'set_ai_override'):
-                    success = self.robot_link.set_ai_override(enabled)
-                    logger.info("AI_OVERRIDE → Mega: %s (I2C %s)",
-                                'ON' if enabled else 'OFF',
-                                'ok' if success else 'FAILED')
-                else:
-                    logger.warning("AI_OVERRIDE: no robot_link / set_ai_override")
-                    success = False
+                # DEPRECATED — AI obstacle avoidance is now automatic.
+                # Kept for backward compatibility; no-op.
+                logger.info("AI_OVERRIDE command received (deprecated, ignored)")
+                success = True
             elif command_type == 'AI_DRIVE':
-                # AI Vision direction command — dashboard's Moondream analysed
-                # the camera feed and derived a drive direction.
+                # AI Vision obstacle avoidance advice.
                 # payload: {direction: FORWARD|LEFT|RIGHT|STOP,
-                #           safety: SAFE|CAUTION|DANGER, reason: str,
-                #           base_nav: 'manual'|'waypoint'}
+                #           safety: SAFE|CAUTION|DANGER, reason: str}
                 ai_dir = (payload.get('direction') or 'stop').upper()
                 ai_safety = (payload.get('safety') or 'DANGER').upper()
                 ai_reason = payload.get('reason', '')
-                ai_base = payload.get('base_nav', 'manual')
-                logger.info("AI_DRIVE: %s  safety=%s  base=%s  reason=%s",
-                            ai_dir, ai_safety, ai_base, ai_reason)
+                logger.info("AI_DRIVE: %s  safety=%s  reason=%s",
+                            ai_dir, ai_safety, ai_reason)
 
-                # During waypoint nav, pause NavController briefly so the
-                # AI's obstacle-avoidance command takes effect without
-                # NavController fighting for motor control.
-                nav_was_active = (self.nav_controller
-                                  and self.nav_controller.is_active
-                                  and ai_base == 'waypoint')
-                if nav_was_active:
-                    self.nav_controller.pause()
-                    logger.info("NavController paused for AI_DRIVE override")
-
-                # Execute the drive command
-                if ai_dir == 'STOP':
-                    success = self._handle_manual_drive({'direction': 'stop'})
-                elif ai_dir == 'FORWARD':
-                    success = self._handle_manual_drive({'direction': 'forward'})
-                elif ai_dir == 'LEFT':
-                    success = self._handle_manual_drive({'direction': 'left'})
-                elif ai_dir == 'RIGHT':
-                    success = self._handle_manual_drive({'direction': 'right'})
+                # If NavController is active, feed advice to it.
+                # NavController's _handle_obstacle_detected() is waiting
+                # for this advice and will execute the direction.
+                if (self.nav_controller
+                        and self.nav_controller.is_active
+                        and hasattr(self.nav_controller, 'receive_ai_advice')):
+                    self.nav_controller.receive_ai_advice(ai_dir, ai_safety, ai_reason)
+                    success = True
                 else:
-                    logger.warning("Unknown AI_DRIVE direction: %s", ai_dir)
-                    success = False
-
-                # Auto-resume NavController after a brief override period.
-                # The AI's command will hold via the manual drive latch;
-                # NavController resumes on the next analysis cycle when
-                # AI sends SAFE+FORWARD (which is filtered on the dashboard
-                # side so NavController takes back control naturally).
-                #
-                # EPOCH GUARD: capture the epoch at spawn time.  If the
-                # user sends NAV_PAUSE / NAV_STOP / NAV_RESUME / NAV_START
-                # before the sleep expires, the epoch will have changed
-                # and this thread harmlessly no-ops.  This prevents the
-                # AI resume from overriding the user's explicit command.
-                if nav_was_active and ai_safety != 'DANGER':
-                    epoch = self._ai_resume_epoch
-                    def _delayed_resume(_epoch=epoch):
-                        import time as _t
-                        _t.sleep(2.0)
-                        if _epoch != self._ai_resume_epoch:
-                            logger.info("AI delayed-resume cancelled (user intervened)")
-                            return
-                        if (self.nav_controller
-                                and not self.nav_controller.is_active):
-                            self._handle_manual_drive({'direction': 'stop'})
-                            self.nav_controller.resume()
-                            logger.info("NavController resumed after AI override")
-                    Thread(target=_delayed_resume, daemon=True).start()
-                elif nav_was_active and ai_safety == 'DANGER':
-                    epoch = self._ai_resume_epoch
-                    def _danger_resume(_epoch=epoch):
-                        import time as _t
-                        _t.sleep(4.0)
-                        if _epoch != self._ai_resume_epoch:
-                            logger.info("AI DANGER-resume cancelled (user intervened)")
-                            return
-                        if (self.nav_controller
-                                and not self.nav_controller.is_active):
-                            self._handle_manual_drive({'direction': 'stop'})
-                            self.nav_controller.resume()
-                            logger.info("NavController resumed after DANGER clearance")
-                    Thread(target=_danger_resume, daemon=True).start()
+                    # Manual driving — execute direction directly
+                    if ai_dir == 'STOP':
+                        success = self._handle_manual_drive({'direction': 'stop'})
+                    elif ai_dir == 'FORWARD':
+                        success = self._handle_manual_drive({'direction': 'forward'})
+                    elif ai_dir == 'LEFT':
+                        success = self._handle_manual_drive({'direction': 'left'})
+                    elif ai_dir == 'RIGHT':
+                        success = self._handle_manual_drive({'direction': 'right'})
+                    else:
+                        logger.warning("Unknown AI_DRIVE direction: %s", ai_dir)
+                        success = False
             # FOLLOW_LINE removed — no line follower hardware
             else:
                 logger.warning(f"Unknown command: {command_type}")

@@ -461,14 +461,14 @@ class MoondreamVision:
         self._broadcast_status()
 
     def obstacle_trigger(self, frame_bytes: Optional[bytes] = None, distance_cm: int = -1) -> None:
-        """Called by app.py when OBSTACLE_DETECTED arrives and auto-drive is ON.
+        """Called by app.py when OBSTACLE_DETECTED arrives and AI is loaded.
 
         Stashes the frame + distance and signals the analysis thread to run
         an immediate navigate-mode analysis instead of waiting for the next
         timer tick.  If ``frame_bytes`` is None, the analysis loop will grab
         the latest frame via ``_frame_provider`` as usual.
         """
-        if not self._auto_drive or not self._enabled:
+        if not self._enabled:
             return
         with self._obstacle_lock:
             self._obstacle_frame = frame_bytes
@@ -505,17 +505,14 @@ class MoondreamVision:
         return {"safety": safety, "direction": direction, "reason": reason}
 
     def _send_drive_command(self, nav: Dict[str, str]) -> None:
-        """Send an ADVISORY drive command.  Never overrides primary nav."""
+        """Send obstacle avoidance advice to the Pi.
+
+        The Pi decides what to do with it:
+        - NavController active → feeds to NavController
+        - Manual driving → executes directly as motor command
+        """
         if not self._drive_command_fn:
             return
-        if self._base_nav_mode == "none":
-            return
-
-        # During waypoint nav, only intervene on danger — let NavController drive
-        if self._base_nav_mode == "waypoint":
-            if nav["safety"] == "SAFE" and nav["direction"] == "FORWARD":
-                logger.debug("AI: SAFE+FORWARD — NavController drives")
-                return
 
         try:
             self._drive_command_fn({
@@ -524,15 +521,14 @@ class MoondreamVision:
                     "direction": nav["direction"],
                     "safety": nav["safety"],
                     "reason": nav["reason"],
-                    "base_nav": self._base_nav_mode,
                     "backend": self._active_backend,
                 },
             })
             self._drive_count += 1
             logger.info(
-                "AI_DRIVE → %s (safety=%s, base=%s, via=%s) — %s",
+                "AI_DRIVE → %s (safety=%s, via=%s) — %s",
                 nav["direction"], nav["safety"],
-                self._base_nav_mode, self._active_backend,
+                self._active_backend,
                 nav["reason"],
             )
         except Exception as exc:
@@ -665,18 +661,17 @@ class MoondreamVision:
                 self._stop_event.wait(0.5)
                 continue
 
-            # ── EVENT-DRIVEN PATH (auto-drive ON) ───────────────────
-            # When auto-drive is enabled we do NOT poll on a timer.
-            # We block until obstacle_trigger() fires the event.
-            if self._auto_drive:
-                # Wait for obstacle event (or stop event / timeout)
-                triggered = self._obstacle_event.wait(timeout=1.0)
-                if self._stop_event.is_set():
-                    break
-                if not triggered:
-                    continue  # timeout — loop back and check flags
+            # ── Wait for next trigger: obstacle event OR timer interval ──
+            # Obstacle events take priority (instant, event-driven).
+            # If no obstacle fires within _interval, run regular analysis.
+            triggered = self._obstacle_event.wait(timeout=self._interval)
+            if self._stop_event.is_set():
+                break
+
+            if triggered:
                 self._obstacle_event.clear()
 
+                # ── OBSTACLE-TRIGGERED ANALYSIS (navigate mode) ───────
                 # Grab the stashed obstacle frame (or fall back to live frame)
                 with self._obstacle_lock:
                     frame_bytes = self._obstacle_frame
@@ -700,7 +695,12 @@ class MoondreamVision:
                         "obstacle_triggered": True,
                     })
 
+                # Force navigate mode for this analysis
+                saved_mode = self._mode
+                self._mode = "navigate"
                 result = self._run_analysis(frame_bytes)
+                self._mode = saved_mode  # restore original mode
+
                 if result:
                     result["obstacle_triggered"] = True
                     result["obstacle_distance_cm"] = obs_dist
@@ -711,7 +711,7 @@ class MoondreamVision:
                         self._emit_fn("ai_vision_update", result)
                 continue  # loop back — don't fall through to timer path
 
-            # ── TIMER-BASED PATH (auto-drive OFF, normal modes) ─────
+            # ── TIMER-BASED PATH (regular analysis) ─────────────────
             try:
                 frame_bytes = (
                     self._frame_provider() if self._frame_provider else None
@@ -740,8 +740,6 @@ class MoondreamVision:
 
             except Exception as exc:
                 logger.error("Analysis loop error: %s", exc)
-
-            self._stop_event.wait(self._interval)
 
         logger.info("Analysis loop stopped")
 
@@ -960,11 +958,10 @@ class MoondreamVision:
                 result["nav_decision"] = nav
                 self._last_nav = nav
 
-                # ADVISORY drive command — never overrides primary nav
-                if self._auto_drive:
-                    self._send_drive_command(nav)
-                    result["drive_sent"] = True
-                    result["drive_count"] = self._drive_count
+                # Send obstacle avoidance advice to Pi
+                self._send_drive_command(nav)
+                result["drive_sent"] = True
+                result["drive_count"] = self._drive_count
 
             elif self._mode == "custom" and self._custom_prompt:
                 answer = self._query(

@@ -70,7 +70,6 @@ const uint8_t CMD_REQUEST_GPS     = 'G';
 const uint8_t CMD_REQUEST_STATUS  = 'U';
 const uint8_t CMD_REQUEST_OBSTACLE= 'O';  // New: request obstacle flag/distance
 const uint8_t CMD_SOUND_BUZZER = 'Q';  // New: sound buzzer for duration
-const uint8_t CMD_SET_AI_OVERRIDE = 'I';  // New: AI auto-drive obstacle override
 const uint8_t CMD_HEARTBEAT       = 'H';
 const uint8_t CMD_SET_AUTO_SPEED  = 'N';  // New: set autonomous navigation base speed (PWM)
 const uint8_t CMD_ENGAGE_WIRELESS = 'X';  // New: engage/disengage CC1101 backup control
@@ -125,13 +124,6 @@ extern bool navigationActive;
 extern bool manualOverride;
 extern bool i2cHandshakeComplete;
 extern bool wirelessHandshakeComplete;
-extern bool aiOverrideActive;           // AI auto-drive: Mega stops on obstacle, waits for Pi
-extern unsigned long aiOverrideWaitStart; // millis() when AI override first stopped on obstacle
-extern bool aiOverrideWaiting;            // true while Mega is waiting for Pi/AI command
-
-// AI override timeout: Mega falls back to its own avoidance after this (ms)
-const unsigned long AI_OVERRIDE_TIMEOUT_MS = 10000;  // 10 seconds
-
 extern unsigned long lastStatusUpdate;
 extern unsigned long lastWirelessGps;
 extern unsigned long lastManualCommand;

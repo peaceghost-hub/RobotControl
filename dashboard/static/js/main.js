@@ -1932,10 +1932,11 @@ function drawSmallCompass(canvasId, heading, targetBearing, needleColor, theme, 
     ctx.font = 'bold 10px sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
+    const labelR = Math.min(R + 8, Math.min(cx, cy) - 8);  // keep labels ≥8px from canvas edge
     cardinals.forEach(c => {
         const rad = (c.angle - 90) * Math.PI / 180;
-        const lx = cx + (R + 8) * Math.cos(rad);
-        const ly = cy + (R + 8) * Math.sin(rad);
+        const lx = cx + labelR * Math.cos(rad);
+        const ly = cy + labelR * Math.sin(rad);
         ctx.fillStyle = c.color;
         ctx.fillText(c.label, lx, ly);
     });

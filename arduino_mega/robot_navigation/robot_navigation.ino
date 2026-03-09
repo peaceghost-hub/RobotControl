@@ -83,9 +83,6 @@ bool navigationActive        = false;
 bool manualOverride          = false;
 bool i2cHandshakeComplete    = false;
 bool wirelessHandshakeComplete = false;
-bool aiOverrideActive        = false;   // AI auto-drive mode: stop on obstacle, wait for Pi commands
-unsigned long aiOverrideWaitStart = 0;   // millis() when AI override waiting began
-bool aiOverrideWaiting       = false;    // true while stopped, waiting for Pi/AI command
 
 // I2C ISR → main-loop deferred command
 volatile bool     i2cCommandPending   = false;
@@ -369,44 +366,16 @@ void loop() {
   // Compass heading is received from Pi via CMD_SEND_HEADING → piHeading
 
   // SAFETY: Emergency obstacle stop — runs ALWAYS, regardless of state.
-  // If navigation is active and obstacle detected, navigation.update()
-  // handles avoidance.  But if motors are driving FORWARD for any other
-  // reason (manual drive, etc.) we stop.  Reverse and side turns are
-  // ALLOWED so the user can back away from the obstacle.
-  //
-  // When aiOverrideActive, we still STOP on first detection (safety),
-  // but the Pi/AI will send the next drive command — we don't block
-  // future forward commands from the Pi.
-  // TIMEOUT: If no Pi command arrives within 10s, Mega resumes its
-  // own obstacle stop behaviour (stops forward motion).
+  // If navigation is active, navigation.update() handles avoidance.
+  // For non-nav forward motion (manual drive, AI drive, etc.) we stop.
+  // Reverse and side turns are ALLOWED so the user/AI can maneuver.
+  // The Pi/AI is responsible for all avoidance decisions — Mega only
+  // executes motor commands and provides this safety forward-block.
   if (obstacleAvoid.isObstacleDetected() && !navigationActive) {
-      if (aiOverrideActive) {
-          // Start / continue the AI override waiting period
-          if (!aiOverrideWaiting) {
-              aiOverrideWaiting = true;
-              aiOverrideWaitStart = now;
-              if (motors.isMovingForward()) {
-                  motors.stop();
-                  DEBUG_SERIAL.println(F("# AI OVERRIDE: obstacle stop — waiting for Pi"));
-              }
-          } else if ((now - aiOverrideWaitStart) >= AI_OVERRIDE_TIMEOUT_MS) {
-              // Timeout! Pi/AI didn't respond in time — fall back
-              aiOverrideWaiting = false;
-              if (motors.isMovingForward()) {
-                  motors.stop();
-                  DEBUG_SERIAL.println(F("# AI OVERRIDE TIMEOUT: Mega obstacle stop"));
-              }
-          }
-          // While waiting or timed out, don't block — non-blocking!
-      } else {
-          if (motors.isMovingForward()) {
-              motors.stop();
-              DEBUG_SERIAL.println(F("# SAFETY: obstacle stop (non-nav)"));
-          }
+      if (motors.isMovingForward()) {
+          motors.stop();
+          DEBUG_SERIAL.println(F("# SAFETY: obstacle stop (non-nav)"));
       }
-  } else if (!obstacleAvoid.isObstacleDetected() && aiOverrideWaiting) {
-      // Obstacle cleared while waiting — reset the timer
-      aiOverrideWaiting = false;
   }
 
   // ====================================================================
@@ -750,7 +719,6 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
       case CMD_SET_AUTO_SPEED:
       case CMD_SEND_HEADING:     // compass data — read-only, always useful
       case CMD_EMERGENCY_STOP:   // always allow E-stop
-      case CMD_SET_AI_OVERRIDE:  // Pi can always toggle AI override flag
         break;  // allowed
       default:
         prepareAck();
@@ -899,17 +867,13 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
         int8_t rightMotor = (int8_t)payload[1];
         bool active       = payload[2] != 0;
 
-        // Pi/AI sent a drive command — reset the AI override timeout
-        if (aiOverrideActive) {
-            aiOverrideWaiting = false;
-        }
-
         if (active && navigationActive) {
           navigationActive = false;
           navigation.pause();
         }
 
-        if (active && !aiOverrideActive && frontObstacle() && leftMotor > 0 && rightMotor > 0) {
+        // Safety: block forward into detected obstacle
+        if (active && frontObstacle() && leftMotor > 0 && rightMotor > 0) {
           motors.stop();
           leftMotor  = 0;
           rightMotor = 0;
@@ -962,23 +926,6 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
         if (secs > 0 && secs <= 10) {
           beepPatternNB(secs, 900, 100);
         }
-        prepareAck();
-      } else {
-        prepareError(ERR_PACKET_SIZE);
-      }
-      break;
-
-    case CMD_SET_AI_OVERRIDE:
-      // Pi tells Mega whether AI auto-drive is active.
-      // When active:  Mega stops on obstacle but does NOT run its own
-      //               avoidance — it waits for Pi/AI drive commands.
-      //               Forward commands are allowed despite obstacle.
-      // When inactive: Normal behaviour — Mega handles obstacles itself.
-      if (length >= 1) {
-        aiOverrideActive = (payload[0] != 0);
-        aiOverrideWaiting = false;  // reset timeout on any toggle
-        DEBUG_SERIAL.print(F("# AI override: "));
-        DEBUG_SERIAL.println(aiOverrideActive ? F("ON") : F("OFF"));
         prepareAck();
       } else {
         prepareError(ERR_PACKET_SIZE);

@@ -76,6 +76,7 @@ class NavController:
     NAV_GRACE_PERIOD     = 2.0    # seconds — skip drift check at start of NAVIGATING
     HEADING_ACQUIRE_TIMEOUT = 30.0  # seconds — give up if can't acquire
     HEADING_HOLD_TIME    = 10.0   # seconds — countdown before forward drive
+    AI_ADVICE_TIMEOUT    = 10.0   # seconds — wait for AI obstacle advice before fallback
     PREPARE_TIME         = 3.0    # seconds — pause before acquiring heading
     WAYPOINT_HOLD_TIME   = 3.0    # seconds — pause after waypoint reached
     NAV_LOOP_HZ         = 10     # control loop frequency
@@ -122,6 +123,15 @@ class NavController:
         self._current_heading_magnetic = 0.0  # raw magnetic for dashboard
         self._target_bearing = 0.0
         self._last_heading_error = 0.0
+
+        # AI obstacle advice (received from AI Vision via main.py)
+        # When obstacle is detected, NavController waits for AI to advise
+        # on avoidance direction.  If no advice within AI_ADVICE_TIMEOUT,
+        # falls back to traditional turn-away avoidance.
+        self._ai_advice_event = threading.Event()
+        self._ai_advice_direction = None   # 'FORWARD'|'LEFT'|'RIGHT'|'STOP'
+        self._ai_advice_safety = None      # 'SAFE'|'CAUTION'|'DANGER'
+        self._ai_analysis_triggered = False  # True if AI was asked for this obstacle
 
         # Heading confirmation (dashboard can accept/reject before forward drive)
         self._heading_confirmed = threading.Event()
@@ -323,6 +333,27 @@ class NavController:
         """Register a callback fn(event_type: str, payload: dict)
         for sending events to the dashboard (e.g. heading_acquired)."""
         self._event_callback = callback
+
+    def set_ai_override(self, enabled: bool):
+        """Deprecated — kept as no-op for backward compatibility."""
+        pass
+
+    def receive_ai_advice(self, direction: str, safety: str, reason: str = ''):
+        """Called by main.py when AI Vision provides obstacle avoidance advice.
+
+        This unblocks _handle_obstacle_detected() which is waiting for
+        AI advice before falling back to traditional avoidance."""
+        self._ai_advice_direction = direction.upper() if direction else 'STOP'
+        self._ai_advice_safety = safety.upper() if safety else 'DANGER'
+        self._ai_advice_event.set()
+        logger.info("AI advice received: %s (safety=%s) — %s",
+                    self._ai_advice_direction, self._ai_advice_safety, reason)
+
+    def notify_ai_triggered(self):
+        """Called by main.py when AI analysis has been triggered for
+        the current obstacle.  NavController will wait up to
+        AI_ADVICE_TIMEOUT for the result."""
+        self._ai_analysis_triggered = True
 
     def _emit_event(self, event_type: str, payload: dict = None):
         """Fire an event to the dashboard via the registered callback."""
@@ -528,6 +559,11 @@ class NavController:
         # Check obstacle (poll Mega)
         if self._check_obstacle():
             self._send_stop()
+            # Reset AI advice state for this new obstacle encounter
+            self._ai_advice_event.clear()
+            self._ai_advice_direction = None
+            self._ai_advice_safety = None
+            self._ai_analysis_triggered = False
             self._enter_state(NavState.OBSTACLE_DETECTED)
             return
 
@@ -546,15 +582,68 @@ class NavController:
         self._send_forward(self.DRIVE_SPEED)
 
     def _handle_obstacle_detected(self):
-        """Brief stop, then enter avoidance."""
+        """Stop and wait for AI Vision advice on obstacle avoidance.
+
+        Flow:
+        1. Brief safety pause (OBSTACLE_CHECK_PAUSE = 0.3s)
+        2. If AI advice arrives → execute it
+        3. If AI was triggered but no advice within AI_ADVICE_TIMEOUT → fallback
+        4. If AI was NOT triggered → immediate traditional avoidance
+        """
         elapsed = time.time() - self._state_entry_time
-        if elapsed >= self.OBSTACLE_CHECK_PAUSE:
-            self._avoid_attempts += 1
-            # Alternate turn direction each attempt
-            self._avoid_direction = 'left' if self._avoid_attempts % 2 == 1 else 'right'
-            self._obstacle_phase = 'turn'
-            self._obstacle_phase_start = time.time()
-            self._enter_state(NavState.OBSTACLE_AVOID)
+
+        # Brief safety pause before any action
+        if elapsed < self.OBSTACLE_CHECK_PAUSE:
+            self._send_stop()
+            return
+
+        # Check if AI advice has arrived
+        if self._ai_advice_event.is_set():
+            direction = self._ai_advice_direction or 'STOP'
+            safety = self._ai_advice_safety or 'DANGER'
+            logger.info("Executing AI advice: %s (safety=%s)", direction, safety)
+
+            if direction == 'FORWARD' and safety in ('SAFE', 'CAUTION'):
+                # AI says path is clear — re-acquire heading and continue
+                logger.info("AI: path clear — re-acquiring heading")
+                self._enter_state(NavState.ACQUIRING_HEADING)
+                return
+
+            if direction in ('LEFT', 'RIGHT') and safety != 'DANGER':
+                # AI says turn to avoid — execute as obstacle avoidance
+                self._avoid_attempts += 1
+                self._avoid_direction = direction.lower()
+                self._obstacle_phase = 'turn'
+                self._obstacle_phase_start = time.time()
+                self._enter_state(NavState.OBSTACLE_AVOID)
+                return
+
+            # AI says STOP or DANGER — fall through to traditional avoidance
+            logger.info("AI: STOP/DANGER — traditional avoidance")
+            self._enter_traditional_avoidance()
+            return
+
+        # AI analysis was triggered — wait up to AI_ADVICE_TIMEOUT
+        if self._ai_analysis_triggered:
+            if elapsed < self.AI_ADVICE_TIMEOUT:
+                self._send_stop()  # keep motors stopped while waiting
+                return  # still waiting for AI
+            # Timeout — AI didn't respond in time
+            logger.warning("AI advice timeout (%.1fs) — traditional avoidance",
+                           self.AI_ADVICE_TIMEOUT)
+            self._enter_traditional_avoidance()
+            return
+
+        # AI was NOT triggered (model not loaded/enabled) — immediate fallback
+        self._enter_traditional_avoidance()
+
+    def _enter_traditional_avoidance(self):
+        """Enter traditional turn-away obstacle avoidance."""
+        self._avoid_attempts += 1
+        self._avoid_direction = 'left' if self._avoid_attempts % 2 == 1 else 'right'
+        self._obstacle_phase = 'turn'
+        self._obstacle_phase_start = time.time()
+        self._enter_state(NavState.OBSTACLE_AVOID)
 
     def _handle_obstacle_avoid(self):
         """Multi-phase: turn away → check clear → re-acquire heading."""
