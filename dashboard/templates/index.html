@@ -210,12 +210,53 @@
                     <span id="nav-state-pill" class="status-badge subtle">IDLE</span>
                 </div>
                 <div class="panel-content">
-                    <div class="compass-widget">
-                        <canvas id="compass-canvas" width="240" height="240"></canvas>
-                        <div class="compass-legend">
-                            <span class="legend-item"><span class="legend-dot blue"></span> Heading</span>
-                            <span class="legend-item"><span class="legend-dot red"></span> Target</span>
-                            <span class="legend-item"><span class="legend-dot orange"></span> Acquired</span>
+                    <!-- Dual Compass Layout: True North (left) + Magnetic (right) -->
+                    <div style="display:flex; gap:8px; justify-content:center; align-items:flex-start; flex-wrap:wrap;">
+                        <!-- True North Compass (corrected) -->
+                        <div style="text-align:center; flex:0 0 auto;">
+                            <div style="font-size:11px; font-weight:bold; color:#00ff44; margin-bottom:2px;">TRUE NORTH</div>
+                            <canvas id="compass-true-canvas" width="150" height="150"></canvas>
+                            <div style="font-size:10px; color:#00ff44; margin-top:1px;" id="true-heading-label">--°</div>
+                        </div>
+                        <!-- Magnetic Compass (raw) -->
+                        <div style="text-align:center; flex:0 0 auto;">
+                            <div style="font-size:11px; font-weight:bold; color:#ffaa00; margin-bottom:2px;">MAGNETIC</div>
+                            <canvas id="compass-mag-canvas" width="150" height="150"></canvas>
+                            <div style="font-size:10px; color:#ffaa00; margin-top:1px;" id="mag-heading-label">--°</div>
+                        </div>
+                    </div>
+                    <!-- Bearing Error Bar -->
+                    <div id="bearing-error-bar" style="margin:6px auto; max-width:280px; display:none;">
+                        <div style="display:flex; justify-content:space-between; font-size:10px; color:#9ca3af;">
+                            <span>-180°</span><span>Bearing Error</span><span>+180°</span>
+                        </div>
+                        <div style="position:relative; height:8px; background:#1f2937; border-radius:4px; overflow:hidden;">
+                            <div id="error-bar-center" style="position:absolute; left:50%; top:0; bottom:0; width:1px; background:#6b7280;"></div>
+                            <div id="error-bar-fill" style="position:absolute; top:0; bottom:0; background:#3b82f6; border-radius:4px; transition:left 0.2s, width 0.2s;"></div>
+                        </div>
+                    </div>
+                    <div class="compass-legend" style="justify-content:center; gap:12px; margin-top:4px;">
+                        <span class="legend-item"><span class="legend-dot" style="background:#00ff44;"></span> True Heading</span>
+                        <span class="legend-item"><span class="legend-dot" style="background:#ffaa00;"></span> Magnetic</span>
+                        <span class="legend-item"><span class="legend-dot red"></span> Target</span>
+                    </div>
+
+                    <!-- Heading Confirmation Dialog (hidden by default) -->
+                    <div id="heading-confirm-dialog" style="display:none; margin:8px 0; padding:8px; background:#1a2332; border:1px solid #00ff44; border-radius:8px; text-align:center;">
+                        <div style="font-size:12px; color:#e5e7eb; margin-bottom:6px;">
+                            Heading acquired — confirm direction?
+                        </div>
+                        <div style="font-size:11px; color:#9ca3af; margin-bottom:8px;">
+                            True: <span id="confirm-true-heading" style="color:#00ff44;">--°</span> &nbsp;|&nbsp;
+                            Target: <span id="confirm-target-bearing" style="color:#ef4444;">--°</span> &nbsp;|&nbsp;
+                            Error: <span id="confirm-heading-error" style="color:#3b82f6;">--°</span>
+                        </div>
+                        <div style="display:flex; gap:8px; justify-content:center;">
+                            <button id="confirm-heading-accept-btn" class="btn btn-small" style="background:#00ff44; color:#000; font-weight:bold;">✔ Confirm</button>
+                            <button id="confirm-heading-reject-btn" class="btn btn-small" style="background:#ef4444; color:#fff;">✖ Re-acquire</button>
+                        </div>
+                        <div style="font-size:10px; color:#6b7280; margin-top:4px;">
+                            Auto-accepts in <span id="confirm-countdown">10</span>s
                         </div>
                     </div>
 

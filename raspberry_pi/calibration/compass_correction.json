@@ -1,0 +1,9 @@
+{
+  "type": "none",
+  "offset": 0,
+  "description": "No correction applied. Run compass_diagnostic.py to generate a real correction table.",
+  "calibration_points": [],
+  "mean_error": 0,
+  "stdev_error": 0,
+  "generated": "placeholder"
+}

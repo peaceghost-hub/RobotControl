@@ -255,6 +255,8 @@ class RobotController:
                 # Wire up Neo-6M GPS fallback (polls Mega over I2C)
                 if self.robot_link:
                     self.nav_controller._mega_gps_provider = self._get_mega_gps
+                # Wire up event callback so NavController can emit heading_acquired etc.
+                self.nav_controller.set_event_callback(self._nav_event_callback)
                 logger.info("Pi-side NavController initialized")
             except Exception as e:
                 logger.warning(f"NavController init failed: {e}")
@@ -475,6 +477,26 @@ class RobotController:
         except Exception as e:
             logger.debug("Mega GPS poll failed: %s", e)
         return None
+
+    def _nav_event_callback(self, event_type: str, payload: dict):
+        """Forward NavController events (e.g. heading_acquired) to the dashboard.
+
+        Sends via HTTP POST to /api/event so it's broadcast over WebSocket.
+        Non-blocking — runs in the nav thread context.
+        """
+        try:
+            import requests as _req
+            url = f"{self.dashboard_url}/api/event"
+            event_data = {
+                'type': event_type.upper(),
+                'device_id': CONFIG.get('device_id', 'robot_01'),
+                'timestamp': None,  # server will fill in
+            }
+            event_data.update(payload)
+            _req.post(url, json=event_data, timeout=2)
+            logger.debug("Nav event sent: %s", event_type)
+        except Exception as e:
+            logger.debug("Nav event send failed: %s", e)
 
     def nav_status_loop(self):
         """Broadcast Pi-side navigation status to dashboard.
@@ -927,6 +949,14 @@ class RobotController:
             elif command_type == 'NAV_ACCEPT_HEADING':
                 if self.nav_controller:
                     success = self.nav_controller.accept_heading()
+                else:
+                    success = False
+            elif command_type == 'CONFIRM_HEADING':
+                # Dashboard confirms or rejects the acquired heading.
+                # payload: {accepted: true/false}
+                accepted = bool(payload.get('accepted', True))
+                if self.nav_controller:
+                    success = self.nav_controller.confirm_heading(accepted)
                 else:
                     success = False
             elif command_type == 'MANUAL_DRIVE':

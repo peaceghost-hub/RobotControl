@@ -1429,7 +1429,11 @@ function applyHeadingUpdate(value, source = 'primary') {
     // Also feed the compass widget so heading shows even without NAV_STATUS events
     if (compassState.heading === null || source === 'primary') {
         compassState.heading = numeric;
-        drawCompass();
+        // If we don't have a separate magnetic reading, use same value
+        if (compassState.magneticHeading === null) {
+            compassState.magneticHeading = numeric;
+        }
+        updateDualCompass();
     }
 
     if (!state.latestData.gps) {
@@ -1806,58 +1810,132 @@ window.addEventListener('beforeunload', () => {
 window.deleteWaypoint = deleteWaypoint;
 window.addLog = addLog;
 
-/* ─── Compass Widget Drawing Engine ─── */
+/* ─── Dual Compass Widget Drawing Engine ─── */
 const compassState = {
-    heading: null,         // current robot heading (degrees)
-    targetBearing: null,   // target waypoint bearing (degrees)
-    headingError: null,    // signed error (degrees)
-    acquired: false,       // heading acquired (error < 5°)
+    heading: null,            // TRUE (corrected) heading (degrees)
+    magneticHeading: null,    // raw magnetic heading (degrees)
+    targetBearing: null,      // target waypoint bearing (degrees)
+    headingError: null,       // signed error from TRUE heading (degrees)
+    acquired: false,          // heading acquired (error < 5°)
     navState: 'IDLE',
     distance: null,
     waypointIndex: null,
     waypointTotal: null
 };
 
-function drawCompass() {
-    const canvas = document.getElementById('compass-canvas');
+// Compass correction table (loaded from /api/compass_correction)
+let _compassCorrection = { type: 'none' };
+
+/** Load compass correction table from server */
+function loadCompassCorrection() {
+    fetch(`${CONFIG.apiBaseUrl}/api/compass_correction`)
+        .then(resp => resp.json())
+        .then(data => {
+            _compassCorrection = data || { type: 'none' };
+            console.log('Compass correction loaded:', _compassCorrection.type,
+                        _compassCorrection.type === 'constant' ? `offset=${_compassCorrection.offset}°` :
+                        _compassCorrection.type === 'lookup_table' ? `${(_compassCorrection.table||[]).length} entries` : '');
+        })
+        .catch(err => {
+            console.warn('Failed to load compass correction:', err);
+            _compassCorrection = { type: 'none' };
+        });
+}
+
+/** Convert magnetic heading → true heading using loaded correction table */
+function magneticToTrue(magnetic) {
+    if (magnetic === null || magnetic === undefined) return magnetic;
+    const mag = ((magnetic % 360) + 360) % 360;
+
+    if (_compassCorrection.type === 'constant') {
+        return ((mag - (_compassCorrection.offset || 0)) % 360 + 360) % 360;
+    }
+
+    if (_compassCorrection.type === 'lookup_table') {
+        const table = _compassCorrection.table || [];
+        if (table.length === 0) return mag;
+        const n = table.length;
+
+        let lowerIdx = null, upperIdx = null;
+        for (let i = 0; i < n; i++) {
+            if (table[i].magnetic <= mag) lowerIdx = i;
+            if (table[i].magnetic >= mag && upperIdx === null) upperIdx = i;
+        }
+        if (lowerIdx === null) lowerIdx = n - 1;
+        if (upperIdx === null) upperIdx = 0;
+
+        let correction;
+        if (lowerIdx === upperIdx) {
+            correction = table[lowerIdx].correction;
+        } else {
+            let m1 = table[lowerIdx].magnetic;
+            let m2 = table[upperIdx].magnetic;
+            const c1 = table[lowerIdx].correction;
+            const c2 = table[upperIdx].correction;
+            if (m2 < m1) m2 += 360;
+            const magAdj = mag >= m1 ? mag : mag + 360;
+            const span = m2 - m1;
+            if (span === 0) {
+                correction = c1;
+            } else {
+                const t = (magAdj - m1) / span;
+                let diff = c2 - c1;
+                while (diff > 180) diff -= 360;
+                while (diff < -180) diff += 360;
+                correction = c1 + t * diff;
+            }
+        }
+        return ((mag - correction) % 360 + 360) % 360;
+    }
+
+    return mag;  // type 'none' — pass through
+}
+
+/**
+ * Draw a single small compass on the given canvas.
+ * @param {string} canvasId - canvas element ID
+ * @param {number|null} heading - heading to show (needle)
+ * @param {number|null} targetBearing - target line (only for True North)
+ * @param {string} needleColor - primary color for needle
+ * @param {string} theme - 'true' (green) or 'magnetic' (amber)
+ * @param {boolean} acquired - whether heading is acquired (orange overlay)
+ */
+function drawSmallCompass(canvasId, heading, targetBearing, needleColor, theme, acquired) {
+    const canvas = document.getElementById(canvasId);
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     const W = canvas.width;
     const H = canvas.height;
     const cx = W / 2;
     const cy = H / 2;
-    const R = Math.min(cx, cy) - 16;
+    const R = Math.min(cx, cy) - 10;
 
     ctx.clearRect(0, 0, W, H);
+
+    const ringColor = theme === 'true' ? 'rgba(0,255,68,0.3)' : 'rgba(255,170,0,0.3)';
+    const tickColor = theme === 'true' ? 'rgba(0,255,68,0.5)' : 'rgba(255,170,0,0.5)';
 
     // Outer ring
     ctx.beginPath();
     ctx.arc(cx, cy, R, 0, 2 * Math.PI);
-    ctx.strokeStyle = '#d1d5db';
+    ctx.strokeStyle = ringColor;
     ctx.lineWidth = 2;
     ctx.stroke();
 
-    // Inner ring
-    ctx.beginPath();
-    ctx.arc(cx, cy, R - 8, 0, 2 * Math.PI);
-    ctx.strokeStyle = '#e5e7eb';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-
-    // Cardinal labels and tick marks
+    // Cardinal labels
     const cardinals = [
         { label: 'N', angle: 0, color: '#ef4444' },
         { label: 'E', angle: 90, color: '#6b7280' },
         { label: 'S', angle: 180, color: '#6b7280' },
         { label: 'W', angle: 270, color: '#6b7280' }
     ];
-    ctx.font = 'bold 14px sans-serif';
+    ctx.font = 'bold 10px sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     cardinals.forEach(c => {
         const rad = (c.angle - 90) * Math.PI / 180;
-        const lx = cx + (R + 10) * Math.cos(rad);
-        const ly = cy + (R + 10) * Math.sin(rad);
+        const lx = cx + (R + 8) * Math.cos(rad);
+        const ly = cy + (R + 8) * Math.sin(rad);
         ctx.fillStyle = c.color;
         ctx.fillText(c.label, lx, ly);
     });
@@ -1865,84 +1943,59 @@ function drawCompass() {
     // Degree ticks every 30°
     for (let deg = 0; deg < 360; deg += 30) {
         const rad = (deg - 90) * Math.PI / 180;
-        const inner = R - 8;
+        const inner = R - 5;
         const outer = R;
         ctx.beginPath();
         ctx.moveTo(cx + inner * Math.cos(rad), cy + inner * Math.sin(rad));
         ctx.lineTo(cx + outer * Math.cos(rad), cy + outer * Math.sin(rad));
-        ctx.strokeStyle = '#9ca3af';
+        ctx.strokeStyle = tickColor;
         ctx.lineWidth = deg % 90 === 0 ? 2 : 1;
         ctx.stroke();
     }
 
-    // Small ticks every 10°
-    for (let deg = 0; deg < 360; deg += 10) {
-        if (deg % 30 === 0) continue;
-        const rad = (deg - 90) * Math.PI / 180;
-        const inner = R - 4;
-        const outer = R;
-        ctx.beginPath();
-        ctx.moveTo(cx + inner * Math.cos(rad), cy + inner * Math.sin(rad));
-        ctx.lineTo(cx + outer * Math.cos(rad), cy + outer * Math.sin(rad));
-        ctx.strokeStyle = '#d1d5db';
-        ctx.lineWidth = 0.5;
-        ctx.stroke();
-    }
+    const needleLen = R - 14;
 
-    const needleLen = R - 20;
-
-    // Determine if heading acquired (lines merge to orange)
-    const acquired = compassState.acquired ||
-        (compassState.heading !== null && compassState.targetBearing !== null &&
-         Math.abs(compassState.headingError) < 5);
-
-    // Draw TARGET BEARING line (red) — only when navigating
-    if (compassState.targetBearing !== null) {
-        const tRad = (compassState.targetBearing - 90) * Math.PI / 180;
+    // Draw TARGET BEARING line (red dashed) — only on True North compass
+    if (targetBearing !== null && targetBearing !== undefined) {
+        const tRad = (targetBearing - 90) * Math.PI / 180;
         const color = acquired ? '#f59e0b' : '#ef4444';
         ctx.beginPath();
         ctx.moveTo(cx, cy);
         ctx.lineTo(cx + needleLen * Math.cos(tRad), cy + needleLen * Math.sin(tRad));
         ctx.strokeStyle = color;
-        ctx.lineWidth = 3;
-        ctx.setLineDash([6, 4]);
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 3]);
         ctx.stroke();
         ctx.setLineDash([]);
 
-        // Target arrowhead
+        // Target dot
         const ax = cx + needleLen * Math.cos(tRad);
         const ay = cy + needleLen * Math.sin(tRad);
         ctx.beginPath();
-        ctx.arc(ax, ay, 5, 0, 2 * Math.PI);
+        ctx.arc(ax, ay, 3, 0, 2 * Math.PI);
         ctx.fillStyle = color;
         ctx.fill();
     }
 
-    // Draw HEADING line (blue) — always when available
-    if (compassState.heading !== null) {
-        const hRad = (compassState.heading - 90) * Math.PI / 180;
-        const color = acquired ? '#f59e0b' : '#3b82f6';
+    // Draw HEADING needle
+    if (heading !== null && heading !== undefined) {
+        const hRad = (heading - 90) * Math.PI / 180;
+        const color = acquired ? '#f59e0b' : needleColor;
         ctx.beginPath();
         ctx.moveTo(cx, cy);
         ctx.lineTo(cx + needleLen * Math.cos(hRad), cy + needleLen * Math.sin(hRad));
         ctx.strokeStyle = color;
-        ctx.lineWidth = 3;
+        ctx.lineWidth = 2.5;
         ctx.stroke();
 
-        // Heading arrowhead (triangle)
+        // Arrowhead
         const tipX = cx + needleLen * Math.cos(hRad);
         const tipY = cy + needleLen * Math.sin(hRad);
-        const arrowSize = 10;
+        const arrowSize = 7;
         ctx.beginPath();
         ctx.moveTo(tipX, tipY);
-        ctx.lineTo(
-            tipX - arrowSize * Math.cos(hRad - 0.4),
-            tipY - arrowSize * Math.sin(hRad - 0.4)
-        );
-        ctx.lineTo(
-            tipX - arrowSize * Math.cos(hRad + 0.4),
-            tipY - arrowSize * Math.sin(hRad + 0.4)
-        );
+        ctx.lineTo(tipX - arrowSize * Math.cos(hRad - 0.4), tipY - arrowSize * Math.sin(hRad - 0.4));
+        ctx.lineTo(tipX - arrowSize * Math.cos(hRad + 0.4), tipY - arrowSize * Math.sin(hRad + 0.4));
         ctx.closePath();
         ctx.fillStyle = color;
         ctx.fill();
@@ -1950,17 +2003,125 @@ function drawCompass() {
 
     // Center dot
     ctx.beginPath();
-    ctx.arc(cx, cy, 4, 0, 2 * Math.PI);
+    ctx.arc(cx, cy, 3, 0, 2 * Math.PI);
     ctx.fillStyle = '#374151';
     ctx.fill();
+}
 
-    // Heading text in center
-    ctx.font = 'bold 18px sans-serif';
-    ctx.fillStyle = '#111827';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    const hdgText = compassState.heading !== null ? `${Math.round(compassState.heading)}°` : '--°';
-    ctx.fillText(hdgText, cx, cy + 30);
+/** Update both compass canvases and error bar */
+function updateDualCompass() {
+    // True North compass: corrected heading + target bearing
+    drawSmallCompass(
+        'compass-true-canvas',
+        compassState.heading,
+        compassState.targetBearing,
+        '#00ff44',  // green
+        'true',
+        compassState.acquired
+    );
+
+    // Magnetic compass: raw magnetic heading only (no target line)
+    drawSmallCompass(
+        'compass-mag-canvas',
+        compassState.magneticHeading,
+        null,  // no target line on magnetic
+        '#ffaa00',  // amber
+        'magnetic',
+        false  // never show "acquired" on magnetic
+    );
+
+    // Update heading labels
+    const trueLabel = document.getElementById('true-heading-label');
+    if (trueLabel) {
+        trueLabel.textContent = compassState.heading !== null ? `${Math.round(compassState.heading)}°` : '--°';
+    }
+    const magLabel = document.getElementById('mag-heading-label');
+    if (magLabel) {
+        magLabel.textContent = compassState.magneticHeading !== null ? `${Math.round(compassState.magneticHeading)}°` : '--°';
+    }
+
+    // Update bearing error bar
+    const errorBar = document.getElementById('bearing-error-bar');
+    const errorFill = document.getElementById('error-bar-fill');
+    if (errorBar && errorFill) {
+        if (compassState.headingError !== null && compassState.navState !== 'IDLE') {
+            errorBar.style.display = '';
+            const err = Math.max(-180, Math.min(180, compassState.headingError));
+            const pct = ((err + 180) / 360) * 100;
+            const centerPct = 50;
+            const left = Math.min(pct, centerPct);
+            const width = Math.abs(pct - centerPct);
+            errorFill.style.left = left + '%';
+            errorFill.style.width = width + '%';
+            // Color: green when small, yellow when medium, red when large
+            const absErr = Math.abs(err);
+            if (absErr < 5) errorFill.style.background = '#00ff44';
+            else if (absErr < 15) errorFill.style.background = '#f59e0b';
+            else errorFill.style.background = '#ef4444';
+        } else {
+            errorBar.style.display = 'none';
+        }
+    }
+}
+
+// Legacy compat: keep drawCompass as alias
+function drawCompass() {
+    updateDualCompass();
+}
+
+/* ─── Heading Confirmation Dialog ─── */
+let _headingConfirmTimer = null;
+
+function showHeadingConfirmation(data) {
+    const dialog = document.getElementById('heading-confirm-dialog');
+    if (!dialog) return;
+
+    // Populate values
+    const trueEl = document.getElementById('confirm-true-heading');
+    const targetEl = document.getElementById('confirm-target-bearing');
+    const errorEl = document.getElementById('confirm-heading-error');
+    const countdownEl = document.getElementById('confirm-countdown');
+
+    if (trueEl) trueEl.textContent = (data.heading !== undefined ? data.heading + '°' : '--°');
+    if (targetEl) targetEl.textContent = (data.target_bearing !== undefined ? data.target_bearing + '°' : '--°');
+    if (errorEl) errorEl.textContent = (data.heading_error !== undefined ? data.heading_error + '°' : '--°');
+
+    dialog.style.display = '';
+
+    // Countdown (mirrors the 10s auto-accept on the Pi)
+    let remaining = 10;
+    if (countdownEl) countdownEl.textContent = remaining;
+    if (_headingConfirmTimer) clearInterval(_headingConfirmTimer);
+    _headingConfirmTimer = setInterval(() => {
+        remaining--;
+        if (countdownEl) countdownEl.textContent = remaining;
+        if (remaining <= 0) {
+            clearInterval(_headingConfirmTimer);
+            _headingConfirmTimer = null;
+            hideHeadingConfirmation();
+        }
+    }, 1000);
+}
+
+function hideHeadingConfirmation() {
+    const dialog = document.getElementById('heading-confirm-dialog');
+    if (dialog) dialog.style.display = 'none';
+    if (_headingConfirmTimer) {
+        clearInterval(_headingConfirmTimer);
+        _headingConfirmTimer = null;
+    }
+}
+
+function sendHeadingConfirm(accepted) {
+    if (socket && socket.connected) {
+        socket.emit('instant_command', {
+            command: 'CONFIRM_HEADING',
+            payload: { accepted: accepted },
+            device_id: state.deviceId
+        });
+        addLog('info', `Heading ${accepted ? 'CONFIRMED' : 'REJECTED'} by user`);
+    }
+    hideHeadingConfirmation();
 }
 
 /** Map nav state string to CSS class and display label */
@@ -1981,8 +2142,16 @@ function updateNavStatusUI(nav) {
     if (!nav) return;
 
     // Update compass state — field names match nav_controller.get_status()
+    // TRUE (corrected) heading — used by True North compass
     if (nav.current_heading !== undefined && nav.current_heading !== null) {
         compassState.heading = Number(nav.current_heading);
+    }
+    // MAGNETIC heading — used by Magnetic compass
+    if (nav.magnetic_heading !== undefined && nav.magnetic_heading !== null) {
+        compassState.magneticHeading = Number(nav.magnetic_heading);
+    } else if (compassState.heading !== null && compassState.magneticHeading === null) {
+        // Fallback: if Pi doesn't send magnetic_heading yet, use heading as both
+        compassState.magneticHeading = compassState.heading;
     }
     if (nav.target_bearing !== undefined) {
         compassState.targetBearing = nav.target_bearing !== null ? Number(nav.target_bearing) : null;
@@ -2083,15 +2252,33 @@ function updateNavStatusUI(nav) {
         }
     }
 
+    // Hide heading confirmation if state moved past HEADING_ACQUIRED
+    if (stateKey !== 'HEADING_ACQUIRED') {
+        hideHeadingConfirmation();
+    }
+
     // Redraw compass
-    drawCompass();
+    updateDualCompass();
 }
 
 // Draw initial empty compass on load, with resize handler
 document.addEventListener('DOMContentLoaded', () => {
-    setTimeout(drawCompass, 100);
+    // Load compass correction table for True North conversion
+    loadCompassCorrection();
+
+    setTimeout(updateDualCompass, 100);
     // Redraw on window resize so compass scales if panel resizes
-    window.addEventListener('resize', drawCompass);
+    window.addEventListener('resize', updateDualCompass);
+
+    // Wire heading confirmation buttons
+    const confirmAcceptBtn = document.getElementById('confirm-heading-accept-btn');
+    if (confirmAcceptBtn) {
+        confirmAcceptBtn.addEventListener('click', () => sendHeadingConfirm(true));
+    }
+    const confirmRejectBtn = document.getElementById('confirm-heading-reject-btn');
+    if (confirmRejectBtn) {
+        confirmRejectBtn.addEventListener('click', () => sendHeadingConfirm(false));
+    }
 });
 
 /**
@@ -2106,6 +2293,13 @@ function handleRobotEvent(event) {
     // NAV_STATUS events: update compass + nav panel silently (no log/toast spam)
     if (type === 'NAV_STATUS' && payload.nav) {
         updateNavStatusUI(payload.nav);
+        return;
+    }
+
+    // HEADING_ACQUIRED event: show confirmation dialog
+    if (type === 'HEADING_ACQUIRED') {
+        showHeadingConfirmation(payload);
+        showToast('info', 'Navigation', 'Heading acquired — confirm direction?');
         return;
     }
 

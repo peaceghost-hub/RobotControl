@@ -119,8 +119,14 @@ class NavController:
 
         # Bearing / heading cache
         self._current_heading = 0.0
+        self._current_heading_magnetic = 0.0  # raw magnetic for dashboard
         self._target_bearing = 0.0
         self._last_heading_error = 0.0
+
+        # Heading confirmation (dashboard can accept/reject before forward drive)
+        self._heading_confirmed = threading.Event()
+        self._heading_confirm_result = None  # True=accept, False=reject, None=pending
+        self._event_callback = None  # set externally: fn(event_type, payload)
 
         # Stats for dashboard
         self._distance_to_wp = 0.0
@@ -155,11 +161,15 @@ class NavController:
         """Snapshot for dashboard display."""
         # Read live compass heading even when nav loop is not running
         heading = self._current_heading
+        magnetic = self._current_heading_magnetic
         if not self._running and self.compass:
             try:
                 h = self.compass.read_heading()
                 if h is not None:
                     heading = h
+                m = self.compass.read_heading_magnetic() if hasattr(self.compass, 'read_heading_magnetic') else h
+                if m is not None:
+                    magnetic = m
             except Exception:
                 pass
         with self._lock:
@@ -182,6 +192,7 @@ class NavController:
             return {
                 'state': self._state.name,
                 'current_heading': round(heading, 1),
+                'magnetic_heading': round(magnetic, 1),
                 'target_bearing': round(self._target_bearing, 1) if self._state not in (NavState.IDLE, NavState.COMPLETE, NavState.PAUSED) else None,
                 'heading_error': round(self._last_heading_error, 1) if self._state not in (NavState.IDLE, NavState.COMPLETE, NavState.PAUSED) else None,
                 'distance_to_wp': round(self._distance_to_wp, 1) if self._state not in (NavState.IDLE, NavState.COMPLETE, NavState.PAUSED) else None,
@@ -292,8 +303,34 @@ class NavController:
         self._send_stop()
         logger.info("Heading manually accepted (error=%.1f°) — motors stopped, %.0fs countdown",
                      self._last_heading_error, self.HEADING_HOLD_TIME)
+        self._heading_acquired_emitted = False  # reset for _handle_heading_acquired
         self._enter_state(NavState.HEADING_ACQUIRED)
         return True
+
+    def confirm_heading(self, accepted: bool = True):
+        """Dashboard confirms or rejects the acquired heading.
+
+        Called when the user presses Confirm or Reject on the heading
+        confirmation dialog.  If accepted, the robot proceeds to
+        NAVIGATING immediately.  If rejected, it re-enters ACQUIRING.
+        """
+        self._heading_confirm_result = accepted
+        self._heading_confirmed.set()
+        logger.info("Heading %s by user", "CONFIRMED" if accepted else "REJECTED")
+        return True
+
+    def set_event_callback(self, callback):
+        """Register a callback fn(event_type: str, payload: dict)
+        for sending events to the dashboard (e.g. heading_acquired)."""
+        self._event_callback = callback
+
+    def _emit_event(self, event_type: str, payload: dict = None):
+        """Fire an event to the dashboard via the registered callback."""
+        if self._event_callback:
+            try:
+                self._event_callback(event_type, payload or {})
+            except Exception as e:
+                logger.debug("Event callback error: %s", e)
 
     # ================================================================
     #  MAIN CONTROL LOOP (runs in its own thread)
@@ -408,6 +445,7 @@ class NavController:
             # Heading acquired! — stop motors and begin countdown
             self._send_stop()
             self._send_stop()  # double-send for reliability
+            self._heading_acquired_emitted = False  # reset for _handle_heading_acquired
             logger.info("Heading auto-acquired (error=%.1f°) — %.0fs countdown",
                          abs_error, self.HEADING_HOLD_TIME)
             self._enter_state(NavState.HEADING_ACQUIRED)
@@ -426,16 +464,50 @@ class NavController:
     def _handle_heading_acquired(self):
         """Hold state with countdown — motors stay stopped.
 
+        Emits 'heading_acquired' event to dashboard for confirmation.
+        Dashboard can confirm or reject.  Auto-accepts after
+        HEADING_HOLD_TIME seconds (non-blocking via Event.wait with timeout).
+
         Dashboard shows 'Starting navigation in N…' countdown.
-        After HEADING_HOLD_TIME seconds, transitions to NAVIGATING.
+        After confirmation or timeout, transitions to NAVIGATING.
         """
         elapsed = time.time() - self._state_entry_time
+
+        # On first entry, emit heading_acquired event and reset confirmation
+        if not getattr(self, '_heading_acquired_emitted', False):
+            self._heading_acquired_emitted = True
+            self._heading_confirmed.clear()
+            self._heading_confirm_result = None
+            self._emit_event('heading_acquired', {
+                'heading': round(self._current_heading, 1),
+                'magnetic_heading': round(self._current_heading_magnetic, 1),
+                'target_bearing': round(self._target_bearing, 1),
+                'heading_error': round(self._last_heading_error, 1),
+            })
+
         # Reinforce stop every ~1s (at 10Hz, every 10th tick) as safety
         tick_num = int(elapsed * self.NAV_LOOP_HZ)
         if tick_num % self.NAV_LOOP_HZ == 0:
             self._send_stop()
+
+        # Check if user confirmed/rejected
+        if self._heading_confirmed.is_set():
+            self._heading_acquired_emitted = False
+            if self._heading_confirm_result is False:
+                # Rejected — re-acquire
+                logger.info("Heading rejected by user — re-acquiring")
+                self._enter_state(NavState.ACQUIRING_HEADING)
+                return
+            else:
+                # Confirmed (or True by default)
+                logger.info("Heading confirmed by user — starting NAVIGATING")
+                self._enter_state(NavState.NAVIGATING)
+                return
+
+        # Auto-accept after HEADING_HOLD_TIME
         if elapsed >= self.HEADING_HOLD_TIME:
-            logger.info("Countdown complete — starting NAVIGATING")
+            self._heading_acquired_emitted = False
+            logger.info("Countdown complete (auto-accept) — starting NAVIGATING")
             self._enter_state(NavState.NAVIGATING)
 
     def _handle_navigating(self):
@@ -562,8 +634,11 @@ class NavController:
     # ================================================================
 
     def _read_heading(self) -> float:
-        """Read compass heading from Pi-local compass."""
+        """Read compass heading from Pi-local compass (true/corrected)."""
         try:
+            # Also cache the raw magnetic heading for the dashboard
+            if hasattr(self.compass, 'read_heading_magnetic'):
+                self._current_heading_magnetic = self.compass.read_heading_magnetic()
             return self.compass.read_heading()
         except Exception:
             return self._current_heading  # return last known
