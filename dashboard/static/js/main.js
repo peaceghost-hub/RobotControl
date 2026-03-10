@@ -2726,6 +2726,7 @@ function initZoomControls() {
     const detectionsList= document.getElementById('ai-detections-list');
     const driveRow      = document.getElementById('ai-drive-row');
     const driveToggle   = document.getElementById('ai-drive-toggle');
+    const pauseBtn      = document.getElementById('ai-pause-btn');
     const safetyBadge   = document.getElementById('ai-safety-badge');
     const driveDir      = document.getElementById('ai-drive-direction');
     const driveCount    = document.getElementById('ai-drive-count');
@@ -2756,6 +2757,15 @@ function initZoomControls() {
 
         // Show/hide hint
         if (driveHint) driveHint.style.display = active ? 'none' : '';
+    }
+
+    function updatePauseBtn(paused) {
+        aiPaused = paused;
+        if (!pauseBtn) return;
+        // Show pause button only when auto-drive is on
+        pauseBtn.style.display = (driveToggle && driveToggle.checked) ? '' : 'none';
+        pauseBtn.textContent = paused ? '▶ Resume' : '⏸ Pause';
+        pauseBtn.className = 'btn btn-small' + (paused ? ' btn-warning' : '');
     }
 
     // ── Helpers ───────────────────────────────────────────────────────
@@ -2845,10 +2855,19 @@ function initZoomControls() {
         apiPost('/api/ai/drive', { enabled: driveToggle.checked }).then(r => {
             if (r && typeof r.auto_drive === 'boolean') {
                 driveToggle.checked = r.auto_drive;
+                updatePauseBtn(false);  // reset pause when toggling
                 if (r.auto_drive && modeSelect) {
                     modeSelect.value = 'navigate';
                     syncModeRows();
                 }
+            }
+        });
+    });
+
+    if (pauseBtn) pauseBtn.addEventListener('click', () => {
+        apiPost('/api/ai/pause', { paused: !aiPaused }).then(r => {
+            if (r && typeof r.ai_paused === 'boolean') {
+                updatePauseBtn(r.ai_paused);
             }
         });
     });
@@ -2928,6 +2947,9 @@ function initZoomControls() {
             if (typeof data.auto_drive === 'boolean') {
                 if (driveToggle) driveToggle.checked = data.auto_drive;
             }
+            if (typeof data.ai_paused === 'boolean') {
+                updatePauseBtn(data.ai_paused);
+            }
             if (data.base_nav_mode != null) {
                 updateBaseNavUI(data.base_nav_mode);
             }
@@ -2950,6 +2972,9 @@ function initZoomControls() {
                 }
                 if (typeof data.ai_vision.auto_drive === 'boolean') {
                     if (driveToggle) driveToggle.checked = data.ai_vision.auto_drive;
+                }
+                if (typeof data.ai_vision.ai_paused === 'boolean') {
+                    updatePauseBtn(data.ai_vision.ai_paused);
                 }
                 if (data.ai_vision.base_nav_mode != null) {
                     updateBaseNavUI(data.ai_vision.base_nav_mode);

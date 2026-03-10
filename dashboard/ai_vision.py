@@ -167,9 +167,15 @@ class _NullVision:
     last_result = None
 
     auto_drive = False
+    ai_paused = False
     last_nav = None
     drive_count = 0
     base_nav_mode = "none"
+
+    _enabled = False
+    _status = "unavailable"
+    _auto_drive = False
+    _ai_paused = False
 
     def load_model(self) -> None: ...
     def unload_model(self) -> None: ...
@@ -177,6 +183,7 @@ class _NullVision:
     def set_mode(self, *_a: Any) -> None: ...
     def set_interval(self, _s: float) -> None: ...
     def set_auto_drive(self, _e: bool) -> None: ...
+    def set_ai_paused(self, _p: bool) -> None: ...
     def set_base_nav(self, _m: str) -> None: ...
     def obstacle_trigger(self, _f: bytes, _d: int) -> None: ...
     def query_once(self, *_a: Any) -> None: return None
@@ -198,6 +205,7 @@ class _NullVision:
             "torch_available": _TORCH_AVAILABLE,
             "transformers_available": False,
             "auto_drive": False,
+            "ai_paused": False,
             "last_nav": None,
             "drive_count": 0,
             "base_nav_mode": "none",
@@ -274,6 +282,7 @@ class MoondreamVision:
 
         # ── Auto-drive (ADVISORY — never blocks primary nav) ──────────
         self._auto_drive = False
+        self._ai_paused = False        # quick-toggle: pause drive commands
         self._base_nav_mode = "none"
         self._last_nav: Optional[Dict[str, str]] = None
         self._drive_count = 0
@@ -441,10 +450,13 @@ class MoondreamVision:
     def set_auto_drive(self, enabled: bool) -> None:
         self._auto_drive = enabled
         if enabled:
+            # Switch display mode to navigate so the UI shows nav results,
+            # but do NOT start navigation or enable analysis automatically.
+            # The user starts movement themselves (arrows or nav start).
             if self._mode != "navigate":
                 self._mode = "navigate"
-            if not self._enabled:
-                self.set_enabled(True)
+            # Clear pause when toggling on
+            self._ai_paused = False
         logger.info(
             "Auto-drive → %s  (base_nav=%s, backend=%s)",
             "ON" if enabled else "OFF",
@@ -452,6 +464,17 @@ class MoondreamVision:
             self._active_backend,
         )
         self._broadcast_status()
+
+    def set_ai_paused(self, paused: bool) -> None:
+        """Quick-toggle to pause/resume AI drive commands.
+        When paused, AI still analyses for display but never sends AI_DRIVE."""
+        self._ai_paused = paused
+        logger.info("AI drive paused → %s", paused)
+        self._broadcast_status()
+
+    @property
+    def ai_paused(self) -> bool:
+        return self._ai_paused
 
     def set_base_nav(self, mode: str) -> None:
         prev = self._base_nav_mode
@@ -507,11 +530,16 @@ class MoondreamVision:
     def _send_drive_command(self, nav: Dict[str, str]) -> None:
         """Send obstacle avoidance advice to the Pi.
 
+        Only sends when auto-drive is ON and not paused.
         The Pi decides what to do with it:
         - NavController active → feeds to NavController
         - Manual driving → executes directly as motor command
         """
         if not self._drive_command_fn:
+            return
+        if not self._auto_drive or self._ai_paused:
+            logger.debug("AI drive command suppressed (auto=%s, paused=%s)",
+                         self._auto_drive, self._ai_paused)
             return
 
         try:
@@ -695,7 +723,8 @@ class MoondreamVision:
                         "obstacle_triggered": True,
                     })
 
-                # Force navigate mode for this analysis
+                # Force navigate mode for obstacle analysis so we get
+                # a directional decision (FORWARD/LEFT/RIGHT/STOP).
                 saved_mode = self._mode
                 self._mode = "navigate"
                 result = self._run_analysis(frame_bytes)
@@ -704,6 +733,15 @@ class MoondreamVision:
                 if result:
                     result["obstacle_triggered"] = True
                     result["obstacle_distance_cm"] = obs_dist
+
+                    # Send drive command ONLY from obstacle-triggered path.
+                    # Timer-based analysis never sends drive commands.
+                    nav = result.get("nav_decision")
+                    if nav:
+                        self._send_drive_command(nav)
+                        result["drive_sent"] = True
+                        result["drive_count"] = self._drive_count
+
                     with self._lock:
                         self._last_result = result
                         self._analysis_count += 1
@@ -957,11 +995,8 @@ class MoondreamVision:
                 nav = self._parse_nav_decision(raw)
                 result["nav_decision"] = nav
                 self._last_nav = nav
-
-                # Send obstacle avoidance advice to Pi
-                self._send_drive_command(nav)
-                result["drive_sent"] = True
-                result["drive_count"] = self._drive_count
+                # NOTE: drive command is sent by the analysis loop caller,
+                # NOT here — only obstacle-triggered analyses send commands.
 
             elif self._mode == "custom" and self._custom_prompt:
                 answer = self._query(
@@ -1072,6 +1107,7 @@ class MoondreamVision:
             "torch_available": _TORCH_AVAILABLE,
             "transformers_available": True,  # compat flag
             "auto_drive": self._auto_drive,
+            "ai_paused": self._ai_paused,
             "base_nav_mode": self._base_nav_mode,
             "last_nav": self._last_nav,
             "drive_count": self._drive_count,

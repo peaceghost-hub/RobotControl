@@ -960,6 +960,15 @@ class RobotController:
                 else:
                     success = False
             elif command_type == 'MANUAL_DRIVE':
+                # RULE: Manual commands ALWAYS take priority over everything.
+                # If NavController is actively driving, pause it so the user
+                # gets immediate control.  They can resume nav later.
+                direction = (payload or {}).get('direction', '').lower()
+                if direction not in ('', 'stop', 'brake', 'none'):
+                    if self.nav_controller and self.nav_controller.is_active:
+                        logger.info("Manual drive '%s' — pausing NavController (manual priority)",
+                                    direction)
+                        self.nav_controller.pause()
                 success = self._handle_manual_drive(payload)
             elif command_type == 'MANUAL_OVERRIDE':
                 success = self._handle_manual_override(payload)

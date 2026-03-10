@@ -515,19 +515,20 @@
                     <button id="ai-query-once-btn" class="btn btn-small" title="Analyse current frame once">📸 Analyse Now</button>
                 </div>
 
-                <!-- Auto-Drive toggle (requires active navigation first) -->
+                <!-- Auto-Drive toggle + Pause button -->
                 <div id="ai-drive-row" class="ai-control-row ai-drive-row">
                     <label class="ai-toggle-label">
                         <input type="checkbox" id="ai-drive-toggle">
                         <span>🚗 Auto-Drive</span>
                     </label>
+                    <button id="ai-pause-btn" class="btn btn-small" title="Pause/Resume AI drive assistance" style="display:none;">⏸ Pause</button>
                     <span id="ai-base-nav-label" class="ai-base-nav-label">No nav active</span>
                     <span id="ai-safety-badge" class="ai-safety-badge ai-safety-unknown">--</span>
                     <span id="ai-drive-direction" class="ai-drive-direction">--</span>
                     <span id="ai-drive-count" class="ai-meta">#0</span>
                 </div>
                 <div id="ai-drive-hint" class="ai-info-hint" style="margin-top:0;">
-                    ⚠️ Start waypoint navigation or press forward arrow first, then enable auto-drive.
+                    ℹ️ Auto-drive assists your driving (manual arrows or waypoint nav). It never drives on its own.
                 </div>
 
                 <!-- Results area -->

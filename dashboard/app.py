@@ -1408,10 +1408,12 @@ def receive_robot_event():
             logger.debug("Failed to emit robot_event")
 
         # ── Obstacle-triggered AI analysis ────────────────────────────
-        # When AI Vision is loaded and enabled, automatically trigger
-        # obstacle analysis — no toggle needed.  AI provides direction
-        # advice; NavController uses it or falls back after 10 s.
-        ai_triggered = False
+        # AI analyses obstacles whenever the model is loaded+enabled (for
+        # display).  But only flag ai_triggered=True when auto-drive is
+        # ON and not paused — that tells the Pi’s NavController to wait
+        # for AI advice before falling back to traditional avoidance.
+        ai_analysed = False    # did we start an analysis at all?
+        ai_triggered = False   # will a drive command follow?
         if (event['type'] == 'OBSTACLE_DETECTED'
                 and hasattr(ai_vision, 'obstacle_trigger')
                 and ai_vision._enabled
@@ -1431,7 +1433,12 @@ def receive_robot_event():
                 daemon=True,
                 name='obstacle-ai-trigger',
             ).start()
-            ai_triggered = True
+            ai_analysed = True
+            # NavController should only wait for AI advice when auto-drive
+            # is ON and not paused — otherwise it should fallback immediately.
+            ai_triggered = (
+                ai_vision._auto_drive and not ai_vision._ai_paused
+            )
 
         return jsonify({
             'status': 'success',
@@ -1629,6 +1636,21 @@ def ai_drive_toggle():
         'auto_drive': ai_vision.auto_drive,
         'base_nav_mode': ai_vision.base_nav_mode,
         'mode': ai_vision._mode,
+    })
+
+
+@app.route('/api/ai/pause', methods=['POST'])
+def ai_pause_toggle():
+    """Pause/resume AI drive assistance.
+    When paused, AI still analyses for display but never sends AI_DRIVE."""
+    data = request.get_json(silent=True) or {}
+    paused = bool(data.get('paused', not ai_vision.ai_paused))
+    ai_vision.set_ai_paused(paused)
+    logger.info("AI drive paused: %s", paused)
+    return jsonify({
+        'status': 'ok',
+        'ai_paused': ai_vision.ai_paused,
+        'auto_drive': ai_vision.auto_drive,
     })
 
 
