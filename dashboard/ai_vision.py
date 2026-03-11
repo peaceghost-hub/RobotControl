@@ -1225,8 +1225,12 @@ class MoondreamVision:
         if self._fd_paused and self._drive_command_fn:
             self._drive_command_fn({
                 "command": "AI_DRIVE",
-                "direction": "STOP",
-                "source": "full_drive_pause",
+                "payload": {
+                    "direction": "STOP",
+                    "safety": "CAUTION",
+                    "reason": "Full Drive paused",
+                    "source": "full_drive_pause",
+                },
             })
         self._fd_log_entry(f"⏸ {state}")
         self._broadcast_fd_status()
@@ -1243,8 +1247,12 @@ class MoondreamVision:
         if self._drive_command_fn:
             self._drive_command_fn({
                 "command": "AI_DRIVE",
-                "direction": "STOP",
-                "source": "full_drive_stop",
+                "payload": {
+                    "direction": "STOP",
+                    "safety": "CAUTION",
+                    "reason": "Full Drive stopped",
+                    "source": "full_drive_stop",
+                },
             })
         logger.info("Full Drive STOPPED after %d steps", self._fd_step)
         self._fd_log_entry("⏹ STOPPED")
@@ -1396,8 +1404,12 @@ class MoondreamVision:
                 if self._drive_command_fn:
                     self._drive_command_fn({
                         "command": "AI_DRIVE",
-                        "direction": "STOP",
-                        "source": "full_drive_completed",
+                        "payload": {
+                            "direction": "STOP",
+                            "safety": decision["safety"],
+                            "reason": "Mission completed",
+                            "source": "full_drive_completed",
+                        },
                     })
                 self._fd_last_action = "STOP"
                 self._broadcast_fd_update(decision, elapsed, raw_text)
@@ -1410,8 +1422,12 @@ class MoondreamVision:
                 if self._drive_command_fn:
                     self._drive_command_fn({
                         "command": "AI_DRIVE",
-                        "direction": "STOP",
-                        "source": "full_drive_stuck",
+                        "payload": {
+                            "direction": "STOP",
+                            "safety": decision["safety"],
+                            "reason": "AI reports stuck",
+                            "source": "full_drive_stuck",
+                        },
                     })
                 self._fd_last_action = "STOP"
                 self._broadcast_fd_update(decision, elapsed, raw_text)
@@ -1421,9 +1437,13 @@ class MoondreamVision:
             if self._drive_command_fn:
                 self._drive_command_fn({
                     "command": "AI_DRIVE",
-                    "direction": decision["action"],
-                    "source": "full_drive",
-                    "fd_step": self._fd_step,
+                    "payload": {
+                        "direction": decision["action"],
+                        "safety": decision["safety"],
+                        "reason": decision["reason"],
+                        "source": "full_drive",
+                        "fd_step": self._fd_step,
+                    },
                 })
             self._fd_last_action = decision["action"]
 

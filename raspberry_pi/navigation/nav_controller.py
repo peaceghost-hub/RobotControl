@@ -97,6 +97,7 @@ class NavController:
 
         # Dashboard notification (consumed once per read)
         self._notification = None   # e.g. {'level': 'info', 'msg': '...'}
+        self._gps_wait_logged = False  # GPS-wait throttle flag
 
         # Neo-6M satellite count (polled from Mega)
         self._neo_satellites = 0
@@ -401,6 +402,15 @@ class NavController:
 
         gps = self._get_gps()
         if not gps:
+            # Surface the GPS wait to the user — this is commonly why
+            # ACQUIRING_HEADING appears stuck with no motor activity.
+            if not getattr(self, '_gps_wait_logged', False):
+                self._gps_wait_logged = True
+                self._notification = {
+                    'level': 'warning',
+                    'msg': 'Waiting for GPS fix — motors paused until position is known',
+                }
+                logger.warning("Nav tick: no GPS fix — waiting (state=%s)", state.name)
             return  # no GPS fix — wait
 
         # Compute bearing and distance to current waypoint
@@ -416,6 +426,7 @@ class NavController:
         cur_lat = gps['latitude']
         cur_lon = gps['longitude']
 
+        self._gps_wait_logged = False  # GPS is available again
         self._distance_to_wp = self._haversine(cur_lat, cur_lon, wp_lat, wp_lon)
         self._target_bearing = self._bearing(cur_lat, cur_lon, wp_lat, wp_lon)
         self._last_heading_error = self._normalize_error(self._target_bearing - self._current_heading)

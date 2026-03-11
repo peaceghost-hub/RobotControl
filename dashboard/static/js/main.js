@@ -405,13 +405,14 @@ function handleStatusUpdate(data) {
         statusDot.className = 'status-dot offline';
     }
     
-    // Update battery
-    const batteryLevel = data.battery || 0;
-    updateElement('battery-level', `${batteryLevel.toFixed(0)}%`);
+    // Update battery (-1 = no hardware sensor found)
+    const batteryLevel = data.battery !== undefined ? data.battery : 0;
+    const batteryUnknown = batteryLevel < 0;
+    updateElement('battery-level', batteryUnknown ? 'N/A' : `${batteryLevel.toFixed(0)}%`);
     
     const batteryFill = document.getElementById('battery-fill');
-    batteryFill.style.width = `${batteryLevel}%`;
-    batteryFill.className = batteryLevel < 20 ? 'battery-fill low' : 'battery-fill';
+    batteryFill.style.width = batteryUnknown ? '0%' : `${batteryLevel}%`;
+    batteryFill.className = (batteryLevel < 20 && !batteryUnknown) ? 'battery-fill low' : 'battery-fill';
     
     // Update signal
     updateElement('signal-strength', data.signal_strength ? `${data.signal_strength} dBm` : '--');
@@ -1891,6 +1892,32 @@ function magneticToTrue(magnetic) {
     return mag;  // type 'none' — pass through
 }
 
+/* ─── Compass Correction Toggle ─── */
+let _compassCorrectionEnabled = true;
+
+/** Initialise the correction toggle checkbox */
+function initCompassCorrectionToggle() {
+    const cb = document.getElementById('compass-correction-toggle');
+    if (!cb) return;
+    cb.checked = _compassCorrectionEnabled;
+    cb.addEventListener('change', () => {
+        _compassCorrectionEnabled = cb.checked;
+        const lbl = document.getElementById('compass-correction-label');
+        const trueTitle = document.querySelector('#compass-true-canvas')?.parentElement?.querySelector('div');
+        if (lbl) {
+            lbl.textContent = _compassCorrectionEnabled ? 'Correction: ON' : 'Correction: OFF';
+            lbl.style.color = _compassCorrectionEnabled ? '#00ff44' : '#ffaa00';
+        }
+        if (trueTitle) {
+            trueTitle.textContent = _compassCorrectionEnabled ? 'TRUE NORTH' : 'MAGNETIC (L)';
+            trueTitle.style.color = _compassCorrectionEnabled ? '#00ff44' : '#ffaa00';
+        }
+        // Immediate re-draw so user sees the change
+        updateDualCompass();
+        console.log('Compass correction toggled:', _compassCorrectionEnabled ? 'ON' : 'OFF');
+    });
+}
+
 /**
  * Draw a single small compass on the given canvas.
  * @param {string} canvasId - canvas element ID
@@ -2011,13 +2038,18 @@ function drawSmallCompass(canvasId, heading, targetBearing, needleColor, theme, 
 
 /** Update both compass canvases and error bar */
 function updateDualCompass() {
-    // True North compass: corrected heading + target bearing
+    // When correction is disabled, BOTH compasses show the magnetic heading
+    const leftHeading = _compassCorrectionEnabled ? compassState.heading : compassState.magneticHeading;
+    const leftColor   = _compassCorrectionEnabled ? '#00ff44' : '#ffaa00';
+    const leftTheme   = _compassCorrectionEnabled ? 'true' : 'magnetic';
+
+    // True North (or "Magnetic L" when correction off) compass
     drawSmallCompass(
         'compass-true-canvas',
-        compassState.heading,
+        leftHeading,
         compassState.targetBearing,
-        '#00ff44',  // green
-        'true',
+        leftColor,
+        leftTheme,
         compassState.acquired
     );
 
@@ -2034,7 +2066,8 @@ function updateDualCompass() {
     // Update heading labels
     const trueLabel = document.getElementById('true-heading-label');
     if (trueLabel) {
-        trueLabel.textContent = compassState.heading !== null ? `${Math.round(compassState.heading)}°` : '--°';
+        trueLabel.textContent = leftHeading !== null ? `${Math.round(leftHeading)}°` : '--°';
+        trueLabel.style.color = leftColor;
     }
     const magLabel = document.getElementById('mag-heading-label');
     if (magLabel) {
@@ -2266,6 +2299,8 @@ function updateNavStatusUI(nav) {
 document.addEventListener('DOMContentLoaded', () => {
     // Load compass correction table for True North conversion
     loadCompassCorrection();
+    // Wire correction toggle checkbox
+    initCompassCorrectionToggle();
 
     setTimeout(updateDualCompass, 100);
     // Redraw on window resize so compass scales if panel resizes

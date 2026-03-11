@@ -1224,15 +1224,44 @@ class RobotController:
             logger.error("Camera loop error: %s", exc)
 
     def get_battery_level(self):
-        """Get battery level (implement based on hardware)"""
-        # TODO: Implement actual battery level reading
-        # This is a placeholder that returns mock data
+        """Get battery level from sysfs power_supply or UPS HAT.
+
+        Checks, in order:
+        1. /sys/class/power_supply/BAT*/capacity  (Linux laptop / UPS HAT)
+        2. INA219 I2C sensor on 0x40 (common Pi UPS boards)
+        3. Returns -1 (unknown) if no hardware found.
+        """
+        # 1. sysfs battery (Linux kernel generic)
         try:
-            # If you have a battery monitoring circuit, read it here
-            # For now, return a simulated value
-            return 85.0
-        except:
-            return 0.0
+            import glob
+            for bat_path in sorted(glob.glob('/sys/class/power_supply/BAT*/capacity')):
+                with open(bat_path, 'r') as f:
+                    pct = float(f.read().strip())
+                    return round(pct, 1)
+        except Exception:
+            pass
+
+        # 2. INA219 I2C voltage sensor (common UPS HATs)
+        try:
+            import smbus2
+            bus = smbus2.SMBus(1)
+            raw = bus.read_word_data(0x40, 0x02)  # bus voltage register
+            voltage = ((raw >> 3) * 4) / 1000.0  # mV → V
+            bus.close()
+            if 6.0 < voltage < 25.0:
+                # Simple linear mapping for typical 2S-3S LiPo
+                # 3S: 12.6V = 100%, 9.0V = 0%
+                # 2S: 8.4V = 100%, 6.0V = 0%
+                if voltage > 10.0:  # likely 3S
+                    pct = ((voltage - 9.0) / (12.6 - 9.0)) * 100.0
+                else:  # likely 2S
+                    pct = ((voltage - 6.0) / (8.4 - 6.0)) * 100.0
+                return round(max(0.0, min(100.0, pct)), 1)
+        except Exception:
+            pass
+
+        # 3. No battery hardware found
+        return -1.0
 
     def get_cpu_temperature(self):
         """Get Raspberry Pi CPU temperature"""
