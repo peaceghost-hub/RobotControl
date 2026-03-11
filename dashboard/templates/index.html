@@ -527,8 +527,30 @@
                     <span id="ai-drive-direction" class="ai-drive-direction">--</span>
                     <span id="ai-drive-count" class="ai-meta">#0</span>
                 </div>
+                <!-- Enriched nav details (obstacle type, position, clear path, confidence) -->
+                <div id="ai-nav-details" class="ai-nav-details" style="display:none;"></div>
                 <div id="ai-drive-hint" class="ai-info-hint" style="margin-top:0;">
                     ℹ️ Auto-drive assists your driving (manual arrows or waypoint nav). It never drives on its own.
+                </div>
+
+                <!-- ═══ Full Drive Mode ═══ -->
+                <div class="ai-section-divider">🤖 Full Drive</div>
+                <div class="ai-full-drive-section">
+                    <div class="ai-control-row">
+                        <textarea id="ai-fd-task" class="ai-fd-task" rows="2"
+                                  placeholder="Describe the mission… e.g. 'Drive forward until you see a chair, then turn left'"></textarea>
+                    </div>
+                    <div class="ai-control-row ai-fd-controls">
+                        <button id="ai-fd-start" class="btn btn-small btn-success" title="Start Full Drive">▶ Start</button>
+                        <button id="ai-fd-pause" class="btn btn-small btn-warning" title="Pause Full Drive" style="display:none;">⏸ Pause</button>
+                        <button id="ai-fd-stop" class="btn btn-small btn-danger" title="Stop Full Drive" style="display:none;">⏹ Stop</button>
+                        <span id="ai-fd-status" class="ai-fd-status">Idle</span>
+                        <span id="ai-fd-step" class="ai-meta">#0</span>
+                    </div>
+                    <div id="ai-fd-log" class="ai-fd-log"></div>
+                    <div class="ai-info-hint" style="margin-top:0;">
+                        🤖 Full Drive: AI IS the driver. Describe a task and the AI navigates autonomously. Manual controls always override.
+                    </div>
                 </div>
 
                 <!-- Results area -->

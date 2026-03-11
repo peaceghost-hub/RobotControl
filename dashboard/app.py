@@ -1667,6 +1667,45 @@ def ai_set_base_nav():
     })
 
 
+# ── Full Drive endpoints ──────────────────────────────────────────────
+
+@app.route('/api/ai/full_drive/start', methods=['POST'])
+def ai_full_drive_start():
+    """Start Full Drive: AI becomes the driver with a text-described mission."""
+    data = request.get_json(silent=True) or {}
+    task = data.get('task', '').strip()
+    if not task:
+        return jsonify({'status': 'error', 'message': 'No task provided'}), 400
+    result = ai_vision.start_full_drive(task)
+    if result.get('ok'):
+        return jsonify({'status': 'ok', **result})
+    return jsonify({'status': 'error', 'message': result.get('error', 'Unknown error')}), 400
+
+
+@app.route('/api/ai/full_drive/pause', methods=['POST'])
+def ai_full_drive_pause():
+    """Pause or resume the Full Drive loop."""
+    result = ai_vision.pause_full_drive()
+    if result.get('ok'):
+        return jsonify({'status': 'ok', **result})
+    return jsonify({'status': 'error', 'message': result.get('error', 'Unknown error')}), 400
+
+
+@app.route('/api/ai/full_drive/stop', methods=['POST'])
+def ai_full_drive_stop():
+    """Stop the Full Drive mission."""
+    result = ai_vision.stop_full_drive()
+    if result.get('ok'):
+        return jsonify({'status': 'ok', **result})
+    return jsonify({'status': 'error', 'message': result.get('error', 'Unknown error')}), 400
+
+
+@app.route('/api/ai/full_drive/status', methods=['GET'])
+def ai_full_drive_status():
+    """Get Full Drive current state."""
+    return jsonify(ai_vision.get_fd_status())
+
+
 # ============= WEBSOCKET EVENTS =============
 
 @socketio.on('connect', namespace='/realtime')
@@ -1740,6 +1779,14 @@ def handle_instant_command(data):
             # they're just temporarily intervening.
             if ai_vision.base_nav_mode == 'manual' and not ai_vision.auto_drive:
                 ai_vision.set_base_nav('none')
+
+    # ── Manual controls always override Full Drive ────────────────
+    # Any manual drive or nav command auto-pauses Full Drive so the
+    # user has instant priority.  They can resume via the UI.
+    if cmd == 'MANUAL_DRIVE' and hasattr(ai_vision, '_fd_active') and ai_vision._fd_active:
+        if not ai_vision._fd_paused:
+            ai_vision.pause_full_drive()
+            logger.info("Full Drive auto-paused — manual override")
 
 
 # ============= DATABASE INITIALIZATION =============

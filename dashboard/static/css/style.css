@@ -1363,3 +1363,71 @@ body.layout-scroll .panel-content {
 .ai-drive-direction.dir-RIGHT   { color: #8b5cf6; }
 .ai-drive-direction.dir-STOP    { color: #ef4444; font-weight: 800; }
 
+/* ── Enriched nav details ─────────────────────────────────────────── */
+.ai-nav-details {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 4px 0 2px;
+    font-size: 11px;
+}
+.ai-nav-details .nav-detail {
+    background: rgba(0,0,0,0.06);
+    padding: 2px 7px;
+    border-radius: 6px;
+}
+.ai-nav-details .nav-detail b { font-weight: 600; margin-right: 3px; }
+.ai-nav-details .conf-high   { border-left: 3px solid #22c55e; }
+.ai-nav-details .conf-medium { border-left: 3px solid #f59e0b; }
+.ai-nav-details .conf-low    { border-left: 3px solid #ef4444; }
+.ai-nav-details .nav-reason  { flex-basis: 100%; font-style: italic; opacity: 0.85; }
+
+/* ── Full Drive section ───────────────────────────────────────────── */
+.ai-section-divider {
+    text-align: center;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 6px 0 4px;
+    margin-top: 6px;
+    border-top: 1px solid rgba(0,0,0,0.08);
+    color: #6366f1;
+}
+.ai-full-drive-section { padding: 4px 0; }
+.ai-fd-task {
+    width: 100%;
+    font-size: 12px;
+    padding: 6px 8px;
+    border: 1px solid rgba(0,0,0,0.12);
+    border-radius: 6px;
+    resize: vertical;
+    font-family: inherit;
+    background: rgba(0,0,0,0.02);
+}
+.ai-fd-task:focus { border-color: #6366f1; outline: none; box-shadow: 0 0 0 2px rgba(99,102,241,0.15); }
+.ai-fd-controls { gap: 6px; }
+.ai-fd-status {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 6px;
+}
+.ai-fd-status.fd-active { color: #22c55e; }
+.ai-fd-status.fd-paused { color: #f59e0b; }
+.ai-fd-log {
+    max-height: 120px;
+    overflow-y: auto;
+    font-size: 11px;
+    font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
+    background: rgba(0,0,0,0.04);
+    border-radius: 6px;
+    padding: 4px 8px;
+    margin-top: 4px;
+}
+.ai-fd-log:empty { display: none; }
+.ai-fd-log-entry {
+    padding: 1px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.04);
+    word-break: break-word;
+}
+.ai-fd-log-entry:last-child { border-bottom: none; }

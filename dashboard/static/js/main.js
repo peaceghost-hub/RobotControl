@@ -2806,11 +2806,30 @@ function initZoomControls() {
         if (resultCount) resultCount.textContent = '#' + (data.count || 0);
         if (resultText) resultText.textContent = data.response || '(no response)';
 
-        // Navigate mode: show safety + direction
+        // Navigate mode: show safety + direction + enriched nav data
         if (data.nav_decision) {
             setSafetyBadge(data.nav_decision.safety);
             setDriveDirection(data.nav_decision.direction);
             if (data.drive_count != null && driveCount) driveCount.textContent = '#' + data.drive_count;
+
+            // Show enriched nav details if present
+            const navDetails = document.getElementById('ai-nav-details');
+            if (navDetails) {
+                const nd = data.nav_decision;
+                const parts = [];
+                if (nd.obstacle_type && nd.obstacle_type !== 'unknown')
+                    parts.push(`<span class="nav-detail"><b>Obstacle:</b> ${nd.obstacle_type}</span>`);
+                if (nd.obstacle_position && nd.obstacle_position !== 'unknown')
+                    parts.push(`<span class="nav-detail"><b>Position:</b> ${nd.obstacle_position}</span>`);
+                if (nd.clear_path && nd.clear_path !== 'unknown')
+                    parts.push(`<span class="nav-detail"><b>Clear:</b> ${nd.clear_path}</span>`);
+                if (nd.confidence && nd.confidence !== 'unknown')
+                    parts.push(`<span class="nav-detail conf-${nd.confidence}"><b>Conf:</b> ${nd.confidence}</span>`);
+                if (nd.reason)
+                    parts.push(`<span class="nav-detail nav-reason">${nd.reason}</span>`);
+                navDetails.innerHTML = parts.join('');
+                navDetails.style.display = parts.length ? '' : 'none';
+            }
         }
 
         // Show detection boxes if applicable
@@ -2924,6 +2943,69 @@ function initZoomControls() {
     syncModeRows();
     updateBaseNavUI('none');  // initial state
 
+    // ── Full Drive DOM refs ──────────────────────────────────────────
+    const fdTask    = document.getElementById('ai-fd-task');
+    const fdStart   = document.getElementById('ai-fd-start');
+    const fdPause   = document.getElementById('ai-fd-pause');
+    const fdStop    = document.getElementById('ai-fd-stop');
+    const fdStatus  = document.getElementById('ai-fd-status');
+    const fdStep    = document.getElementById('ai-fd-step');
+    const fdLog     = document.getElementById('ai-fd-log');
+
+    function updateFdUI(data) {
+        if (!data) return;
+        const active = data.active;
+        const paused = data.paused;
+
+        if (fdStart) fdStart.style.display = active ? 'none' : '';
+        if (fdPause) {
+            fdPause.style.display = active ? '' : 'none';
+            fdPause.textContent = paused ? '▶ Resume' : '⏸ Pause';
+            fdPause.className = 'btn btn-small' + (paused ? ' btn-success' : ' btn-warning');
+        }
+        if (fdStop)   fdStop.style.display = active ? '' : 'none';
+        if (fdStatus) {
+            fdStatus.textContent = active ? (paused ? '⏸ Paused' : '🟢 Running') : 'Idle';
+            fdStatus.className = 'ai-fd-status' + (active ? (paused ? ' fd-paused' : ' fd-active') : '');
+        }
+        if (fdStep) fdStep.textContent = '#' + (data.step || 0);
+        if (fdTask && !active) fdTask.disabled = false;
+        if (fdTask && active) fdTask.disabled = true;
+
+        // Render log
+        if (fdLog && data.log) {
+            fdLog.innerHTML = data.log.map(e =>
+                `<div class="ai-fd-log-entry">${e.msg}</div>`
+            ).join('');
+            fdLog.scrollTop = fdLog.scrollHeight;
+        }
+    }
+
+    if (fdStart) fdStart.addEventListener('click', () => {
+        const task = fdTask ? fdTask.value.trim() : '';
+        if (!task) { alert('Please describe the mission first.'); return; }
+        fdStart.disabled = true;
+        apiPost('/api/ai/full_drive/start', { task }).then(r => {
+            fdStart.disabled = false;
+            if (r && r.status === 'ok') updateFdUI({ active: true, paused: false, step: 0, log: [] });
+            else alert((r && r.message) || 'Failed to start Full Drive');
+        });
+    });
+
+    if (fdPause) fdPause.addEventListener('click', () => {
+        apiPost('/api/ai/full_drive/pause', {}).then(r => {
+            if (r && r.status === 'ok') {
+                updateFdUI({ active: true, paused: r.paused, step: null });
+            }
+        });
+    });
+
+    if (fdStop) fdStop.addEventListener('click', () => {
+        apiPost('/api/ai/full_drive/stop', {}).then(r => {
+            if (r && r.status === 'ok') updateFdUI({ active: false, paused: false, step: r.steps || 0 });
+        });
+    });
+
     // ── WebSocket listeners ──────────────────────────────────────────
     // Socket is initialised in initDashboard() on DOMContentLoaded,
     // which fires AFTER this IIFE runs.  We defer registration so the
@@ -2937,6 +3019,27 @@ function initZoomControls() {
 
         socket.on('ai_vision_update', (data) => {
             updateResult(data);
+        });
+
+        socket.on('ai_full_drive_update', (data) => {
+            if (!data) return;
+            // Per-step update — update log and status
+            if (fdStatus && data.status === 'thinking') {
+                fdStatus.textContent = '🧠 Thinking…';
+            } else if (data.decision) {
+                if (fdStatus) fdStatus.textContent = `🟢 ${data.decision.action} (${data.decision.safety})`;
+                if (fdStep) fdStep.textContent = '#' + (data.step || 0);
+            }
+            if (fdLog && data.log) {
+                fdLog.innerHTML = data.log.map(e =>
+                    `<div class="ai-fd-log-entry">${e.msg}</div>`
+                ).join('');
+                fdLog.scrollTop = fdLog.scrollHeight;
+            }
+        });
+
+        socket.on('ai_full_drive_status', (data) => {
+            updateFdUI(data);
         });
 
         socket.on('ai_vision_status', (data) => {
@@ -2992,6 +3095,9 @@ function initZoomControls() {
                 }
                 if (data.ai_vision.last_result) {
                     updateResult(data.ai_vision.last_result);
+                }
+                if (data.ai_vision.full_drive) {
+                    updateFdUI(data.ai_vision.full_drive);
                 }
             }
         });

@@ -117,9 +117,13 @@ PROMPTS: Dict[str, str] = {
         f"wheel radius {WHEEL_RADIUS_CM}cm, reaction distance {ACTION_DISTANCE_CM}cm. "
         f"The camera is at {ROBOT_HEIGHT_CM}cm above ground (low perspective). "
         "Analyze this scene for safe navigation. "
-        "Respond in EXACTLY this format (three lines, nothing else):\n"
+        "Respond in EXACTLY this format (seven lines, nothing else):\n"
         "SAFETY: SAFE or CAUTION or DANGER\n"
         "DIRECTION: FORWARD or LEFT or RIGHT or STOP\n"
+        "OBSTACLE_TYPE: wall or rock or furniture or person or hole or step or vegetation or none\n"
+        "OBSTACLE_POSITION: left or center or right or none\n"
+        "CLEAR_PATH: left or center or right or none\n"
+        "CONFIDENCE: high or medium or low\n"
         "REASON: one brief sentence\n\n"
         "Rules:\n"
         f"- SAFE + FORWARD: clear path, no obstacles within {ACTION_DISTANCE_CM}cm\n"
@@ -130,9 +134,37 @@ PROMPTS: Dict[str, str] = {
         f"- Objects taller than {WHEEL_RADIUS_CM}cm on the ground can block the wheels\n"
         f"- Objects wider than {ROBOT_WIDTH_CM}cm blocking the path cannot be passed\n"
         "- Holes, drops, steps, or uneven terrain are hazards for small wheels\n"
-        "- Consider the low ground-level camera perspective"
+        "- Consider the low ground-level camera perspective\n"
+        "- CLEAR_PATH: indicate which side of the frame has the most open space\n"
+        "- CONFIDENCE: high if scene is clear and unambiguous, low if uncertain"
     ),
 }
+
+# Full Drive prompt template — filled at runtime with task + last action
+_FD_PROMPT_TEMPLATE = (
+    "You are the autonomous AI pilot for a small wheeled ground robot. "
+    f"Robot specs: height {ROBOT_HEIGHT_CM}cm, width {ROBOT_WIDTH_CM}cm, "
+    f"wheel radius {WHEEL_RADIUS_CM}cm. "
+    f"Camera is at {ROBOT_HEIGHT_CM}cm above ground (low perspective).\n\n"
+    "YOUR MISSION: {task}\n\n"
+    "Previous action: {last_action}\n"
+    "Step number: {step}\n\n"
+    "Look at the current camera view and decide the next action.\n"
+    "Respond in EXACTLY this format (five lines, nothing else):\n"
+    "ACTION: FORWARD or LEFT or RIGHT or STOP\n"
+    "SAFETY: SAFE or CAUTION or DANGER\n"
+    "PROGRESS: ongoing or completed or stuck\n"
+    "CONFIDENCE: high or medium or low\n"
+    "REASON: one brief sentence\n\n"
+    "Rules:\n"
+    "- STOP immediately if path is blocked or unsafe\n"
+    "- LEFT/RIGHT to navigate around obstacles toward your goal\n"
+    "- FORWARD when path is clear and aligned with the mission\n"
+    "- PROGRESS=completed when the mission objective is visually achieved\n"
+    "- PROGRESS=stuck if you have been repeating the same action with no change\n"
+    "- Consider the low ground-level camera perspective\n"
+    "- Prioritise safety above all else"
+)
 
 # ── Default configuration ────────────────────────────────────────────
 DEFAULT_MODEL_ID = os.getenv("MOONDREAM_MODEL_ID", "vikhyatk/moondream2")
@@ -188,6 +220,15 @@ class _NullVision:
     def obstacle_trigger(self, _f: bytes, _d: int) -> None: ...
     def query_once(self, *_a: Any) -> None: return None
     def detect_once(self, *_a: Any) -> None: return None
+    def start_full_drive(self, _t: str) -> Dict[str, Any]:
+        return {"ok": False, "error": "AI Vision unavailable"}
+    def pause_full_drive(self) -> Dict[str, Any]:
+        return {"ok": False, "error": "AI Vision unavailable"}
+    def stop_full_drive(self) -> Dict[str, Any]:
+        return {"ok": False, "error": "AI Vision unavailable"}
+    def get_fd_status(self) -> Dict[str, Any]:
+        return {"active": False, "paused": False, "task": "",
+                "step": 0, "last_action": "none", "log": []}
 
     def get_status(self) -> Dict[str, Any]:
         return {
@@ -210,6 +251,7 @@ class _NullVision:
             "drive_count": 0,
             "base_nav_mode": "none",
             "backend": "none",
+            "full_drive": self.get_fd_status(),
             "robot_params": {
                 "height_cm": ROBOT_HEIGHT_CM,
                 "width_cm": ROBOT_WIDTH_CM,
@@ -236,7 +278,7 @@ class MoondreamVision:
     """
 
     # ── Class-level sampling presets ──────────────────────────────────
-    _NAV_SETTINGS: dict = {"temperature": 0, "max_tokens": 100}
+    _NAV_SETTINGS: dict = {"temperature": 0, "max_tokens": 200}
     _SCENE_SETTINGS: dict = {"temperature": 0, "max_tokens": 256}
     _CUSTOM_SETTINGS: dict = {"temperature": 0.5, "max_tokens": 512}
 
@@ -300,6 +342,16 @@ class MoondreamVision:
         self._frame_provider: Optional[Callable[[], Optional[bytes]]] = None
         self._emit_fn: Optional[Callable[[str, Dict], None]] = None
         self._drive_command_fn: Optional[Callable[[Dict], None]] = None
+
+        # ── Full Drive state ──────────────────────────────────────────
+        self._fd_active = False         # True while Full Drive loop running
+        self._fd_paused = False         # Pause the vision-action loop
+        self._fd_task = ""              # User-described mission text
+        self._fd_thread: Optional[threading.Thread] = None
+        self._fd_stop_event = threading.Event()
+        self._fd_step = 0               # number of vision-action cycles
+        self._fd_last_action = "none"   # last sent command
+        self._fd_log: list = []         # short rolling log (last 20 entries)
 
         # ── Try to initialise Cloud immediately (fast, no blocking) ───
         self._init_cloud()
@@ -507,10 +559,27 @@ class MoondreamVision:
     def _parse_nav_decision(text: str) -> Dict[str, str]:
         safety = "DANGER"
         direction = "STOP"
+        obstacle_type = "unknown"
+        obstacle_position = "unknown"
+        clear_path = "unknown"
+        confidence = "low"
         reason = "Could not parse AI response"
 
         if not text:
-            return {"safety": safety, "direction": direction, "reason": reason}
+            return {
+                "safety": safety, "direction": direction,
+                "obstacle_type": obstacle_type,
+                "obstacle_position": obstacle_position,
+                "clear_path": clear_path,
+                "confidence": confidence,
+                "reason": reason,
+            }
+
+        valid_obstacles = (
+            "WALL", "ROCK", "FURNITURE", "PERSON", "HOLE",
+            "STEP", "VEGETATION", "NONE",
+        )
+        valid_positions = ("LEFT", "CENTER", "RIGHT", "NONE")
 
         for line in text.strip().splitlines():
             upper = line.strip().upper()
@@ -522,10 +591,33 @@ class MoondreamVision:
                 val = upper.split(":", 1)[1].strip()
                 if val in ("FORWARD", "LEFT", "RIGHT", "STOP"):
                     direction = val
+            elif upper.startswith("OBSTACLE_TYPE:"):
+                val = upper.split(":", 1)[1].strip()
+                if val in valid_obstacles:
+                    obstacle_type = val.lower()
+            elif upper.startswith("OBSTACLE_POSITION:"):
+                val = upper.split(":", 1)[1].strip()
+                if val in valid_positions:
+                    obstacle_position = val.lower()
+            elif upper.startswith("CLEAR_PATH:"):
+                val = upper.split(":", 1)[1].strip()
+                if val in valid_positions:
+                    clear_path = val.lower()
+            elif upper.startswith("CONFIDENCE:"):
+                val = upper.split(":", 1)[1].strip()
+                if val in ("HIGH", "MEDIUM", "LOW"):
+                    confidence = val.lower()
             elif upper.startswith("REASON:"):
                 reason = line.strip().split(":", 1)[1].strip()
 
-        return {"safety": safety, "direction": direction, "reason": reason}
+        return {
+            "safety": safety, "direction": direction,
+            "obstacle_type": obstacle_type,
+            "obstacle_position": obstacle_position,
+            "clear_path": clear_path,
+            "confidence": confidence,
+            "reason": reason,
+        }
 
     def _send_drive_command(self, nav: Dict[str, str]) -> None:
         """Send obstacle avoidance advice to the Pi.
@@ -1088,6 +1180,286 @@ class MoondreamVision:
             return None
 
     # ══════════════════════════════════════════════════════════════════
+    #  FULL DRIVE MODE — AI IS the driver
+    # ══════════════════════════════════════════════════════════════════
+
+    def start_full_drive(self, task: str) -> Dict[str, Any]:
+        """Start a Full Drive mission.  AI becomes the driver."""
+        if not task or not task.strip():
+            return {"ok": False, "error": "No task description provided"}
+        if self._status != "ready":
+            return {"ok": False, "error": f"Model not ready (status={self._status})"}
+        if self._fd_active:
+            return {"ok": False, "error": "Full Drive already running"}
+
+        # Full Drive and auto-drive (assist) are mutually exclusive
+        if self._auto_drive:
+            self._auto_drive = False
+            logger.info("Auto-drive (assist) disabled — Full Drive taking over")
+
+        self._fd_task = task.strip()
+        self._fd_active = True
+        self._fd_paused = False
+        self._fd_step = 0
+        self._fd_last_action = "none"
+        self._fd_log = []
+        self._fd_stop_event.clear()
+
+        self._fd_thread = threading.Thread(
+            target=self._full_drive_loop, daemon=True,
+            name="full-drive-loop",
+        )
+        self._fd_thread.start()
+        logger.info("Full Drive STARTED — task: %s", self._fd_task[:80])
+        self._broadcast_fd_status()
+        return {"ok": True, "task": self._fd_task}
+
+    def pause_full_drive(self) -> Dict[str, Any]:
+        """Toggle pause on the Full Drive loop."""
+        if not self._fd_active:
+            return {"ok": False, "error": "Full Drive not running"}
+        self._fd_paused = not self._fd_paused
+        state = "PAUSED" if self._fd_paused else "RESUMED"
+        logger.info("Full Drive %s", state)
+        # Send STOP when pausing so the robot doesn't keep rolling
+        if self._fd_paused and self._drive_command_fn:
+            self._drive_command_fn({
+                "command": "AI_DRIVE",
+                "direction": "STOP",
+                "source": "full_drive_pause",
+            })
+        self._fd_log_entry(f"⏸ {state}")
+        self._broadcast_fd_status()
+        return {"ok": True, "paused": self._fd_paused}
+
+    def stop_full_drive(self) -> Dict[str, Any]:
+        """Halt Full Drive and send STOP."""
+        if not self._fd_active:
+            return {"ok": False, "error": "Full Drive not running"}
+        self._fd_stop_event.set()
+        self._fd_active = False
+        self._fd_paused = False
+        # Send motor STOP
+        if self._drive_command_fn:
+            self._drive_command_fn({
+                "command": "AI_DRIVE",
+                "direction": "STOP",
+                "source": "full_drive_stop",
+            })
+        logger.info("Full Drive STOPPED after %d steps", self._fd_step)
+        self._fd_log_entry("⏹ STOPPED")
+        self._broadcast_fd_status()
+        return {"ok": True, "steps": self._fd_step}
+
+    def _fd_log_entry(self, msg: str) -> None:
+        """Append to the rolling log (max 20 entries)."""
+        self._fd_log.append({"t": time.time(), "msg": msg})
+        if len(self._fd_log) > 20:
+            self._fd_log = self._fd_log[-20:]
+
+    def _broadcast_fd_status(self) -> None:
+        """Push Full Drive state to the UI."""
+        if self._emit_fn:
+            try:
+                self._emit_fn("ai_full_drive_status", self.get_fd_status())
+            except Exception as exc:
+                logger.warning("_broadcast_fd_status failed: %s", exc)
+
+    def get_fd_status(self) -> Dict[str, Any]:
+        return {
+            "active": self._fd_active,
+            "paused": self._fd_paused,
+            "task": self._fd_task,
+            "step": self._fd_step,
+            "last_action": self._fd_last_action,
+            "log": self._fd_log[-10:],  # last 10 for the UI
+        }
+
+    @staticmethod
+    def _parse_fd_response(text: str) -> Dict[str, str]:
+        """Parse the structured Full Drive response."""
+        action = "STOP"
+        safety = "DANGER"
+        progress = "ongoing"
+        confidence = "low"
+        reason = "Could not parse AI response"
+
+        if not text:
+            return {
+                "action": action, "safety": safety,
+                "progress": progress, "confidence": confidence,
+                "reason": reason,
+            }
+
+        for line in text.strip().splitlines():
+            upper = line.strip().upper()
+            if upper.startswith("ACTION:"):
+                val = upper.split(":", 1)[1].strip()
+                if val in ("FORWARD", "LEFT", "RIGHT", "STOP"):
+                    action = val
+            elif upper.startswith("SAFETY:"):
+                val = upper.split(":", 1)[1].strip()
+                if val in ("SAFE", "CAUTION", "DANGER"):
+                    safety = val
+            elif upper.startswith("PROGRESS:"):
+                val = upper.split(":", 1)[1].strip()
+                if val in ("ONGOING", "COMPLETED", "STUCK"):
+                    progress = val.lower()
+            elif upper.startswith("CONFIDENCE:"):
+                val = upper.split(":", 1)[1].strip()
+                if val in ("HIGH", "MEDIUM", "LOW"):
+                    confidence = val.lower()
+            elif upper.startswith("REASON:"):
+                reason = line.strip().split(":", 1)[1].strip()
+
+        return {
+            "action": action, "safety": safety,
+            "progress": progress, "confidence": confidence,
+            "reason": reason,
+        }
+
+    def _full_drive_loop(self) -> None:
+        """Vision-action loop: capture → query → parse → drive → repeat."""
+        logger.info("Full Drive loop started — task: %s", self._fd_task[:80])
+        self._fd_log_entry(f"▶ Mission: {self._fd_task[:60]}")
+
+        while not self._fd_stop_event.is_set():
+            # ── Pause check ───────────────────────────────────────────
+            if self._fd_paused:
+                self._fd_stop_event.wait(0.5)
+                continue
+
+            # ── Safety: if model no longer ready, stop ────────────────
+            if self._status != "ready":
+                logger.warning("Full Drive: model no longer ready, stopping")
+                self._fd_log_entry("⚠ Model not ready — stopped")
+                break
+
+            # ── Grab a frame ──────────────────────────────────────────
+            frame_bytes = (
+                self._frame_provider() if self._frame_provider else None
+            )
+            if frame_bytes is None:
+                self._fd_stop_event.wait(1.0)
+                continue
+
+            # ── Build prompt ──────────────────────────────────────────
+            prompt = _FD_PROMPT_TEMPLATE.format(
+                task=self._fd_task,
+                last_action=self._fd_last_action,
+                step=self._fd_step + 1,
+            )
+
+            # ── Broadcast "thinking" to the UI ────────────────────────
+            if self._emit_fn:
+                self._emit_fn("ai_full_drive_update", {
+                    "step": self._fd_step + 1,
+                    "status": "thinking",
+                    "msg": f"Step {self._fd_step + 1} — analysing… ({self._active_backend})",
+                })
+
+            # ── Run inference ─────────────────────────────────────────
+            try:
+                image = self._bytes_to_image(frame_bytes)
+                if not self._cloud_available:
+                    image = self._resize_for_model(image)
+                t0 = time.time()
+                answer = self._query(image, prompt, self._NAV_SETTINGS)
+                elapsed = round(time.time() - t0, 2)
+            except Exception as exc:
+                logger.error("Full Drive inference error: %s", exc)
+                self._fd_log_entry(f"⚠ Inference error: {exc}")
+                self._fd_stop_event.wait(2.0)
+                continue
+
+            if self._fd_stop_event.is_set():
+                break
+
+            # ── Parse response ────────────────────────────────────────
+            raw_text = answer.get("answer", "") if answer else ""
+            decision = self._parse_fd_response(raw_text)
+            self._fd_step += 1
+
+            log_msg = (
+                f"#{self._fd_step} [{elapsed}s] "
+                f"{decision['action']} ({decision['safety']}) "
+                f"— {decision['reason'][:50]}"
+            )
+            self._fd_log_entry(log_msg)
+            logger.info("Full Drive %s", log_msg)
+
+            # ── Mission complete? ─────────────────────────────────────
+            if decision["progress"] == "completed":
+                logger.info("Full Drive: mission COMPLETED at step %d", self._fd_step)
+                self._fd_log_entry("✅ Mission completed!")
+                # Send STOP
+                if self._drive_command_fn:
+                    self._drive_command_fn({
+                        "command": "AI_DRIVE",
+                        "direction": "STOP",
+                        "source": "full_drive_completed",
+                    })
+                self._fd_last_action = "STOP"
+                self._broadcast_fd_update(decision, elapsed, raw_text)
+                break
+
+            # ── Stuck detection ───────────────────────────────────────
+            if decision["progress"] == "stuck":
+                logger.warning("Full Drive: AI reports STUCK at step %d", self._fd_step)
+                self._fd_log_entry("⚠ AI reports stuck — stopping")
+                if self._drive_command_fn:
+                    self._drive_command_fn({
+                        "command": "AI_DRIVE",
+                        "direction": "STOP",
+                        "source": "full_drive_stuck",
+                    })
+                self._fd_last_action = "STOP"
+                self._broadcast_fd_update(decision, elapsed, raw_text)
+                break
+
+            # ── Send motor command ────────────────────────────────────
+            if self._drive_command_fn:
+                self._drive_command_fn({
+                    "command": "AI_DRIVE",
+                    "direction": decision["action"],
+                    "source": "full_drive",
+                    "fd_step": self._fd_step,
+                })
+            self._fd_last_action = decision["action"]
+
+            # ── Broadcast result to UI ────────────────────────────────
+            self._broadcast_fd_update(decision, elapsed, raw_text)
+
+            # ── Throttle: wait before next cycle ──────────────────────
+            # Don't hammer the API — wait proportional to confidence
+            wait = 2.0 if decision["confidence"] == "high" else 3.0
+            self._fd_stop_event.wait(wait)
+
+        # ── Loop exited ───────────────────────────────────────────────
+        self._fd_active = False
+        self._fd_paused = False
+        self._broadcast_fd_status()
+        logger.info("Full Drive loop ended — %d total steps", self._fd_step)
+
+    def _broadcast_fd_update(
+        self, decision: Dict, elapsed: float, raw_text: str
+    ) -> None:
+        """Push a per-step update to the UI."""
+        if self._emit_fn:
+            self._emit_fn("ai_full_drive_update", {
+                "step": self._fd_step,
+                "status": "active",
+                "decision": decision,
+                "inference_time": elapsed,
+                "raw": raw_text,
+                "msg": (
+                    f"Step {self._fd_step}: {decision['action']} "
+                    f"({decision['safety']}) — {decision['reason']}"
+                ),
+                "log": self._fd_log[-10:],
+            })
+
+    # ══════════════════════════════════════════════════════════════════
     #  STATUS
     # ══════════════════════════════════════════════════════════════════
 
@@ -1114,6 +1486,7 @@ class MoondreamVision:
             "backend": self._active_backend,
             "cloud_available": self._cloud_available,
             "local_available": self._local_available,
+            "full_drive": self.get_fd_status(),
             "robot_params": {
                 "height_cm": ROBOT_HEIGHT_CM,
                 "width_cm": ROBOT_WIDTH_CM,
