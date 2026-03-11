@@ -41,11 +41,23 @@ if [[ ! -f "${START_SCRIPT}" ]]; then
 fi
 
 echo "Creating systemd service at ${SERVICE_FILE}..."
+
+# If the fortified QMI service is installed, depend on it so the robot
+# doesn't start until the cellular network is up.
+QMI_AFTER=""
+QMI_WANTS=""
+if [[ -f /etc/systemd/system/qmi-network.service ]]; then
+    QMI_AFTER=" qmi-network.service"
+    QMI_WANTS="Wants=qmi-network.service"
+    echo "  (detected qmi-network.service — robot will wait for cellular)"
+fi
+
 sudo tee "${SERVICE_FILE}" > /dev/null <<EOF
 [Unit]
 Description=Robot Control System (Raspberry Pi)
-After=network-online.target
+After=network-online.target${QMI_AFTER}
 Wants=network-online.target
+${QMI_WANTS}
 
 [Service]
 Type=simple
@@ -54,6 +66,8 @@ WorkingDirectory=${WORK_DIR}
 ExecStart=${START_SCRIPT}
 Restart=always
 RestartSec=5
+# Wait up to 90s for network before giving up
+TimeoutStartSec=120
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

@@ -30,6 +30,7 @@ from raspberry_pi.camera.camera_stream import CameraStream
 from raspberry_pi.camera.mjpeg_server import MJPEGServer, update_frame as mjpeg_update_frame
 from raspberry_pi.utils.logger import setup_logger
 from raspberry_pi.utils.data_formatter import DataFormatter
+from raspberry_pi.utils.qmi_health import get_monitor as get_qmi_monitor
 from raspberry_pi.navigation.nav_controller import NavController
 
 # Configuration
@@ -206,6 +207,10 @@ class RobotController:
         # Dashboard API (required)
         try:
             self.api_client = DashboardAPI(CONFIG['dashboard_api'], self.device_id)
+            # Wire QMI health into API client so HTTP successes/failures
+            # update the network state tracker.
+            from raspberry_pi.communication.api_client import set_qmi_health
+            set_qmi_health(get_qmi_monitor())
             logger.info("Dashboard API Client initialized")
         except Exception as e:
             logger.error(f"Failed to initialize Dashboard API: {e}")
@@ -260,6 +265,10 @@ class RobotController:
                 logger.info("Pi-side NavController initialized")
             except Exception as e:
                 logger.warning(f"NavController init failed: {e}")
+
+        # QMI network health monitor — application-layer connectivity check
+        qmi_cfg = CONFIG.get('qmi_health', {})
+        self.qmi_health = get_qmi_monitor(enabled=qmi_cfg.get('enabled', True))
 
         # AI auto-drive: epoch counter to cancel stale delayed-resume threads.
         # Bumped every time the user explicitly sends NAV_PAUSE / NAV_STOP /
@@ -384,6 +393,9 @@ class RobotController:
             nav_status_thread = Thread(target=self.nav_status_loop, daemon=True)
             nav_status_thread.start()
             self.threads.append(nav_status_thread)
+
+            # Start QMI network health monitor (background connectivity checks)
+            self.qmi_health.start()
             
             logger.info("All systems started successfully")
             return True
@@ -696,6 +708,7 @@ class RobotController:
                     'online': True,
                     'battery': self.get_battery_level(),
                     'signal_strength': self.gsm.get_signal_strength() if self.gsm else 0,
+                    'network_health': self.qmi_health.stats,
                     'system_info': {
                         'cpu': psutil.cpu_percent(),
                         'memory': psutil.virtual_memory().percent,

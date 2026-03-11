@@ -10,6 +10,14 @@ from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger('api_client')
 
+# Optional QMI health reporter — set by main.py after init
+_qmi_health = None
+
+def set_qmi_health(monitor):
+    """Wire the QMI health monitor so requests can report success/failure."""
+    global _qmi_health
+    _qmi_health = monitor
+
 
 class DashboardAPI:
     """Client for communicating with dashboard API"""
@@ -61,12 +69,18 @@ class DashboardAPI:
                     return None
                 
                 response.raise_for_status()
+                if _qmi_health:
+                    _qmi_health.report_success()
                 return response.json()
                 
             except requests.exceptions.Timeout:
                 logger.warning(f"Request timeout (attempt {attempt + 1}/{self.retry_attempts})")
+                if _qmi_health:
+                    _qmi_health.report_failure()
             except requests.exceptions.ConnectionError:
                 logger.warning(f"Connection error (attempt {attempt + 1}/{self.retry_attempts})")
+                if _qmi_health:
+                    _qmi_health.report_failure()
             except requests.exceptions.HTTPError as e:
                 logger.error(f"HTTP error: {e}")
                 return None
