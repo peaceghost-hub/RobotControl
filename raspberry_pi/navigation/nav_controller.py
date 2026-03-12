@@ -570,11 +570,13 @@ class NavController:
         # Check obstacle (poll Mega)
         if self._check_obstacle():
             self._send_stop()
-            # Reset AI advice state for this new obstacle encounter
+            # Clear previous AI advice results so we wait for fresh advice
+            # for THIS obstacle.  But do NOT reset _ai_analysis_triggered —
+            # obstacle_loop may have already called notify_ai_triggered()
+            # for this same obstacle (race between the two polling loops).
             self._ai_advice_event.clear()
             self._ai_advice_direction = None
             self._ai_advice_safety = None
-            self._ai_analysis_triggered = False
             self._enter_state(NavState.OBSTACLE_DETECTED)
             return
 
@@ -805,6 +807,10 @@ class NavController:
             self._state_entry_time = time.time()
         if old != new_state:
             logger.info("NAV: %s → %s", old.name, new_state.name)
+        # When leaving obstacle handling, reset AI advice flags so the
+        # next obstacle encounter starts with a clean slate.
+        if new_state not in (NavState.OBSTACLE_DETECTED, NavState.OBSTACLE_AVOID):
+            self._ai_analysis_triggered = False
 
     def _advance_waypoint(self):
         """Move to next waypoint or complete."""

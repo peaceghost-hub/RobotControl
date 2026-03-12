@@ -509,6 +509,18 @@ class MoondreamVision:
                 self._mode = "navigate"
             # Clear pause when toggling on
             self._ai_paused = False
+            # Auto-enable analysis if the model is ready but vision
+            # hasn't been explicitly enabled yet.  This means the user
+            # can just toggle auto-drive and it "just works."
+            if not self._enabled:
+                if self._status == "ready":
+                    self.set_enabled(True)
+                    logger.info("Auto-drive auto-enabled AI Vision (model already ready)")
+                elif self._status in ("not_loaded", "error"):
+                    # Model not loaded — request deferred load + enable
+                    self._desired_enabled = True
+                    self.load_model()
+                    logger.info("Auto-drive requesting model load (will auto-enable)")
         logger.info(
             "Auto-drive → %s  (base_nav=%s, backend=%s)",
             "ON" if enabled else "OFF",
