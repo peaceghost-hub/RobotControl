@@ -1780,6 +1780,16 @@ def handle_instant_command(data):
             if ai_vision.base_nav_mode == 'manual' and not ai_vision.auto_drive:
                 ai_vision.set_base_nav('none')
 
+    # Send the updated AI status back to THIS client directly.
+    # socketio.emit() (global broadcast) inside a SocketIO event handler can be
+    # swallowed in some Flask-SocketIO/threading contexts; the locally-imported
+    # emit() is guaranteed to reach the current client from within a handler.
+    if cmd in ('NAV_START', 'NAV_RESUME', 'NAV_STOP', 'NAV_PAUSE', 'MANUAL_DRIVE'):
+        try:
+            emit('ai_vision_status', ai_vision.get_status())
+        except Exception:
+            pass
+
     # ── Manual controls always override Full Drive ────────────────
     # Any manual drive or nav command auto-pauses Full Drive so the
     # user has instant priority.  They can resume via the UI.

@@ -1,9 +1,7 @@
 /**
  * Main Dashboard JavaScript
  * Handles WebSocket connections, data updates, and UI interactions
- * @version 2025-07-13a — AI Vision socket race fix + Full Drive compat
  */
-console.log('[main.js] v2025-07-13a loaded');
 
 // Configuration
 const DASHBOARD_CONFIG = (() => {
@@ -849,6 +847,16 @@ async function sendNavigationCommand(action) {
 
     state.navigationActive = entry.active;
     updateControlIndicators();
+
+    // Optimistic UI update: tell the AI Vision panel the new nav state immediately,
+    // without waiting for the ai_vision_status server broadcast (which can lag).
+    if (typeof window._updateAiBaseNav === 'function') {
+        if (action === 'start' || action === 'resume') {
+            window._updateAiBaseNav('waypoint');
+        } else if (action === 'stop' || action === 'pause') {
+            window._updateAiBaseNav('none');
+        }
+    }
 }
 
 async function sendManualCommand(direction) {
@@ -875,6 +883,18 @@ async function sendManualCommand(direction) {
     } else {
         // Fallback to HTTP queue if WebSocket is down
         await sendRobotCommand('MANUAL_DRIVE', payload);
+    }
+
+    // Optimistic UI update: tell the AI Vision panel the new nav state immediately.
+    if (typeof window._updateAiBaseNav === 'function') {
+        if (direction === 'forward' || direction === 'reverse') {
+            window._updateAiBaseNav('manual');
+        } else if (direction === 'stop' || direction === 'brake') {
+            // Only clear if auto-drive toggle is OFF (mirrors server logic)
+            const autoDriveOn = document.getElementById('ai-drive-toggle') &&
+                                document.getElementById('ai-drive-toggle').checked;
+            if (!autoDriveOn) window._updateAiBaseNav('none');
+        }
     }
 }
 
@@ -3079,20 +3099,6 @@ function initZoomControls() {
             updateFdUI(data);
         });
 
-        // Re-sync AI state on reconnections (the initial connect may
-        // have arrived before these listeners were attached).
-        socket.on('connect', () => {
-            fetch('/api/ai/status').then(r => r.json()).then(data => {
-                if (!data) return;
-                if (data.status) setModelBadge(data.status);
-                if (data.base_nav_mode != null) updateBaseNavUI(data.base_nav_mode);
-                if (typeof data.auto_drive === 'boolean' && driveToggle) driveToggle.checked = data.auto_drive;
-                if (typeof data.enabled === 'boolean' && enableToggle) enableToggle.checked = data.enabled;
-                if (typeof data.ai_paused === 'boolean') updatePauseBtn(data.ai_paused);
-                if (data.full_drive) updateFdUI(data.full_drive);
-            }).catch(() => {});
-        });
-
         socket.on('ai_vision_status', (data) => {
             if (data.status) setModelBadge(data.status);
             if (enableToggle && typeof data.enabled === 'boolean') {
@@ -3153,31 +3159,11 @@ function initZoomControls() {
             }
         });
 
-        // Fetch current AI status so we don't miss the initial state
-        // (the full_update from socket.connect may arrive before these
-        // listeners are attached, so we re-sync here).
+        // If model is already loaded, fetch current status
         fetch('/api/ai/status').then(r => r.json()).then(data => {
-            if (!data) return;
-            if (data.status) setModelBadge(data.status);
-            if (data.base_nav_mode != null) updateBaseNavUI(data.base_nav_mode);
-            if (typeof data.auto_drive === 'boolean' && driveToggle) driveToggle.checked = data.auto_drive;
-            if (typeof data.enabled === 'boolean' && enableToggle) enableToggle.checked = data.enabled;
-            if (typeof data.ai_paused === 'boolean') updatePauseBtn(data.ai_paused);
-            if (data.last_nav) {
-                setSafetyBadge(data.last_nav.safety);
-                setDriveDirection(data.last_nav.direction);
-            }
-            if (data.drive_count != null && driveCount) driveCount.textContent = '#' + data.drive_count;
-            if (data.mode && modeSelect) { modeSelect.value = data.mode; syncModeRows(); }
-            if (data.full_drive) updateFdUI(data.full_drive);
+            if (data && data.status) setModelBadge(data.status);
         }).catch(() => {});
-
-        // Also re-request a full_update via socket so all panels sync
-        if (socket && socket.connected) {
-            socket.emit('request_update', {});
-        }
-
-        console.log('[AI Vision] socket listeners attached — ready');
+        console.log('AI Vision socket listeners attached');
     }
 
     // Kick off deferred attachment
@@ -3189,4 +3175,9 @@ function initZoomControls() {
             setTimeout(_attachAiSocketListeners, 100);
         });
     }
+
+    // Expose updateBaseNavUI globally so sendManualCommand / sendNavigationCommand
+    // can update the label immediately (optimistic update) without waiting for the
+    // ai_vision_status server broadcast.  The broadcast still runs and confirms state.
+    window._updateAiBaseNav = updateBaseNavUI;
 })();

@@ -657,10 +657,10 @@
 
     <script id="dashboard-config" type="application/json">{{ dashboard_config | tojson }}</script>
     
-    <!-- Custom JavaScript — cache-busted to ensure latest code is loaded -->
-    <script src="{{ url_for('static', filename='js/main.js') }}?v=20250713a"></script>
-    <script src="{{ url_for('static', filename='js/map.js') }}?v=20250713a"></script>
-    <script src="{{ url_for('static', filename='js/sensors.js') }}?v=20250713a"></script>
+    <!-- Custom JavaScript -->
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/map.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/sensors.js') }}"></script>
 
     <!-- Camera must load last; add cache-buster -->
     <script src="{{ url_for('static', filename='js/camera.js') }}?v=20260122"></script>
