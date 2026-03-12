@@ -509,18 +509,22 @@ class MoondreamVision:
                 self._mode = "navigate"
             # Clear pause when toggling on
             self._ai_paused = False
-            # Auto-enable analysis if the model is ready but vision
-            # hasn't been explicitly enabled yet.  This means the user
-            # can just toggle auto-drive and it "just works."
+            # Ensure the analysis thread is running for obstacle avoidance.
+            # This is independent of "Auto Analyse" (_enabled) — the thread
+            # is needed solely to service obstacle events when auto_drive is ON.
+            if self._status == "ready":
+                self._start_analysis_thread()
+                if not self._enabled:
+                    logger.info("Auto-drive: analysis thread started for obstacle handling")
+            elif self._status in ("not_loaded", "error"):
+                self._desired_enabled = True
+                self.load_model()
+                logger.info("Auto-drive requesting model load (will auto-enable)")
+        else:
+            # Turning off auto-drive: stop analysis thread only if timer
+            # analysis (Auto Analyse) is also off.
             if not self._enabled:
-                if self._status == "ready":
-                    self.set_enabled(True)
-                    logger.info("Auto-drive auto-enabled AI Vision (model already ready)")
-                elif self._status in ("not_loaded", "error"):
-                    # Model not loaded — request deferred load + enable
-                    self._desired_enabled = True
-                    self.load_model()
-                    logger.info("Auto-drive requesting model load (will auto-enable)")
+                self._stop_event.set()
         logger.info(
             "Auto-drive → %s  (base_nav=%s, backend=%s)",
             "ON" if enabled else "OFF",
@@ -555,7 +559,7 @@ class MoondreamVision:
         timer tick.  If ``frame_bytes`` is None, the analysis loop will grab
         the latest frame via ``_frame_provider`` as usual.
         """
-        if not self._enabled:
+        if not self._enabled and not self._auto_drive:
             return
         with self._obstacle_lock:
             self._obstacle_frame = frame_bytes
@@ -750,8 +754,13 @@ class MoondreamVision:
                 self._interval, self._mode, self._active_backend,
             )
         else:
-            self._stop_event.set()
-            logger.info("AI Vision OFF")
+            if not self._auto_drive:
+                self._stop_event.set()
+                logger.info("AI Vision OFF")
+            else:
+                # auto_drive is ON — thread must stay alive for obstacle avoidance.
+                # Timer analysis is disabled but obstacle handling continues.
+                logger.info("AI Vision timer analysis OFF — obstacle avoidance still active")
 
         self._broadcast_status()
 
@@ -789,7 +798,11 @@ class MoondreamVision:
     def _analysis_loop(self) -> None:
         logger.info("Analysis loop started (backend=%s)", self._active_backend)
         while not self._stop_event.is_set():
-            if not self._enabled or self._status != "ready":
+            if self._status != "ready":
+                self._stop_event.wait(0.5)
+                continue
+            if not self._enabled and not self._auto_drive:
+                # Neither timer analysis nor obstacle avoidance is active.
                 self._stop_event.wait(0.5)
                 continue
 
@@ -854,6 +867,10 @@ class MoondreamVision:
                 continue  # loop back — don't fall through to timer path
 
             # ── TIMER-BASED PATH (regular analysis) ─────────────────
+            # Skip when Auto Analyse is OFF; in obstacle-only mode
+            # (_auto_drive=True, _enabled=False) we never do timer analysis.
+            if not self._enabled:
+                continue
             try:
                 frame_bytes = (
                     self._frame_provider() if self._frame_provider else None

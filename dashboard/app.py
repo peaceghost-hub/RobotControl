@@ -1416,7 +1416,7 @@ def receive_robot_event():
         ai_triggered = False   # will a drive command follow?
         if (event['type'] == 'OBSTACLE_DETECTED'
                 and hasattr(ai_vision, 'obstacle_trigger')
-                and ai_vision._enabled
+                and (ai_vision._enabled or ai_vision._auto_drive)
                 and ai_vision._status == 'ready'):
             dist_cm = -1
             try:
