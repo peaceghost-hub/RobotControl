@@ -1240,10 +1240,34 @@ class RobotController:
         """Get battery level from sysfs power_supply or UPS HAT.
 
         Checks, in order:
+        0. ADS1115 channel 3 via voltage divider module (if enabled in config)
         1. /sys/class/power_supply/BAT*/capacity  (Linux laptop / UPS HAT)
         2. INA219 I2C sensor on 0x40 (common Pi UPS boards)
         3. Returns -1 (unknown) if no hardware found.
         """
+        # 0. ADS1115 channel A3 — DC voltage sensor module (resistor divider)
+        try:
+            vs_cfg = self.config.get('sensors', {}).get('voltage_sensor', {})
+            if vs_cfg.get('enabled', False):
+                from Adafruit_ADS1x15 import ADS1115 as _ADS1115
+                adc_cfg = self.config.get('sensors', {}).get('adc', {})
+                _ads = _ADS1115(address=adc_cfg.get('address', 0x48))
+                channel = vs_cfg.get('adc_channel', 3)
+                gain = adc_cfg.get('gain', 1)
+                raw = _ads.read_adc(channel, gain=gain)
+                if raw > 0:
+                    # gain=1 → ±4.096 V full-scale, 32767 = +4.096 V
+                    adc_voltage = raw * (4.096 / 32767.0)
+                    ratio = vs_cfg.get('voltage_divider_ratio', 5.0)
+                    v_in = adc_voltage * ratio
+                    v_min = vs_cfg.get('v_min', 6.0)
+                    v_max = vs_cfg.get('v_max', 8.4)
+                    if v_min <= v_in <= (v_max + 1.0):  # +1 V tolerance above full
+                        pct = ((v_in - v_min) / (v_max - v_min)) * 100.0
+                        return round(max(0.0, min(100.0, pct)), 1)
+        except Exception:
+            pass
+
         # 1. sysfs battery (Linux kernel generic)
         try:
             import glob
