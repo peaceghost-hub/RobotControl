@@ -1247,10 +1247,10 @@ class RobotController:
         """
         # 0. ADS1115 channel A3 — DC voltage sensor module (resistor divider)
         try:
-            vs_cfg = self.config.get('sensors', {}).get('voltage_sensor', {})
+            vs_cfg = CONFIG.get('sensors', {}).get('voltage_sensor', {})
             if vs_cfg.get('enabled', False):
                 from Adafruit_ADS1x15 import ADS1115 as _ADS1115
-                adc_cfg = self.config.get('sensors', {}).get('adc', {})
+                adc_cfg = CONFIG.get('sensors', {}).get('adc', {})
                 _ads = _ADS1115(address=adc_cfg.get('address', 0x48))
                 channel = vs_cfg.get('adc_channel', 3)
                 gain = adc_cfg.get('gain', 1)
