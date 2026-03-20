@@ -249,6 +249,7 @@ class _NullVision:
             "ai_paused": False,
             "last_nav": None,
             "drive_count": 0,
+            "coupled_active": False,
             "base_nav_mode": "none",
             "backend": "none",
             "full_drive": self.get_fd_status(),
@@ -311,6 +312,7 @@ class MoondreamVision:
         # ── Analysis state ────────────────────────────────────────────
         self._enabled = False
         self._interval = DEFAULT_INTERVAL
+        self._user_interval = DEFAULT_INTERVAL  # remember user setting
         self._mode = "scene"
         self._detect_target = "obstacle"
         self._custom_prompt = ""
@@ -499,6 +501,24 @@ class MoondreamVision:
     #  AUTO-DRIVE (ADVISORY — never blocks primary navigation)
     # ══════════════════════════════════════════════════════════════════
 
+    _COUPLED_MAX_INTERVAL = 3.0  # tighten interval when coupled
+
+    def _apply_coupled_interval(self) -> None:
+        """Auto-tighten or restore the analysis interval based on coupling.
+
+        When coupled (Auto Analyse + a drive mode), we want faster scans
+        so the robot gets continuous terrain advice.  When coupling ends,
+        we silently restore the user's original interval.
+        """
+        if self.coupled_active:
+            if self._interval > self._COUPLED_MAX_INTERVAL:
+                self._interval = self._COUPLED_MAX_INTERVAL
+                logger.info("Coupled: interval tightened → %.1fs", self._interval)
+        else:
+            if self._interval != self._user_interval:
+                self._interval = self._user_interval
+                logger.info("Uncoupled: interval restored → %.1fs", self._interval)
+
     def set_auto_drive(self, enabled: bool) -> None:
         self._auto_drive = enabled
         if enabled:
@@ -525,6 +545,7 @@ class MoondreamVision:
             # analysis (Auto Analyse) is also off.
             if not self._enabled:
                 self._stop_event.set()
+        self._apply_coupled_interval()
         logger.info(
             "Auto-drive → %s  (base_nav=%s, backend=%s)",
             "ON" if enabled else "OFF",
@@ -670,6 +691,63 @@ class MoondreamVision:
         except Exception as exc:
             logger.error("Failed to send AI_DRIVE: %s", exc)
 
+    def _send_coupled_drive_command(self, nav: Dict[str, str]) -> None:
+        """Send a timer-based (coupled) drive command to the Pi.
+
+        Called from the timer path of _analysis_loop ONLY when Auto
+        Analyse is ON together with Auto Drive or Full Drive.
+
+        Gating:
+        - drive_command_fn must be wired.
+        - Auto Analyse must be enabled (_enabled).
+        - At least one drive mode active (_auto_drive OR _fd_active).
+        - NOT paused (_ai_paused).
+        - During Full Drive: suppress SAFE+FORWARD (let FD loop lead on
+          clear terrain; only intervene on CAUTION/DANGER).
+        """
+        if not self._drive_command_fn:
+            return
+        if not self._enabled:
+            return
+        if not (self._auto_drive or self._fd_active):
+            return
+        if self._ai_paused:
+            logger.debug("Coupled drive suppressed — AI paused")
+            return
+
+        # Safety valve for Full Drive coupling: don't override FD's
+        # own FORWARD commands — only intervene with hazard advice.
+        if self._fd_active and not self._auto_drive:
+            if nav.get("safety") == "SAFE" and nav.get("direction") == "FORWARD":
+                logger.debug("Coupled: SAFE+FORWARD during Full Drive — letting FD lead")
+                return
+
+        try:
+            self._drive_command_fn({
+                "command": "AI_DRIVE",
+                "payload": {
+                    "direction": nav["direction"],
+                    "safety": nav["safety"],
+                    "reason": nav["reason"],
+                    "backend": self._active_backend,
+                    "source": "auto_analyse_coupled",
+                },
+            })
+            self._drive_count += 1
+            logger.info(
+                "AI_DRIVE (coupled) → %s (safety=%s, via=%s) — %s",
+                nav["direction"], nav["safety"],
+                self._active_backend,
+                nav["reason"],
+            )
+        except Exception as exc:
+            logger.error("Failed to send coupled AI_DRIVE: %s", exc)
+
+    @property
+    def coupled_active(self) -> bool:
+        """True when Auto Analyse is feeding drive commands to a drive mode."""
+        return self._enabled and (self._auto_drive or self._fd_active)
+
     # ══════════════════════════════════════════════════════════════════
     #  MODEL LIFECYCLE
     # ══════════════════════════════════════════════════════════════════
@@ -762,6 +840,7 @@ class MoondreamVision:
                 # Timer analysis is disabled but obstacle handling continues.
                 logger.info("AI Vision timer analysis OFF — obstacle avoidance still active")
 
+        self._apply_coupled_interval()
         self._broadcast_status()
 
     def set_mode(
@@ -780,6 +859,7 @@ class MoondreamVision:
 
     def set_interval(self, seconds: float) -> None:
         self._interval = max(1.0, min(60.0, seconds))
+        self._user_interval = self._interval  # remember user setting
         logger.info("AI interval → %.1fs", self._interval)
 
     def _start_analysis_thread(self) -> None:
@@ -871,6 +951,13 @@ class MoondreamVision:
             # (_auto_drive=True, _enabled=False) we never do timer analysis.
             if not self._enabled:
                 continue
+
+            # ── Coupling: Auto Analyse + (Auto Drive | Full Drive) ────
+            # When coupled, the timer path ALSO sends drive commands to
+            # the Pi, providing continuous terrain / obstacle / direction
+            # advice rather than only reacting to obstacle-detected events.
+            coupled = self._enabled and (self._auto_drive or self._fd_active)
+
             try:
                 frame_bytes = (
                     self._frame_provider() if self._frame_provider else None
@@ -881,21 +968,41 @@ class MoondreamVision:
 
                 # Broadcast "analysing" to the UI
                 if self._emit_fn:
+                    tag = " ⚡Driving" if coupled else ""
                     self._emit_fn("ai_vision_update", {
-                        "mode": self._mode,
-                        "response": f"Analyzing… ({self._active_backend})",
+                        "mode": "navigate" if coupled else self._mode,
+                        "response": f"Analyzing…{tag} ({self._active_backend})",
                         "inference_time": None,
                         "count": self._analysis_count,
                         "backend": self._active_backend,
+                        "coupled": coupled,
                     })
 
-                result = self._run_analysis(frame_bytes)
+                # When coupled, force navigate mode so we always get a
+                # nav_decision with direction/safety for the Pi.
+                if coupled:
+                    saved_mode = self._mode
+                    self._mode = "navigate"
+                    result = self._run_analysis(frame_bytes)
+                    self._mode = saved_mode
+                else:
+                    result = self._run_analysis(frame_bytes)
+
                 if result:
+                    result["coupled"] = coupled
                     with self._lock:
                         self._last_result = result
                         self._analysis_count += 1
                     if self._emit_fn:
                         self._emit_fn("ai_vision_update", result)
+
+                    # ── Coupled drive: send nav decision to Pi ────────
+                    if coupled:
+                        nav = result.get("nav_decision")
+                        if nav:
+                            self._send_coupled_drive_command(nav)
+                            result["drive_sent"] = True
+                            result["drive_count"] = self._drive_count
 
             except Exception as exc:
                 logger.error("Analysis loop error: %s", exc)
@@ -1532,6 +1639,7 @@ class MoondreamVision:
             "base_nav_mode": self._base_nav_mode,
             "last_nav": self._last_nav,
             "drive_count": self._drive_count,
+            "coupled_active": self.coupled_active,
             "backend": self._active_backend,
             "cloud_available": self._cloud_available,
             "local_available": self._local_available,

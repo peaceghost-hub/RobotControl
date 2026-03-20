@@ -2792,6 +2792,29 @@ function initZoomControls() {
 
     if (!loadBtn) return; // AI panel not in DOM
 
+    // ── Coupled badge (injected dynamically — zero template risk) ────
+    // Shows "⚡ Driving" next to the Auto Analyse toggle when the timer
+    // loop is feeding drive commands to Auto Drive or Full Drive.
+    let coupledBadge = document.getElementById('ai-coupled-badge');
+    if (!coupledBadge && enableToggle) {
+        coupledBadge = document.createElement('span');
+        coupledBadge.id = 'ai-coupled-badge';
+        coupledBadge.className = 'ai-coupled-badge';
+        coupledBadge.style.display = 'none';
+        coupledBadge.textContent = '\u26A1 Driving';
+        // Insert right after the toggle's parent label
+        const parent = enableToggle.closest('label') || enableToggle.parentNode;
+        if (parent && parent.parentNode) {
+            parent.parentNode.insertBefore(coupledBadge, parent.nextSibling);
+        }
+    }
+
+    function updateCoupledBadge(coupled) {
+        if (!coupledBadge) return;
+        coupledBadge.style.display = coupled ? 'inline-block' : 'none';
+        coupledBadge.textContent = coupled ? '\u26A1 Driving' : '';
+    }
+
     // ── Base-nav state (tracked from server + local events) ──────────
     let currentBaseNav = 'none';  // 'none' | 'manual' | 'waypoint'
 
@@ -3118,6 +3141,7 @@ function initZoomControls() {
                 setDriveDirection(data.last_nav.direction);
             }
             if (data.drive_count != null && driveCount) driveCount.textContent = '#' + data.drive_count;
+            if (typeof data.coupled_active === 'boolean') updateCoupledBadge(data.coupled_active);
             if (data.mode && modeSelect) {
                 modeSelect.value = data.mode;
                 syncModeRows();
@@ -3145,6 +3169,9 @@ function initZoomControls() {
                 }
                 if (data.ai_vision.drive_count != null && driveCount) {
                     driveCount.textContent = '#' + data.ai_vision.drive_count;
+                }
+                if (typeof data.ai_vision.coupled_active === 'boolean') {
+                    updateCoupledBadge(data.ai_vision.coupled_active);
                 }
                 if (data.ai_vision.mode && modeSelect) {
                     modeSelect.value = data.ai_vision.mode;

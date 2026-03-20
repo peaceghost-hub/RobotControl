@@ -1334,6 +1334,21 @@ body.layout-scroll .panel-content {
 .ai-base-nav-label.nav-manual  { background: #3b82f6; }
 .ai-base-nav-label.nav-waypoint { background: #22c55e; }
 
+/* ── Coupled badge (Auto Analyse feeding a drive mode) ────────────── */
+.ai-coupled-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 700;
+    background: #6366f1;
+    color: #fff;
+    margin-left: 6px;
+    vertical-align: middle;
+    letter-spacing: 0.3px;
+    animation: pulse 2s infinite;
+}
+
 .ai-safety-badge {
     display: inline-block;
     padding: 2px 10px;
