@@ -10,6 +10,10 @@
     
     <!-- Chart.js for Data Visualization -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
+    <!-- Hammer.js (required by chartjs-plugin-zoom for touch/drag) -->
+    <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+    <!-- Chart.js Zoom/Pan plugin -->
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     
     <!-- Socket.IO for Real-time Updates -->
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
@@ -66,6 +70,9 @@
             </div>
         </div>
 
+        <!-- Gas Safety Alert Banner (hidden until a threshold is exceeded) -->
+        <div id="gas-alert-banner" class="gas-alert-banner hidden"></div>
+
         <!-- Main Dashboard Grid -->
         <div id="dashboard-scale">
         <div class="dashboard-grid">
@@ -78,9 +85,8 @@
                         <button id="cam-zoom-out" class="btn btn-small btn-icon" title="Zoom Out">−</button>
                         <span id="cam-zoom-level" class="status-badge subtle">1×</span>
                         <button id="cam-zoom-in" class="btn btn-small btn-icon" title="Zoom In">+</button>
-                        <button id="snapshot-btn" class="btn btn-small">Snapshot</button>
+                        <button id="snapshot-btn" class="btn btn-small btn-icon" title="Take Snapshot">📷</button>
                         <span id="camera-status" class="status-badge">No Feed</span>
-                        <span id="camera-mode-label" class="status-badge subtle">Relay</span>
                     </div>
                 </div>
                 <div class="panel-content">
@@ -421,6 +427,9 @@
                 <div class="chart-container">
                     <canvas id="sensorChart"></canvas>
                 </div>
+
+                <!-- Gas Warnings Strip (below chart, visible when thresholds exceeded) -->
+                <div id="gas-alert-strip" class="gas-alert-strip hidden"></div>
             </div>
             <div class="resize-handle" data-resize="se"></div>
         </div>

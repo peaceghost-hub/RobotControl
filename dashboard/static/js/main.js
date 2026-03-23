@@ -18,7 +18,8 @@ const DASHBOARD_CONFIG = (() => {
 const CONFIG = {
     socketNamespace: '/realtime',
     updateInterval: 1000, // ms
-    chartDataPoints: 50,
+    chartDataPoints: 150,  // total history retained (3× visible window)
+    chartVisiblePoints: 50, // points shown on screen at once
     // How long we can go without receiving a status_update before marking the device offline.
     // Must be > the Pi status interval; default keeps the UI stable.
     deviceOfflineTimeoutSec: Number(DASHBOARD_CONFIG.deviceOfflineTimeoutSec || 30),
@@ -70,7 +71,8 @@ const state = {
         lastCommand: null,
         ttl: CONFIG.backup && CONFIG.backup.ttl ? Number(CONFIG.backup.ttl) : null
     },
-    backupSpeed: 160
+    backupSpeed: 160,
+    gasAlerts: {}
 };
 
 // Socket.IO connection
@@ -298,13 +300,13 @@ function handleSensorUpdate(data) {
     updateElement('mq7-ppm', data.mq7_co_ppm ? `${data.mq7_co_ppm.toFixed(1)} ppm` : '-- ppm');
     updateElement('mq7-raw', data.mq7_raw ? `(Raw: ${data.mq7_raw})` : '(Raw: --)');
     
-    // Update chart (use raw values for consistency)
+    // Update chart with calibrated PPM concentrations
     const chartData = {
         temperature: data.temperature,
         humidity: data.humidity,
-        mq2: data.mq2_raw || data.mq2,
-        mq135: data.mq135_raw || data.mq135,
-        mq7: data.mq7_raw || data.mq7
+        mq2: data.mq2_smoke_ppm,
+        mq135: data.mq135_co2_ppm,
+        mq7: data.mq7_co_ppm
     };
     updateSensorChart(chartData);
     
@@ -563,7 +565,7 @@ function initSensorControl() {
 function initCharts() {
     const ctx = document.getElementById('sensorChart');
     if (!ctx) return;
-    
+
     state.charts.sensorChart = new Chart(ctx, {
         type: 'line',
         data: {
@@ -574,35 +576,40 @@ function initCharts() {
                     data: [],
                     borderColor: 'rgb(239, 68, 68)',
                     backgroundColor: 'rgba(239, 68, 68, 0.1)',
-                    tension: 0.4
+                    tension: 0.4,
+                    yAxisID: 'y'
                 },
                 {
                     label: 'Humidity (%)',
                     data: [],
                     borderColor: 'rgb(59, 130, 246)',
                     backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                    tension: 0.4
+                    tension: 0.4,
+                    yAxisID: 'y'
                 },
                 {
-                    label: 'MQ-2 (Smoke/LPG)',
+                    label: 'MQ-2 Smoke (ppm)',
                     data: [],
                     borderColor: 'rgb(251, 191, 36)',
                     backgroundColor: 'rgba(251, 191, 36, 0.1)',
-                    tension: 0.4
+                    tension: 0.4,
+                    yAxisID: 'y1'
                 },
                 {
-                    label: 'MQ-135 (CO2)',
+                    label: 'MQ-135 CO\u2082 (ppm)',
                     data: [],
                     borderColor: 'rgb(16, 185, 129)',
                     backgroundColor: 'rgba(16, 185, 129, 0.1)',
-                    tension: 0.4
+                    tension: 0.4,
+                    yAxisID: 'y1'
                 },
                 {
-                    label: 'MQ-7 (CO)',
+                    label: 'MQ-7 CO (ppm)',
                     data: [],
                     borderColor: 'rgb(168, 85, 247)',
                     backgroundColor: 'rgba(168, 85, 247, 0.1)',
-                    tension: 0.4
+                    tension: 0.4,
+                    yAxisID: 'y1'
                 }
             ]
         },
@@ -610,17 +617,39 @@ function initCharts() {
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-                legend: {
-                    position: 'top'
-                },
-                title: {
-                    display: true,
-                    text: 'Real-time Sensor Data'
+                legend: { position: 'top' },
+                title: { display: true, text: 'Real-time Sensor Data' },
+                zoom: {
+                    pan: {
+                        enabled: true,
+                        mode: 'x',
+                        modifierKey: null   // drag without modifier key
+                    },
+                    limits: {
+                        x: { minRange: 10 }
+                    }
                 }
             },
             scales: {
+                x: {
+                    min: undefined,   // will be set dynamically in updateSensorChart
+                    max: undefined,
+                    ticks: { maxRotation: 45, autoSkip: true, maxTicksLimit: 15 }
+                },
                 y: {
-                    beginAtZero: true
+                    type: 'linear',
+                    display: true,
+                    position: 'left',
+                    beginAtZero: true,
+                    title: { display: true, text: '°C / %' }
+                },
+                y1: {
+                    type: 'logarithmic',
+                    display: true,
+                    position: 'right',
+                    min: 0.1,
+                    title: { display: true, text: 'ppm' },
+                    grid: { drawOnChartArea: false }
                 }
             }
         }
@@ -633,43 +662,126 @@ function initCharts() {
 function updateSensorChart(data) {
     const chart = state.charts.sensorChart;
     if (!chart) return;
-    
+
+    const totalLabels = chart.data.labels;
+    const visible = CONFIG.chartVisiblePoints;  // 50
+    const maxKeep = CONFIG.chartDataPoints;      // 150
+
+    // Push new data point
     const time = new Date().toLocaleTimeString();
-    
-    chart.data.labels.push(time);
+    totalLabels.push(time);
     chart.data.datasets[0].data.push(data.temperature || 0);
     chart.data.datasets[1].data.push(data.humidity || 0);
-    chart.data.datasets[2].data.push(data.mq2 || 0);
-    chart.data.datasets[3].data.push(data.mq135 || 0);
-    chart.data.datasets[4].data.push(data.mq7 || 0);
-    
-    // Keep only last N points
-    if (chart.data.labels.length > CONFIG.chartDataPoints) {
-        chart.data.labels.shift();
-        chart.data.datasets.forEach(dataset => dataset.data.shift());
+    chart.data.datasets[2].data.push(data.mq2 > 0 ? data.mq2 : null);
+    chart.data.datasets[3].data.push(data.mq135 > 0 ? data.mq135 : null);
+    chart.data.datasets[4].data.push(data.mq7 > 0 ? data.mq7 : null);
+
+    // Trim to maxKeep (150) — keeps 3 screen-widths of history
+    if (totalLabels.length > maxKeep) {
+        totalLabels.shift();
+        chart.data.datasets.forEach(ds => ds.data.shift());
     }
-    
+
+    // Auto-scroll: if the user hasn't panned backward, keep the latest
+    // window in view.  If they *have* panned, leave the viewport alone.
+    const xScale = chart.scales.x;
+    const len = totalLabels.length;
+    const currentMax = chart.options.scales.x.max;
+    const atLatest = (currentMax === undefined || currentMax >= len - 2);
+
+    if (atLatest) {
+        // pin the right edge to the newest point, left edge = newest − visible
+        chart.options.scales.x.max = len - 1;
+        chart.options.scales.x.min = Math.max(0, len - visible);
+    }
+    // else: user has panned — don't move the viewport
+
     chart.update('none');
 }
 
 /**
- * Check Sensor Alerts
+ * Check Sensor Alerts — PPM-based thresholds (international standards)
+ *
+ *   MQ-2  Smoke — warn ≥   500 ppm  (early fire)     | danger ≥  5 000 ppm (heavy smoke)
+ *   MQ-135 CO₂  — warn ≥ 1 000 ppm  (ASHRAE 62.1)    | danger ≥  5 000 ppm (OSHA PEL)
+ *   MQ-7  CO    — warn ≥    35 ppm   (NIOSH ceiling)  | danger ≥    200 ppm (NIOSH IDL)
+ *
+ * Drives THREE outputs per alert:
+ *   1. addLog()          — log panel entry (with 60 s debounce)
+ *   2. #gas-alert-banner — sticky top-of-page banner (always visible while threshold exceeded)
+ *   3. #gas-alert-strip  — strip below sensor chart (always visible while threshold exceeded)
  */
 function checkSensorAlerts(data) {
+    const now = Date.now();
+    const COOLDOWN = 60_000;
+    const activeAlerts = [];   // collect {key, lvl, icon, msg} for visible UI elements
+
     if (data.temperature > 50) {
-        addLog('error', `High temperature alert: ${data.temperature.toFixed(1)}°C`);
+        addLog('error', `High temperature alert: ${data.temperature.toFixed(1)} °C`);
     }
-    
-    if (data.mq2 > 400) {
-        addLog('warning', `High smoke/gas detected: MQ-2 = ${data.mq2}`);
+
+    // ── helper: evaluate one gas sensor ──
+    function evalGas(key, ppm, warnTh, dangerTh, gasName, unit, warnNote, dangerNote) {
+        if (ppm == null) return;
+        const lvl  = ppm >= dangerTh ? 'danger' : ppm >= warnTh ? 'warn' : null;
+        const prev = state.gasAlerts[key] || {};
+
+        if (lvl) {
+            const icon = lvl === 'danger' ? '🚨' : '⚠️';
+            const label = lvl === 'danger' ? 'DANGER' : 'WARNING';
+            const note  = lvl === 'danger' ? dangerNote : warnNote;
+            const valStr = ppm < 10 ? ppm.toFixed(1) : ppm.toFixed(0);
+            const msg = `${label} — ${gasName}: ${valStr} ${unit}  (${note})`;
+
+            // addLog with debounce
+            if (lvl !== prev.lvl || (now - (prev.t || 0)) > COOLDOWN) {
+                addLog(lvl === 'danger' ? 'error' : 'warning', `${icon} ${msg}`);
+                state.gasAlerts[key] = { lvl, t: now };
+            }
+
+            // always push for banner + strip rendering
+            activeAlerts.push({ key, lvl, icon, msg });
+        } else {
+            state.gasAlerts[key] = {};
+        }
     }
-    
-    if (data.mq7 > 400) {
-        addLog('error', `Carbon monoxide alert: MQ-7 = ${data.mq7}`);
+
+    evalGas('mq2',   data.mq2_smoke_ppm, 500,   5_000, 'Smoke',           'ppm', 'early fire threshold: 500 ppm',                    'heavy smoke / fire condition');
+    evalGas('mq135', data.mq135_co2_ppm, 1_000, 5_000, 'CO\u2082',       'ppm', 'ASHRAE guideline: 1 000 ppm for occupied spaces',   'OSHA 8-hr limit 5 000 ppm exceeded');
+    evalGas('mq7',   data.mq7_co_ppm,    35,    200,   'Carbon monoxide', 'ppm CO', 'NIOSH 15-min ceiling: 35 ppm',                   'NIOSH immediately dangerous: 200 ppm');
+
+    // ── Render top banner ────────────────────────────────────────────────────
+    const banner = document.getElementById('gas-alert-banner');
+    if (banner) {
+        if (activeAlerts.length) {
+            banner.innerHTML = activeAlerts.map(a =>
+                `<div class="gas-banner-item ${a.lvl}">` +
+                `<span class="banner-icon">${a.icon}</span>` +
+                `<span>${a.msg}</span>` +
+                `</div>`
+            ).join('');
+            banner.classList.remove('hidden');
+        } else {
+            banner.classList.add('hidden');
+            banner.innerHTML = '';
+        }
     }
-    
-    if (data.mq135 > 400) {
-        addLog('warning', `Poor air quality: MQ-135 = ${data.mq135}`);
+
+    // ── Render strip below sensor chart ──────────────────────────────────────
+    const strip = document.getElementById('gas-alert-strip');
+    if (strip) {
+        if (activeAlerts.length) {
+            strip.innerHTML = activeAlerts.map(a =>
+                `<div class="strip-item ${a.lvl}">` +
+                `<span class="strip-icon">${a.icon}</span>` +
+                `<span>${a.msg}</span>` +
+                `</div>`
+            ).join('');
+            strip.classList.remove('hidden');
+        } else {
+            strip.classList.add('hidden');
+            strip.innerHTML = '';
+        }
     }
 }
 
