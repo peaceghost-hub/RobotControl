@@ -58,7 +58,7 @@ def _load_config() -> tuple[dict, str]:
 
     return {
             "device_id": "robot_01",
-            "update_interval": 5,
+            "update_interval": 1,
             "gps_update_interval": 2,
             "status_update_interval": 10,
             "waypoint_check_interval": 5,

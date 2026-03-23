@@ -676,8 +676,8 @@ function updateSensorChart(data) {
     chart.data.datasets[3].data.push(data.mq135 > 0 ? data.mq135 : null);
     chart.data.datasets[4].data.push(data.mq7 > 0 ? data.mq7 : null);
 
-    // Trim to maxKeep (150) — keeps 3 screen-widths of history
-    if (totalLabels.length > maxKeep) {
+    // Trim to maxKeep (150) — but only in live mode (skip when history loaded)
+    if (chartHistory.liveMode && totalLabels.length > maxKeep) {
         totalLabels.shift();
         chart.data.datasets.forEach(ds => ds.data.shift());
     }
@@ -696,20 +696,152 @@ function updateSensorChart(data) {
     }
     // else: user has panned — don't move the viewport
 
+    // Update history info label if in live mode
+    if (chartHistory.liveMode) {
+        const infoEl = document.getElementById('chart-history-info');
+        if (infoEl) infoEl.textContent = `Live — last ${len} readings`;
+    }
+
     chart.update('none');
 }
 
 /**
- * Check Sensor Alerts — PPM-based thresholds (international standards)
+ * Chart History — load older data from the API and prepend to the chart
+ * so the user can scroll/pan backwards through all recorded readings.
+ */
+const chartHistory = {
+    loading: false,
+    oldestTimestamp: null,   // ISO string — earliest point currently in chart
+    allLoaded: false,        // true once we've exhausted history
+    liveMode: true           // true = auto-scroll to latest
+};
+
+async function loadChartHistory() {
+    if (chartHistory.loading || chartHistory.allLoaded) return;
+    const chart = state.charts.sensorChart;
+    if (!chart) return;
+
+    chartHistory.loading = true;
+    const infoEl = document.getElementById('chart-history-info');
+    if (infoEl) infoEl.textContent = 'Loading…';
+
+    try {
+        let url = `${CONFIG.apiBaseUrl}/api/sensor_data?limit=150&page=1&device_id=${encodeURIComponent(state.deviceId)}`;
+        if (chartHistory.oldestTimestamp) {
+            url += `&end_time=${encodeURIComponent(chartHistory.oldestTimestamp)}`;
+        }
+
+        const resp = await fetch(url);
+        const json = await resp.json();
+        if (json.status !== 'success' || !json.data || json.data.length === 0) {
+            chartHistory.allLoaded = true;
+            if (infoEl) infoEl.textContent = 'All history loaded';
+            chartHistory.loading = false;
+            return;
+        }
+
+        // Data comes newest-first from API; reverse so oldest is first
+        const rows = json.data.reverse();
+
+        // Filter out any rows already in chart (by timestamp)
+        const existingFirst = chart.data.labels[0];
+        const newRows = existingFirst
+            ? rows.filter(r => new Date(r.timestamp).toLocaleTimeString() !== existingFirst)
+            : rows;
+
+        if (newRows.length === 0) {
+            chartHistory.allLoaded = true;
+            if (infoEl) infoEl.textContent = 'All history loaded';
+            chartHistory.loading = false;
+            return;
+        }
+
+        // Prepend to chart arrays
+        const newLabels = newRows.map(r => new Date(r.timestamp).toLocaleTimeString());
+        const newTemp   = newRows.map(r => r.temperature || 0);
+        const newHum    = newRows.map(r => r.humidity || 0);
+        const newMq2    = newRows.map(r => {
+            const p = GasCalibJS.ppm(r.mq2, 'MQ2_Smoke');
+            return p != null && p > 0 ? p : null;
+        });
+        const newMq135  = newRows.map(r => {
+            const p = GasCalibJS.ppm(r.mq135, 'MQ135_CO2');
+            return p != null && p > 0 ? p : null;
+        });
+        const newMq7    = newRows.map(r => {
+            const p = GasCalibJS.ppm(r.mq7, 'MQ7_CO');
+            return p != null && p > 0 ? p : null;
+        });
+
+        chart.data.labels.unshift(...newLabels);
+        chart.data.datasets[0].data.unshift(...newTemp);
+        chart.data.datasets[1].data.unshift(...newHum);
+        chart.data.datasets[2].data.unshift(...newMq2);
+        chart.data.datasets[3].data.unshift(...newMq135);
+        chart.data.datasets[4].data.unshift(...newMq7);
+
+        // Update oldest timestamp for next fetch
+        chartHistory.oldestTimestamp = rows[0].timestamp;
+
+        // Disable the max-keep trimming while in history mode
+        chartHistory.liveMode = false;
+
+        // Move viewport to show the newly loaded older data
+        const len = chart.data.labels.length;
+        const visible = CONFIG.chartVisiblePoints;
+        chart.options.scales.x.min = 0;
+        chart.options.scales.x.max = visible;
+
+        chart.update('none');
+
+        if (infoEl) infoEl.textContent = `${len} readings loaded`;
+
+    } catch (err) {
+        console.error('Error loading chart history:', err);
+        if (document.getElementById('chart-history-info')) {
+            document.getElementById('chart-history-info').textContent = 'Error loading history';
+        }
+    }
+    chartHistory.loading = false;
+}
+
+function chartGoLive() {
+    const chart = state.charts.sensorChart;
+    if (!chart) return;
+
+    // Trim back to max 150 points (live mode)
+    const maxKeep = CONFIG.chartDataPoints;
+    while (chart.data.labels.length > maxKeep) {
+        chart.data.labels.shift();
+        chart.data.datasets.forEach(ds => ds.data.shift());
+    }
+
+    const len = chart.data.labels.length;
+    const visible = CONFIG.chartVisiblePoints;
+    chart.options.scales.x.max = len - 1;
+    chart.options.scales.x.min = Math.max(0, len - visible);
+    chart.update('none');
+
+    // Reset history state
+    chartHistory.liveMode = true;
+    chartHistory.oldestTimestamp = null;
+    chartHistory.allLoaded = false;
+    const infoEl = document.getElementById('chart-history-info');
+    if (infoEl) infoEl.textContent = 'Live — last 150 readings';
+}
+
+/**
+ * Check Sensor Alerts — PPM-based thresholds (3-tier: elevated → warn → danger)
  *
- *   MQ-2  Smoke — warn ≥   500 ppm  (early fire)     | danger ≥  5 000 ppm (heavy smoke)
- *   MQ-135 CO₂  — warn ≥ 1 000 ppm  (ASHRAE 62.1)    | danger ≥  5 000 ppm (OSHA PEL)
- *   MQ-7  CO    — warn ≥    35 ppm   (NIOSH ceiling)  | danger ≥    200 ppm (NIOSH IDL)
+ *   MQ-2  Smoke — elevated ≥    50 ppm | warn ≥   500 ppm  (early fire)     | danger ≥  5 000 ppm
+ *   MQ-135 CO₂  — elevated ≥   600 ppm | warn ≥ 1 000 ppm  (ASHRAE 62.1)    | danger ≥  5 000 ppm
+ *   MQ-7  CO    — elevated ≥     9 ppm | warn ≥    35 ppm   (NIOSH ceiling)  | danger ≥    200 ppm
  *
- * Drives THREE outputs per alert:
+ * Drives FOUR outputs per alert:
  *   1. addLog()          — log panel entry (with 60 s debounce)
- *   2. #gas-alert-banner — sticky top-of-page banner (always visible while threshold exceeded)
- *   3. #gas-alert-strip  — strip below sensor chart (always visible while threshold exceeded)
+ *   2. showToast()       — toast notification popup
+ *   3. #gas-alert-banner — sticky top-of-page banner (always visible while threshold exceeded)
+ *   4. #gas-alert-strip  — strip below sensor chart (always visible while threshold exceeded)
  */
 function checkSensorAlerts(data) {
     const now = Date.now();
@@ -721,21 +853,28 @@ function checkSensorAlerts(data) {
     }
 
     // ── helper: evaluate one gas sensor ──
-    function evalGas(key, ppm, warnTh, dangerTh, gasName, unit, warnNote, dangerNote) {
+    // Three tiers: elevated (gas detected), warn (safety threshold), danger (critical)
+    function evalGas(key, ppm, elevTh, warnTh, dangerTh, gasName, unit, elevNote, warnNote, dangerNote) {
         if (ppm == null) return;
-        const lvl  = ppm >= dangerTh ? 'danger' : ppm >= warnTh ? 'warn' : null;
+        const lvl  = ppm >= dangerTh ? 'danger'
+                   : ppm >= warnTh   ? 'warn'
+                   : ppm >= elevTh   ? 'elevated'
+                   : null;
         const prev = state.gasAlerts[key] || {};
 
         if (lvl) {
-            const icon = lvl === 'danger' ? '🚨' : '⚠️';
-            const label = lvl === 'danger' ? 'DANGER' : 'WARNING';
-            const note  = lvl === 'danger' ? dangerNote : warnNote;
+            const icon  = lvl === 'danger' ? '🚨' : lvl === 'warn' ? '⚠️' : '🔔';
+            const label = lvl === 'danger' ? 'DANGER' : lvl === 'warn' ? 'WARNING' : 'ELEVATED';
+            const note  = lvl === 'danger' ? dangerNote : lvl === 'warn' ? warnNote : elevNote;
             const valStr = ppm < 10 ? ppm.toFixed(1) : ppm.toFixed(0);
             const msg = `${label} — ${gasName}: ${valStr} ${unit}  (${note})`;
 
-            // addLog with debounce
+            // addLog + toast with debounce
             if (lvl !== prev.lvl || (now - (prev.t || 0)) > COOLDOWN) {
-                addLog(lvl === 'danger' ? 'error' : 'warning', `${icon} ${msg}`);
+                const logType = lvl === 'danger' ? 'error' : 'warning';
+                const toastType = lvl === 'danger' ? 'error' : lvl === 'warn' ? 'warning' : 'info';
+                addLog(logType, `${icon} ${msg}`);
+                showToast(toastType, `${icon} ${gasName} Alert`, `${valStr} ${unit} — ${note}`);
                 state.gasAlerts[key] = { lvl, t: now };
             }
 
@@ -746,9 +885,10 @@ function checkSensorAlerts(data) {
         }
     }
 
-    evalGas('mq2',   data.mq2_smoke_ppm, 500,   5_000, 'Smoke',           'ppm', 'early fire threshold: 500 ppm',                    'heavy smoke / fire condition');
-    evalGas('mq135', data.mq135_co2_ppm, 1_000, 5_000, 'CO\u2082',       'ppm', 'ASHRAE guideline: 1 000 ppm for occupied spaces',   'OSHA 8-hr limit 5 000 ppm exceeded');
-    evalGas('mq7',   data.mq7_co_ppm,    35,    200,   'Carbon monoxide', 'ppm CO', 'NIOSH 15-min ceiling: 35 ppm',                   'NIOSH immediately dangerous: 200 ppm');
+    //                key       ppm                    elev   warn   danger  name               unit     elevNote                                    warnNote                                          dangerNote
+    evalGas('mq2',   data.mq2_smoke_ppm,                50,   500,   5_000, 'Smoke',           'ppm',  'gas detected above normal baseline',       'early fire threshold: 500 ppm',                    'heavy smoke / fire condition');
+    evalGas('mq135', data.mq135_co2_ppm,               600, 1_000,  5_000, 'CO\u2082',        'ppm',  'CO\u2082 rising above ambient (~400 ppm)', 'ASHRAE guideline: 1 000 ppm for occupied spaces',   'OSHA 8-hr limit 5 000 ppm exceeded');
+    evalGas('mq7',   data.mq7_co_ppm,                    9,    35,    200,  'Carbon monoxide', 'ppm CO','CO above WHO 8-hr guideline (9 ppm)',     'NIOSH 15-min ceiling: 35 ppm',                     'NIOSH immediately dangerous: 200 ppm');
 
     // ── Render top banner ────────────────────────────────────────────────────
     const banner = document.getElementById('gas-alert-banner');
@@ -1405,15 +1545,22 @@ async function clearAllWaypoints() {
 }
 
 /**
- * Load Sensor History
+ * Load Sensor History (with pagination)
  */
-async function loadSensorHistory(page = 1) {
+async function loadSensorHistory(page) {
+    // If called from event listener (no arg / event object), use current page
+    if (typeof page !== 'number') page = state.currentPage || 1;
     try {
-        const response = await fetch(`${CONFIG.apiBaseUrl}/api/sensor_data?limit=20&device_id=${encodeURIComponent(state.deviceId)}`);
+        const response = await fetch(
+            `${CONFIG.apiBaseUrl}/api/sensor_data?limit=20&page=${page}&device_id=${encodeURIComponent(state.deviceId)}`
+        );
         const data = await response.json();
         
         if (data.status === 'success') {
+            state.currentPage = data.page || 1;
+            state.totalPages  = data.total_pages || 1;
             displaySensorHistory(data.data);
+            updatePaginationUI();
         }
     } catch (error) {
         console.error('Error loading sensor history:', error);
@@ -1421,7 +1568,47 @@ async function loadSensorHistory(page = 1) {
 }
 
 /**
- * Display Sensor History
+ * Update pagination buttons & page info
+ */
+function updatePaginationUI() {
+    const prevBtn  = document.getElementById('prev-page-btn');
+    const nextBtn  = document.getElementById('next-page-btn');
+    const pageInfo = document.getElementById('page-info');
+    if (pageInfo) pageInfo.textContent = `Page ${state.currentPage} / ${state.totalPages}`;
+    if (prevBtn)  prevBtn.disabled = (state.currentPage <= 1);
+    if (nextBtn)  nextBtn.disabled = (state.currentPage >= state.totalPages);
+}
+
+/**
+ * Client-side PPM calculation (mirrors GasCalibration Python class)
+ */
+const GasCalibJS = {
+    VREF: 4.096,
+    MAX_ADC: 32767,
+    RL: 10000,
+    VIN: 5.0,
+    R0: { MQ2: 18249, MQ135: 9871, MQ7: 1822 },
+    CALIB: {
+        MQ2_Smoke:  { a: 3014.44,  b: -2.486, r0key: 'MQ2'  },
+        MQ135_CO2:  { a: 15644.0,  b: -2.862, r0key: 'MQ135' },
+        MQ7_CO:     { a: 99.04,    b: -1.518, r0key: 'MQ7'   }
+    },
+    ppm(raw, sensorType) {
+        if (!raw || raw <= 0) return null;
+        const c = this.CALIB[sensorType];
+        if (!c) return null;
+        const volts = raw * (this.VREF / this.MAX_ADC);
+        if (volts <= 0) return null;
+        const rs = this.RL * (this.VIN / volts - 1);
+        const ratio = rs / this.R0[c.r0key];
+        if (ratio <= 0) return null;
+        const val = c.a * Math.pow(ratio, c.b);
+        return (isFinite(val) && val >= 0) ? val : null;
+    }
+};
+
+/**
+ * Display Sensor History (with PPM in brackets)
  */
 function displaySensorHistory(data) {
     const tbody = document.getElementById('data-table-body');
@@ -1431,14 +1618,22 @@ function displaySensorHistory(data) {
         return;
     }
     
+    function fmtMQ(raw, sensorType) {
+        if (raw == null) return '--';
+        const ppm = GasCalibJS.ppm(raw, sensorType);
+        if (ppm == null) return `${raw}`;
+        const ppmStr = ppm < 10 ? ppm.toFixed(1) : ppm.toFixed(0);
+        return `${raw} <span class="ppm-inline">(${ppmStr} ppm)</span>`;
+    }
+
     tbody.innerHTML = data.map(row => `
         <tr>
             <td>${new Date(row.timestamp).toLocaleString()}</td>
             <td>${row.temperature ? row.temperature.toFixed(1) : '--'}</td>
             <td>${row.humidity ? row.humidity.toFixed(1) : '--'}</td>
-            <td>${row.mq2 || '--'}</td>
-            <td>${row.mq135 || '--'}</td>
-            <td>${row.mq7 || '--'}</td>
+            <td>${fmtMQ(row.mq2,   'MQ2_Smoke')}</td>
+            <td>${fmtMQ(row.mq135, 'MQ135_CO2')}</td>
+            <td>${fmtMQ(row.mq7,   'MQ7_CO')}</td>
         </tr>
     `).join('');
 }
@@ -1658,7 +1853,23 @@ function setupEventListeners() {
     document.getElementById('clear-waypoints-btn').addEventListener('click', clearAllWaypoints);
     
     // Refresh data
-    document.getElementById('refresh-data-btn').addEventListener('click', loadSensorHistory);
+    document.getElementById('refresh-data-btn').addEventListener('click', () => loadSensorHistory(1));
+    
+    // Pagination buttons for data history
+    document.getElementById('prev-page-btn').addEventListener('click', () => {
+        if (state.currentPage > 1) loadSensorHistory(state.currentPage - 1);
+    });
+    document.getElementById('next-page-btn').addEventListener('click', () => {
+        if (state.currentPage < state.totalPages) loadSensorHistory(state.currentPage + 1);
+    });
+    
+    // Export button in data history panel
+    const historyExportBtn = document.getElementById('history-export-btn');
+    if (historyExportBtn) historyExportBtn.addEventListener('click', exportSensorData);
+    
+    // Clear history button
+    const clearHistBtn = document.getElementById('clear-history-btn');
+    if (clearHistBtn) clearHistBtn.addEventListener('click', clearSensorHistory);
     
     // Clear logs
     document.getElementById('clear-logs-btn').addEventListener('click', () => {
@@ -1673,6 +1884,12 @@ function setupEventListeners() {
     document.getElementById('sensor-pause-btn').addEventListener('click', () => controlSensorData('pause'));
     document.getElementById('sensor-start-btn').addEventListener('click', () => controlSensorData('start'));
     document.getElementById('sensor-stop-btn').addEventListener('click', () => controlSensorData('stop'));
+
+    // Chart history buttons
+    const loadHistBtn = document.getElementById('chart-load-history-btn');
+    if (loadHistBtn) loadHistBtn.addEventListener('click', loadChartHistory);
+    const goLiveBtn = document.getElementById('chart-go-live-btn');
+    if (goLiveBtn) goLiveBtn.addEventListener('click', chartGoLive);
 
     // Navigation commands
     const navStartBtn = document.getElementById('nav-start-btn');
@@ -1895,6 +2112,33 @@ function downloadCSV(csv, filename) {
     a.setAttribute('href', url);
     a.setAttribute('download', filename);
     a.click();
+}
+
+/**
+ * Clear all sensor history from database
+ */
+async function clearSensorHistory() {
+    if (!confirm('Are you sure you want to delete ALL sensor data history? This cannot be undone.')) {
+        return;
+    }
+    try {
+        const response = await fetch(`${CONFIG.apiBaseUrl}/api/sensor_data/clear`, {
+            method: 'DELETE'
+        });
+        const data = await response.json();
+        if (data.status === 'success') {
+            addLog('info', `🗑 ${data.message}`);
+            showToast('info', 'History Cleared', data.message);
+            state.currentPage = 1;
+            state.totalPages = 1;
+            loadSensorHistory(1);
+        } else {
+            addLog('error', `Failed to clear history: ${data.message}`);
+        }
+    } catch (error) {
+        console.error('Error clearing sensor history:', error);
+        addLog('error', 'Failed to clear sensor history');
+    }
 }
 
 function normalizeLocation(raw) {

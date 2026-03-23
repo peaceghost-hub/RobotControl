@@ -574,13 +574,15 @@ def get_sensor_data():
     """
     Get historical sensor data
     Query parameters:
-    - limit: number of records (default: 100)
+    - limit: number of records per page (default: 20)
+    - page: page number (default: 1)
     - device_id: filter by device
     - start_time: ISO format datetime
     - end_time: ISO format datetime
     """
     try:
-        limit = request.args.get('limit', 100, type=int)
+        limit = request.args.get('limit', 20, type=int)
+        page = request.args.get('page', 1, type=int)
         device_id = request.args.get('device_id', 'robot_01')
         
         query = SensorReading.query.filter_by(device_id=device_id)
@@ -594,7 +596,15 @@ def get_sensor_data():
         if end_time:
             query = query.filter(SensorReading.timestamp <= datetime.fromisoformat(end_time))
         
-        readings = query.order_by(SensorReading.timestamp.desc()).limit(limit).all()
+        # Get total count for pagination
+        total_count = query.count()
+        total_pages = max(1, (total_count + limit - 1) // limit)
+        
+        # Clamp page
+        page = max(1, min(page, total_pages))
+        offset = (page - 1) * limit
+        
+        readings = query.order_by(SensorReading.timestamp.desc()).offset(offset).limit(limit).all()
         
         data = [{
             'id': r.id,
@@ -607,7 +617,14 @@ def get_sensor_data():
             'device_id': r.device_id
         } for r in readings]
         
-        return jsonify({'status': 'success', 'data': data, 'count': len(data)}), 200
+        return jsonify({
+            'status': 'success',
+            'data': data,
+            'count': len(data),
+            'page': page,
+            'total_pages': total_pages,
+            'total_count': total_count
+        }), 200
         
     except Exception as e:
         logger.error(f"Error retrieving sensor data: {str(e)}")
@@ -619,6 +636,21 @@ def get_latest_sensor_data():
     """Get the most recent sensor reading"""
     with thread_lock:
         return jsonify({'status': 'success', 'data': latest_data['sensors']}), 200
+
+
+@app.route('/api/sensor_data/clear', methods=['DELETE'])
+def clear_sensor_data():
+    """Delete all stored sensor readings"""
+    try:
+        count = SensorReading.query.count()
+        SensorReading.query.delete()
+        db.session.commit()
+        logger.info(f"Cleared {count} sensor readings from database")
+        return jsonify({'status': 'success', 'message': f'{count} records deleted'}), 200
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error clearing sensor data: {str(e)}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 # ============= GPS & LOCATION ENDPOINTS =============

@@ -391,7 +391,6 @@
                     
                     <!-- MQ-2 (Smoke/LPG) -->
                     <div class="sensor-card">
-                        <div class="sensor-icon">💨</div>
                         <div class="sensor-info">
                             <span class="sensor-label">MQ-2 (Smoke)</span>
                             <span id="mq2" class="sensor-value">--</span>
@@ -402,7 +401,6 @@
                     
                     <!-- MQ-135 (Air Quality) -->
                     <div class="sensor-card">
-                        <div class="sensor-icon">🌫️</div>
                         <div class="sensor-info">
                             <span class="sensor-label">MQ-135 (CO2)</span>
                             <span id="mq135" class="sensor-value">--</span>
@@ -413,7 +411,6 @@
                     
                     <!-- MQ-7 (CO) -->
                     <div class="sensor-card">
-                        <div class="sensor-icon">⚠️</div>
                         <div class="sensor-info">
                             <span class="sensor-label">MQ-7 (CO)</span>
                             <span id="mq7" class="sensor-value">--</span>
@@ -430,6 +427,13 @@
 
                 <!-- Gas Warnings Strip (below chart, visible when thresholds exceeded) -->
                 <div id="gas-alert-strip" class="gas-alert-strip hidden"></div>
+
+                <!-- Chart History Controls -->
+                <div class="chart-history-controls">
+                    <button id="chart-load-history-btn" class="btn btn-small" title="Load older data into chart">⏮ Load History</button>
+                    <span id="chart-history-info" class="chart-history-info">Live — last 150 readings</span>
+                    <button id="chart-go-live-btn" class="btn btn-small" title="Jump to live data">▶ Live</button>
+                </div>
             </div>
             <div class="resize-handle" data-resize="se"></div>
         </div>
@@ -446,6 +450,8 @@
                         <option value="gas">Gas Sensors</option>
                     </select>
                     <button id="refresh-data-btn" class="btn btn-small">🔄 Refresh</button>
+                    <button id="history-export-btn" class="btn btn-small">📥 Export CSV</button>
+                    <button id="clear-history-btn" class="btn btn-small btn-danger">🗑 Clear</button>
                     <button class="btn btn-small overlay-close" data-overlay-target="data">✖</button>
                 </div>
             </div>
@@ -457,9 +463,9 @@
                                 <th>Timestamp</th>
                                 <th>Temp (°C)</th>
                                 <th>Humidity (%)</th>
-                                <th>MQ-2</th>
-                                <th>MQ-135</th>
-                                <th>MQ-7</th>
+                                <th>MQ-2 (ppm)</th>
+                                <th>MQ-135 (ppm)</th>
+                                <th>MQ-7 (ppm)</th>
                             </tr>
                         </thead>
                         <tbody id="data-table-body">

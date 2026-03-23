@@ -558,6 +558,8 @@ body {
 /* Data Table */
 .table-container {
     overflow-x: auto;
+    overflow-y: auto;
+    max-height: 360px;
     margin-bottom: 15px;
 }
 
@@ -587,6 +589,38 @@ tr:hover {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    padding: 8px 0;
+}
+
+.pagination .btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* PPM inline in data history table */
+.ppm-inline {
+    color: #6366f1;
+    font-size: 0.85em;
+    white-space: nowrap;
+}
+
+/* Chart history controls strip */
+.chart-history-controls {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 10px;
+    background: #f0f4f8;
+    border-radius: 6px;
+    margin-top: 6px;
+}
+
+.chart-history-info {
+    font-size: 0.82em;
+    color: #64748b;
+    min-width: 160px;
+    text-align: center;
 }
 
 .robot-marker-body {
@@ -804,6 +838,15 @@ tr:hover {
 
 .btn-primary:hover {
     background: #1d4ed8;
+}
+
+.btn-danger {
+    background: #ef4444;
+    color: white;
+}
+
+.btn-danger:hover {
+    background: #dc2626;
 }
 
 .btn:disabled {
@@ -1477,6 +1520,10 @@ body.layout-scroll .panel-content {
     background: linear-gradient(90deg, #f59e0b, #fbbf24);
     color: #1a1a2e;
 }
+.gas-banner-item.elevated {
+    background: linear-gradient(90deg, #06b6d4, #22d3ee);
+    color: #1a1a2e;
+}
 .gas-banner-item.danger {
     background: linear-gradient(90deg, #ef4444, #dc2626);
     color: #fff;
@@ -1530,6 +1577,11 @@ body.layout-scroll .panel-content {
     background: rgba(245, 158, 11, 0.15);
     border-left: 4px solid var(--warning-color);
     color: #b45309;
+}
+.strip-item.elevated {
+    background: rgba(6, 182, 212, 0.15);
+    border-left: 4px solid #06b6d4;
+    color: #0e7490;
 }
 .strip-item.danger {
     background: rgba(239, 68, 68, 0.15);
