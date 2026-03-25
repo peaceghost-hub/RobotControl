@@ -148,6 +148,8 @@ void i2cReinitSlave();
 
 static inline bool frontObstacle() {
   const int d = obstacleAvoid.getDistance();
+  // Dead zone: 19-28cm is ground reflection from sensor mount — not a real obstacle
+  if (d >= DEAD_ZONE_MIN && d <= DEAD_ZONE_MAX) return false;
   return (d > 0 && d < OBSTACLE_THRESHOLD);
 }
 
@@ -910,7 +912,9 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
 
     case CMD_REQUEST_OBSTACLE: {
       int dist = obstacleAvoid.getDistance();
-      bool obs = (dist > 0 && dist < OBSTACLE_THRESHOLD);
+      // Dead zone: 19-28cm is ground reflection — not a real obstacle
+      bool inDeadZone = (dist >= DEAD_ZONE_MIN && dist <= DEAD_ZONE_MAX);
+      bool obs = (dist > 0 && dist < OBSTACLE_THRESHOLD && !inDeadZone);
       responseBuffer[0] = RESP_OBSTACLE;
       responseBuffer[1] = obs ? 1 : 0;
       if (dist < 0) dist = 0;

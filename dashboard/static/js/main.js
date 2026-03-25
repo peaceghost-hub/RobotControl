@@ -72,7 +72,8 @@ const state = {
         ttl: CONFIG.backup && CONFIG.backup.ttl ? Number(CONFIG.backup.ttl) : null
     },
     backupSpeed: 160,
-    gasAlerts: {}
+    gasAlerts: {},
+    gasPpmBuffer: { mq2: [], mq135: [], mq7: [] }  // rolling PPM window for smoothing
 };
 
 // Socket.IO connection
@@ -833,6 +834,10 @@ function chartGoLive() {
 /**
  * Check Sensor Alerts — PPM-based thresholds (3-tier: elevated → warn → danger)
  *
+ * Alert decisions use the SMOOTHED (rolling average of last 5) calculated PPM
+ * values — never raw ADC counts.  This prevents transient ADC spikes from
+ * the MQ-7 heating cycle from triggering false gas warnings.
+ *
  *   MQ-2  Smoke — elevated ≥    50 ppm | warn ≥   500 ppm  (early fire)     | danger ≥  5 000 ppm
  *   MQ-135 CO₂  — elevated ≥   600 ppm | warn ≥ 1 000 ppm  (ASHRAE 62.1)    | danger ≥  5 000 ppm
  *   MQ-7  CO    — elevated ≥     9 ppm | warn ≥    35 ppm   (NIOSH ceiling)  | danger ≥    200 ppm
@@ -847,15 +852,32 @@ function checkSensorAlerts(data) {
     const now = Date.now();
     const COOLDOWN = 60_000;
     const activeAlerts = [];   // collect {key, lvl, icon, msg} for visible UI elements
+    const PPM_WINDOW = 5;      // rolling window size — alerts use average of last N readings
 
     if (data.temperature > 50) {
         addLog('error', `High temperature alert: ${data.temperature.toFixed(1)} °C`);
     }
 
-    // ── helper: evaluate one gas sensor ──
+    // ── helper: push PPM into rolling buffer and return smoothed (average) value ──
+    function smoothPpm(key, ppm) {
+        if (ppm == null || typeof ppm !== 'number' || !isFinite(ppm) || ppm < 0) return null;
+        const buf = state.gasPpmBuffer[key];
+        if (!buf) return ppm;  // unknown key — pass through
+        buf.push(ppm);
+        if (buf.length > PPM_WINDOW) buf.shift();
+        // Return average of the buffer
+        const sum = buf.reduce((a, v) => a + v, 0);
+        return sum / buf.length;
+    }
+
+    // ── helper: evaluate one gas sensor (uses SMOOTHED PPM for alert decisions) ──
     // Three tiers: elevated (gas detected), warn (safety threshold), danger (critical)
-    function evalGas(key, ppm, elevTh, warnTh, dangerTh, gasName, unit, elevNote, warnNote, dangerNote) {
+    function evalGas(key, rawPpm, elevTh, warnTh, dangerTh, gasName, unit, elevNote, warnNote, dangerNote) {
+        // Alert decisions use the smoothed (rolling average) PPM — not raw per-reading
+        // values — to filter out transient ADC spikes from MQ sensor heating cycles.
+        const ppm = smoothPpm(key, rawPpm);
         if (ppm == null) return;
+
         const lvl  = ppm >= dangerTh ? 'danger'
                    : ppm >= warnTh   ? 'warn'
                    : ppm >= elevTh   ? 'elevated'
@@ -885,10 +907,10 @@ function checkSensorAlerts(data) {
         }
     }
 
-    //                key       ppm                    elev   warn   danger  name               unit     elevNote                                    warnNote                                          dangerNote
-    evalGas('mq2',   data.mq2_smoke_ppm,                50,   500,   5_000, 'Smoke',           'ppm',  'gas detected above normal baseline',       'early fire threshold: 500 ppm',                    'heavy smoke / fire condition');
-    evalGas('mq135', data.mq135_co2_ppm,               600, 1_000,  5_000, 'CO\u2082',        'ppm',  'CO\u2082 rising above ambient (~400 ppm)', 'ASHRAE guideline: 1 000 ppm for occupied spaces',   'OSHA 8-hr limit 5 000 ppm exceeded');
-    evalGas('mq7',   data.mq7_co_ppm,                    9,    35,    200,  'Carbon monoxide', 'ppm CO','CO above WHO 8-hr guideline (9 ppm)',     'NIOSH 15-min ceiling: 35 ppm',                     'NIOSH immediately dangerous: 200 ppm');
+    //                key       ppm (calculated, not raw!)  elev   warn   danger  name               unit     elevNote                                    warnNote                                          dangerNote
+    evalGas('mq2',   data.mq2_smoke_ppm,                     50,   500,   5_000, 'Smoke',           'ppm',  'gas detected above normal baseline',       'early fire threshold: 500 ppm',                    'heavy smoke / fire condition');
+    evalGas('mq135', data.mq135_co2_ppm,                    600, 1_000,  5_000, 'CO\u2082',        'ppm',  'CO\u2082 rising above ambient (~400 ppm)', 'ASHRAE guideline: 1 000 ppm for occupied spaces',   'OSHA 8-hr limit 5 000 ppm exceeded');
+    evalGas('mq7',   data.mq7_co_ppm,                         9,    35,    200,  'Carbon monoxide', 'ppm CO','CO above WHO 8-hr guideline (9 ppm)',     'NIOSH 15-min ceiling: 35 ppm',                     'NIOSH immediately dangerous: 200 ppm');
 
     // ── Render top banner ────────────────────────────────────────────────────
     const banner = document.getElementById('gas-alert-banner');

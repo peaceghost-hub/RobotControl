@@ -1016,22 +1016,38 @@ class RobotController:
                 logger.info("AI_OVERRIDE command received (deprecated, ignored)")
                 success = True
             elif command_type == 'AI_DRIVE':
-                # AI Vision obstacle avoidance advice.
+                # AI Vision navigation advice.
                 # payload: {direction: FORWARD|LEFT|RIGHT|STOP,
                 #           safety: SAFE|CAUTION|DANGER, reason: str}
                 ai_dir = (payload.get('direction') or 'stop').upper()
                 ai_safety = (payload.get('safety') or 'DANGER').upper()
                 ai_reason = payload.get('reason', '')
-                logger.info("AI_DRIVE: %s  safety=%s  reason=%s",
-                            ai_dir, ai_safety, ai_reason)
+                ai_source = payload.get('source', '')
+                logger.info("AI_DRIVE: %s  safety=%s  reason=%s  source=%s",
+                            ai_dir, ai_safety, ai_reason, ai_source)
 
-                # If NavController is active, feed advice to it.
-                # NavController's _handle_obstacle_detected() is waiting
-                # for this advice and will execute the direction.
+                # If NavController is active, handle based on current nav state
                 if (self.nav_controller
                         and self.nav_controller.is_active
                         and hasattr(self.nav_controller, 'receive_ai_advice')):
-                    self.nav_controller.receive_ai_advice(ai_dir, ai_safety, ai_reason)
+
+                    nav_state = getattr(self.nav_controller, '_state', None)
+                    nav_state_name = nav_state.name if nav_state else ''
+
+                    if nav_state_name == 'OBSTACLE_DETECTED':
+                        # NavController is waiting for advice — deliver it
+                        self.nav_controller.receive_ai_advice(ai_dir, ai_safety, ai_reason)
+                    elif (ai_dir == 'STOP' or ai_safety == 'DANGER') and nav_state_name == 'NAVIGATING':
+                        # AI sees danger during normal navigation — proactive stop
+                        # Uses dedicated method that safely transitions NavController
+                        self.nav_controller.handle_ai_proactive_stop(ai_dir, ai_safety, ai_reason)
+                    elif ai_dir in ('LEFT', 'RIGHT') and ai_safety == 'CAUTION':
+                        # AI sees partial obstruction — feed as advice for next obstacle check
+                        self.nav_controller.receive_ai_advice(ai_dir, ai_safety, ai_reason)
+                    else:
+                        # FORWARD+SAFE/CAUTION — path clear, no action needed during normal nav
+                        logger.debug("AI_DRIVE FORWARD+%s during %s — no action needed",
+                                     ai_safety, nav_state_name)
                     success = True
                 else:
                     # Manual driving — execute direction directly

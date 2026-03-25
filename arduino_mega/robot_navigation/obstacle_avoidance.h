@@ -28,7 +28,11 @@
 #define SERVO_RIGHT  20
 
 // Detection thresholds
-#define OBSTACLE_THRESHOLD 30  // cm
+#define OBSTACLE_THRESHOLD 100  // cm — detect obstacles within 1 metre
+
+// Dead zone: ignore readings in this band (ground reflection from mount height)
+#define DEAD_ZONE_MIN  19   // cm — lower bound of ground-reflection band
+#define DEAD_ZONE_MAX  28   // cm — upper bound of ground-reflection band
 
 struct PathScan {
     int centerDist;

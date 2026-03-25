@@ -76,7 +76,7 @@ class NavController:
     NAV_GRACE_PERIOD     = 2.0    # seconds — skip drift check at start of NAVIGATING
     HEADING_ACQUIRE_TIMEOUT = 30.0  # seconds — give up if can't acquire
     HEADING_HOLD_TIME    = 10.0   # seconds — countdown before forward drive
-    AI_ADVICE_TIMEOUT    = 10.0   # seconds — wait for AI obstacle advice before fallback
+    AI_ADVICE_TIMEOUT    = 30.0   # seconds — wait for AI obstacle advice before fallback
     PREPARE_TIME         = 3.0    # seconds — pause before acquiring heading
     WAYPOINT_HOLD_TIME   = 3.0    # seconds — pause after waypoint reached
     NAV_LOOP_HZ         = 10     # control loop frequency
@@ -355,6 +355,25 @@ class NavController:
         the current obstacle.  NavController will wait up to
         AI_ADVICE_TIMEOUT for the result."""
         self._ai_analysis_triggered = True
+
+    def handle_ai_proactive_stop(self, direction: str, safety: str, reason: str = ''):
+        """Called by main.py when AI Vision detects DANGER / requests STOP
+        while NavController is in NAVIGATING state (no ultrasonic obstacle yet).
+
+        This allows the AI camera to proactively halt the robot before
+        the ultrasonic sensor detects the obstacle — e.g. drop-offs, glass
+        walls, or objects the ultrasonic cone misses.
+        """
+        logger.warning("AI proactive stop during NAVIGATING — %s %s: %s",
+                        direction, safety, reason)
+        self._send_stop()
+        # Pre-load AI advice so _handle_obstacle_detected sees it immediately
+        self._ai_advice_direction = direction.upper() if direction else 'STOP'
+        self._ai_advice_safety = safety.upper() if safety else 'DANGER'
+        self._ai_analysis_triggered = True
+        self._ai_advice_event.set()
+        # Transition into obstacle-detected so the normal handler takes over
+        self._enter_state(NavState.OBSTACLE_DETECTED)
 
     def _emit_event(self, event_type: str, payload: dict = None):
         """Fire an event to the dashboard via the registered callback."""

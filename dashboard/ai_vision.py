@@ -87,7 +87,7 @@ except ImportError:
 ROBOT_HEIGHT_CM = 20
 ROBOT_WIDTH_CM = 20
 WHEEL_RADIUS_CM = 2
-ACTION_DISTANCE_CM = 20
+ACTION_DISTANCE_CM = 100  # cm — obstacle reaction distance (matches 1m ultrasonic range)
 
 _VISION_CROP_PX = 378  # max image edge for local model
 
@@ -156,13 +156,18 @@ _FD_PROMPT_TEMPLATE = (
     "PROGRESS: ongoing or completed or stuck\n"
     "CONFIDENCE: high or medium or low\n"
     "REASON: one brief sentence\n\n"
-    "Rules:\n"
+    "CRITICAL RULES (follow strictly):\n"
+    "- Read the mission carefully. When the described objective is VISIBLE in the "
+    "current camera frame, you MUST set ACTION=STOP and PROGRESS=completed IMMEDIATELY.\n"
+    "- Do NOT keep driving past the objective. The moment you see what the mission "
+    "describes (e.g. a door, a chair, a wall, a person), STOP and report completed.\n"
+    "- If the mission says 'turn to face X', once X is centered in the frame, STOP.\n"
     "- STOP immediately if path is blocked or unsafe\n"
     "- LEFT/RIGHT to navigate around obstacles toward your goal\n"
     "- FORWARD when path is clear and aligned with the mission\n"
-    "- PROGRESS=completed when the mission objective is visually achieved\n"
-    "- PROGRESS=stuck if you have been repeating the same action with no change\n"
+    "- PROGRESS=stuck if you have been repeating the same action 3+ times with no visible change\n"
     "- Consider the low ground-level camera perspective\n"
+    f"- React to obstacles within {ACTION_DISTANCE_CM}cm\n"
     "- Prioritise safety above all else"
 )
 

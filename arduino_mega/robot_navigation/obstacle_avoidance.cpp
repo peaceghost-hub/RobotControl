@@ -94,7 +94,9 @@ void ObstacleAvoidance::updateUltrasonic() {
           unsigned long duration = nowUs - usEchoStart;
           int dist = (int)(duration * 0.034f / 2.0f);
           distance = dist;
-          if (dist > 0 && dist < OBSTACLE_THRESHOLD) {
+          // Dead zone: readings 19-28cm are ground reflections — treat as "no obstacle"
+          bool inDeadZone = (dist >= DEAD_ZONE_MIN && dist <= DEAD_ZONE_MAX);
+          if (dist > 0 && dist < OBSTACLE_THRESHOLD && !inDeadZone) {
               obstacleDetected = true;
               obstacleHoldUntil = nowMs + 500;  // hold for at least 500 ms
           } else if (nowMs >= obstacleHoldUntil) {
