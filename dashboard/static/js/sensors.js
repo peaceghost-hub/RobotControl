@@ -29,9 +29,12 @@ function initSensors() {
 }
 
 /**
- * Check Sensor Alerts
+ * Legacy sensor alerts.
+ *
+ * Keep this available for older hooks, but do not override the calibrated
+ * PPM-based checkSensorAlerts() defined in main.js.
  */
-function checkSensorAlerts(data) {
+function checkLegacySensorAlerts(data) {
     const alerts = [];
     
     // Temperature alerts
@@ -249,7 +252,10 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // Export functions to global scope
-window.checkSensorAlerts = checkSensorAlerts;
+window.checkLegacySensorAlerts = checkLegacySensorAlerts;
+if (!window.checkSensorAlerts) {
+    window.checkSensorAlerts = checkLegacySensorAlerts;
+}
 window.getSensorStatusColor = getSensorStatusColor;
 window.formatSensorValue = formatSensorValue;
 window.getSensorDescription = getSensorDescription;

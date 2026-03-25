@@ -46,7 +46,7 @@
 #define STEERING_MAX_CORRECTION 80    // max differential PWM
 
 // Obstacle avoidance
-#define OBSTACLE_TRIGGER_CM    100    // cm — trigger avoidance (1 metre)
+#define OBSTACLE_TRIGGER_CM     30    // cm — trigger avoidance (30 cm)
 #define AVOID_STOP_DURATION    300    // ms — settle after stop
 #define AVOID_TURN_DURATION    800    // ms — time spent turning away
 #define AVOID_TURN_SPEED       140    // PWM during avoidance turn

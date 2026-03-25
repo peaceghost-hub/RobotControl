@@ -87,7 +87,7 @@ except ImportError:
 ROBOT_HEIGHT_CM = 20
 ROBOT_WIDTH_CM = 20
 WHEEL_RADIUS_CM = 2
-ACTION_DISTANCE_CM = 100  # cm — obstacle reaction distance (matches 1m ultrasonic range)
+ACTION_DISTANCE_CM = 30   # cm — obstacle reaction distance (matches 30 cm ultrasonic range)
 
 _VISION_CROP_PX = 378  # max image edge for local model
 
