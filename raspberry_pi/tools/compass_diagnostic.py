@@ -94,11 +94,11 @@ def _create_compass(config):
 
 
 def _read_averaged_heading(compass, samples=10, delay=0.05):
-    """Read multiple heading samples and return circular mean."""
+    """Read multiple pre-correction magnetic headings and return circular mean."""
     sin_sum = 0.0
     cos_sum = 0.0
     for _ in range(samples):
-        h = compass.read_heading()
+        h = compass.read_heading_magnetic()
         rad = math.radians(h)
         sin_sum += math.sin(rad)
         cos_sum += math.cos(rad)
@@ -124,6 +124,8 @@ def run_calibration():
     print()
     print("This tool measures the error between the compass's magnetic")
     print("reading and the ACTUAL physical direction the robot faces.")
+    print("Run it AFTER your normal compass calibration so the table")
+    print("captures the remaining directional error only.")
     print()
     print("You will point the robot at known directions (use a phone")
     print("compass, landmarks, or a protractor) and press ENTER to")
@@ -146,6 +148,8 @@ def run_calibration():
     compass = _create_compass(config)
     print(f"\nCompass found: {compass.chip} at 0x{compass.address:02X}")
     print(f"Calibration: {'YES' if compass._calibrated else 'NO (using defaults)'}")
+    correction_type = compass.get_correction_data().get("type", "none")
+    print(f"Correction table: {correction_type.upper()} (ignored while measuring magnetic headings)")
     print()
 
     # Collect readings

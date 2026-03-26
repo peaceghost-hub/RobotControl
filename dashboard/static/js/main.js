@@ -58,6 +58,8 @@ const state = {
     deviceId: CONFIG.deviceId,
     manualSpeed: CONFIG.manualDefaults.speed,
     autoSpeed: 120,
+    adaptiveAutoSpeed: false,
+    manualForwardMode: 'direct',
     manualOverride: false,
     navigationActive: false,
     controlMode: 'AUTO',
@@ -122,6 +124,8 @@ function initDashboard() {
         autoSpeedSlider.value = state.autoSpeed;
     }
     updateElement('auto-speed-display', state.autoSpeed);
+    updateAutoSpeedModeButton(state.adaptiveAutoSpeed);
+    syncManualForwardModeUI();
 
     const backupSpeedSlider = document.getElementById('backup-speed-slider');
     if (backupSpeedSlider) {
@@ -1172,6 +1176,42 @@ async function sendManualCommand(direction) {
     }
 }
 
+async function startManualTargetNavigation() {
+    if (state.backup.active) {
+        addLog('warning', 'Target navigation unavailable while backup control is active');
+        return;
+    }
+
+    const latEl = document.getElementById('manual-target-lat');
+    const lonEl = document.getElementById('manual-target-lon');
+    const latitude = latEl ? Number(latEl.value) : NaN;
+    const longitude = lonEl ? Number(lonEl.value) : NaN;
+
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        alert('Enter valid target latitude and longitude first.');
+        return;
+    }
+
+    const payload = { latitude, longitude };
+    if (socket && socket.connected) {
+        socket.emit('instant_command', {
+            command: 'MANUAL_TARGET_START',
+            payload,
+            device_id: state.deviceId
+        });
+        addLog('info', `Instant command: MANUAL_TARGET_START ${latitude.toFixed(6)}, ${longitude.toFixed(6)}`);
+    } else {
+        await sendRobotCommand('MANUAL_TARGET_START', payload);
+    }
+
+    state.manualOverride = false;
+    state.navigationActive = true;
+    updateControlIndicators();
+    if (typeof window._updateAiBaseNav === 'function') {
+        window._updateAiBaseNav('waypoint');
+    }
+}
+
 async function releaseManualMode() {
     if (state.backup.active) {
         addLog('warning', 'Primary manual override already released (backup active)');
@@ -1264,7 +1304,47 @@ function updateAutoSpeed(value) {
     const numeric = Number(value);
     state.autoSpeed = numeric;
     updateElement('auto-speed-display', numeric);
-    sendRobotCommand('AUTO_SPEED', { value: numeric });
+    if (socket && socket.connected) {
+        socket.emit('instant_command', {
+            command: 'AUTO_SPEED',
+            payload: { value: numeric },
+            device_id: state.deviceId
+        });
+    } else {
+        sendRobotCommand('AUTO_SPEED', { value: numeric });
+    }
+}
+
+function updateAutoSpeedModeButton(enabled) {
+    const button = document.getElementById('auto-speed-mode-btn');
+    if (!button) return;
+    button.textContent = `Adaptive Speed: ${enabled ? 'ON' : 'OFF'}`;
+    button.classList.toggle('btn-outline', !enabled);
+    button.classList.toggle('btn-success', enabled);
+}
+
+function syncManualForwardModeUI() {
+    const select = document.getElementById('manual-forward-mode');
+    const coords = document.getElementById('manual-target-coords');
+    const hint = document.getElementById('manual-target-hint');
+    const mode = select ? select.value : state.manualForwardMode;
+    state.manualForwardMode = mode || 'direct';
+    if (coords) coords.style.display = state.manualForwardMode === 'target' ? '' : 'none';
+    if (hint) hint.style.display = state.manualForwardMode === 'target' ? '' : 'none';
+}
+
+function updateAutoSpeedMode(enabled) {
+    state.adaptiveAutoSpeed = Boolean(enabled);
+    updateAutoSpeedModeButton(state.adaptiveAutoSpeed);
+    if (socket && socket.connected) {
+        socket.emit('instant_command', {
+            command: 'AUTO_SPEED_MODE',
+            payload: { enabled: state.adaptiveAutoSpeed },
+            device_id: state.deviceId
+        });
+    } else {
+        sendRobotCommand('AUTO_SPEED_MODE', { enabled: state.adaptiveAutoSpeed });
+    }
 }
 
 async function sendBackupCommand(command, payload = {}) {
@@ -1702,7 +1782,7 @@ function updateControlIndicators() {
     const manualButtons = document.querySelectorAll('.manual-grid .control-key');
     manualButtons.forEach(btn => {
         const disableForBackup = state.backup.active;
-        btn.disabled = disableForBackup || (!state.manualOverride && btn.id !== 'manual-stop-btn');
+        btn.disabled = disableForBackup;
     });
 
     const releaseBtn = document.getElementById('manual-release-btn');
@@ -1778,13 +1858,10 @@ function applyHeadingUpdate(value, source = 'primary') {
     // Keep backup heading label in sync even when only primary data is available.
     updateElement('backup-heading', `${numeric.toFixed(1)}°`);
 
-    // Also feed the compass widget so heading shows even without NAV_STATUS events
-    if (compassState.heading === null || source === 'primary') {
+    // Only use generic heading sources as a fallback until nav supplies
+    // its own corrected/magnetic heading pair.
+    if (!compassState.hasNavHeading && (compassState.heading === null || source === 'primary')) {
         compassState.heading = numeric;
-        // If we don't have a separate magnetic reading, use same value
-        if (compassState.magneticHeading === null) {
-            compassState.magneticHeading = numeric;
-        }
         updateDualCompass();
     }
 
@@ -1973,6 +2050,10 @@ function setupEventListeners() {
         const element = document.getElementById(elementId);
         if (!element) return;
         element.addEventListener('click', async () => {
+            if (direction === 'forward' && state.manualForwardMode === 'target') {
+                await startManualTargetNavigation();
+                return;
+            }
             // Combine override + drive into a single instant command
             // to avoid double round-trip latency
             if (socket && socket.connected) {
@@ -2008,6 +2089,21 @@ function setupEventListeners() {
         autoSpeedSlider.addEventListener('input', (event) => {
             updateAutoSpeed(event.target.value);
         });
+    }
+
+    const autoSpeedModeBtn = document.getElementById('auto-speed-mode-btn');
+    if (autoSpeedModeBtn) {
+        autoSpeedModeBtn.addEventListener('click', () => {
+            updateAutoSpeedMode(!state.adaptiveAutoSpeed);
+        });
+    }
+
+    const manualForwardMode = document.getElementById('manual-forward-mode');
+    if (manualForwardMode) {
+        manualForwardMode.addEventListener('change', () => {
+            syncManualForwardModeUI();
+        });
+        syncManualForwardModeUI();
     }
 
     const soundBuzzerBtn = document.getElementById('sound-buzzer-btn');
@@ -2219,6 +2315,7 @@ const compassState = {
     headingError: null,       // signed error from TRUE heading (degrees)
     acquired: false,          // heading acquired (error < 5°)
     navState: 'IDLE',
+    hasNavHeading: false,
     distance: null,
     waypointIndex: null,
     waypointTotal: null
@@ -2226,6 +2323,44 @@ const compassState = {
 
 // Compass correction table (loaded from /api/compass_correction)
 let _compassCorrection = { type: 'none' };
+
+function updateCompassCorrectionUi() {
+    const lbl = document.getElementById('compass-correction-label');
+    const note = document.getElementById('compass-correction-note');
+    const trueTitle = document.querySelector('#compass-true-canvas')?.parentElement?.querySelector('div');
+    let suffix = 'Declination';
+    if (_compassCorrection.type === 'constant') suffix = 'Offset';
+    if (_compassCorrection.type === 'lookup_table') suffix = 'Table';
+    let noteText = 'Declination only. Run compass diagnostic after calibration for best heading accuracy.';
+    let noteColor = '#f59e0b';
+
+    if (_compassCorrection.type === 'constant') {
+        noteText = 'Constant compass offset correction is active.';
+        noteColor = '#00ff44';
+    } else if (_compassCorrection.type === 'lookup_table') {
+        noteText = 'Directional compass correction table is active.';
+        noteColor = '#00ff44';
+    }
+    if (!_compassCorrectionEnabled) {
+        noteText = 'Left compass is showing magnetic heading for comparison.';
+        noteColor = '#ffaa00';
+    }
+
+    if (lbl) {
+        lbl.textContent = _compassCorrectionEnabled
+            ? `Correction: ON (${suffix})`
+            : 'Correction: OFF';
+        lbl.style.color = _compassCorrectionEnabled ? '#00ff44' : '#ffaa00';
+    }
+    if (note) {
+        note.textContent = noteText;
+        note.style.color = noteColor;
+    }
+    if (trueTitle) {
+        trueTitle.textContent = _compassCorrectionEnabled ? 'TRUE NORTH' : 'MAGNETIC (L)';
+        trueTitle.style.color = _compassCorrectionEnabled ? '#00ff44' : '#ffaa00';
+    }
+}
 
 /** Load compass correction table from server */
 function loadCompassCorrection() {
@@ -2236,10 +2371,12 @@ function loadCompassCorrection() {
             console.log('Compass correction loaded:', _compassCorrection.type,
                         _compassCorrection.type === 'constant' ? `offset=${_compassCorrection.offset}°` :
                         _compassCorrection.type === 'lookup_table' ? `${(_compassCorrection.table||[]).length} entries` : '');
+            updateCompassCorrectionUi();
         })
         .catch(err => {
             console.warn('Failed to load compass correction:', err);
             _compassCorrection = { type: 'none' };
+            updateCompassCorrectionUi();
         });
 }
 
@@ -2247,6 +2384,7 @@ function loadCompassCorrection() {
 function magneticToTrue(magnetic) {
     if (magnetic === null || magnetic === undefined) return magnetic;
     const mag = ((magnetic % 360) + 360) % 360;
+    const declinationDeg = Number(_compassCorrection.declination_deg || 0);
 
     if (_compassCorrection.type === 'constant') {
         return ((mag - (_compassCorrection.offset || 0)) % 360 + 360) % 360;
@@ -2289,7 +2427,7 @@ function magneticToTrue(magnetic) {
         return ((mag - correction) % 360 + 360) % 360;
     }
 
-    return mag;  // type 'none' — pass through
+    return ((mag + declinationDeg) % 360 + 360) % 360;  // type 'none' — declination only
 }
 
 /* ─── Compass Correction Toggle ─── */
@@ -2302,20 +2440,12 @@ function initCompassCorrectionToggle() {
     cb.checked = _compassCorrectionEnabled;
     cb.addEventListener('change', () => {
         _compassCorrectionEnabled = cb.checked;
-        const lbl = document.getElementById('compass-correction-label');
-        const trueTitle = document.querySelector('#compass-true-canvas')?.parentElement?.querySelector('div');
-        if (lbl) {
-            lbl.textContent = _compassCorrectionEnabled ? 'Correction: ON' : 'Correction: OFF';
-            lbl.style.color = _compassCorrectionEnabled ? '#00ff44' : '#ffaa00';
-        }
-        if (trueTitle) {
-            trueTitle.textContent = _compassCorrectionEnabled ? 'TRUE NORTH' : 'MAGNETIC (L)';
-            trueTitle.style.color = _compassCorrectionEnabled ? '#00ff44' : '#ffaa00';
-        }
+        updateCompassCorrectionUi();
         // Immediate re-draw so user sees the change
         updateDualCompass();
         console.log('Compass correction toggled:', _compassCorrectionEnabled ? 'ON' : 'OFF');
     });
+    updateCompassCorrectionUi();
 }
 
 /**
@@ -2438,8 +2568,12 @@ function drawSmallCompass(canvasId, heading, targetBearing, needleColor, theme, 
 
 /** Update both compass canvases and error bar */
 function updateDualCompass() {
+    const correctedHeading = compassState.heading !== null
+        ? compassState.heading
+        : (compassState.magneticHeading !== null ? magneticToTrue(compassState.magneticHeading) : null);
+
     // When correction is disabled, BOTH compasses show the magnetic heading
-    const leftHeading = _compassCorrectionEnabled ? compassState.heading : compassState.magneticHeading;
+    const leftHeading = _compassCorrectionEnabled ? correctedHeading : compassState.magneticHeading;
     const leftColor   = _compassCorrectionEnabled ? '#00ff44' : '#ffaa00';
     const leftTheme   = _compassCorrectionEnabled ? 'true' : 'magnetic';
 
@@ -2579,13 +2713,24 @@ function updateNavStatusUI(nav) {
     // TRUE (corrected) heading — used by True North compass
     if (nav.current_heading !== undefined && nav.current_heading !== null) {
         compassState.heading = Number(nav.current_heading);
+        compassState.hasNavHeading = true;
+    }
+    if (nav.base_drive_speed !== undefined && nav.base_drive_speed !== null) {
+        state.autoSpeed = Number(nav.base_drive_speed);
+        const autoSpeedSlider = document.getElementById('auto-speed-slider');
+        if (autoSpeedSlider && document.activeElement !== autoSpeedSlider) {
+            autoSpeedSlider.value = state.autoSpeed;
+        }
+        updateElement('auto-speed-display', state.autoSpeed);
+    }
+    if (nav.adaptive_speed !== undefined) {
+        state.adaptiveAutoSpeed = Boolean(nav.adaptive_speed);
+        updateAutoSpeedModeButton(state.adaptiveAutoSpeed);
     }
     // MAGNETIC heading — used by Magnetic compass
     if (nav.magnetic_heading !== undefined && nav.magnetic_heading !== null) {
         compassState.magneticHeading = Number(nav.magnetic_heading);
-    } else if (compassState.heading !== null && compassState.magneticHeading === null) {
-        // Fallback: if Pi doesn't send magnetic_heading yet, use heading as both
-        compassState.magneticHeading = compassState.heading;
+        compassState.hasNavHeading = true;
     }
     if (nav.target_bearing !== undefined) {
         compassState.targetBearing = nav.target_bearing !== null ? Number(nav.target_bearing) : null;

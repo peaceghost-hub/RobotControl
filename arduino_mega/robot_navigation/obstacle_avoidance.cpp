@@ -8,7 +8,8 @@
  *   US_WAIT_ECHO_LOW → poll echo pin until it goes LOW  (compute distance)
  *
  * Each call to update() costs < 10 µs (just a digitalRead + compare).
- * The scanPath() multi-step machine moves the servo and reads at 3 angles.
+ * The legacy scan helpers remain for compatibility, although the sensor
+ * is currently fixed-mounted on the robot body.
  */
 
 #include "obstacle_avoidance.h"
@@ -94,9 +95,7 @@ void ObstacleAvoidance::updateUltrasonic() {
           unsigned long duration = nowUs - usEchoStart;
           int dist = (int)(duration * 0.034f / 2.0f);
           distance = dist;
-          // Dead zone: readings 19-28cm are ground reflections — treat as "no obstacle"
-          bool inDeadZone = (dist >= DEAD_ZONE_MIN && dist <= DEAD_ZONE_MAX);
-          if (dist > 0 && dist < OBSTACLE_THRESHOLD && !inDeadZone) {
+          if (dist > 0 && dist < OBSTACLE_THRESHOLD) {
               obstacleDetected = true;
               obstacleHoldUntil = nowMs + 500;  // hold for at least 500 ms
           } else if (nowMs >= obstacleHoldUntil) {

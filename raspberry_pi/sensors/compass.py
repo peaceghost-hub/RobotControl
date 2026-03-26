@@ -128,7 +128,7 @@ class Compass:
                     logger.info("Compass correction file present but type='%s' — no correction", ctype)
                     return {"type": "none"}
             else:
-                logger.info("No compass correction file — magnetic = true heading")
+                logger.info("No compass correction file — using declination-only heading until a diagnostic table is created")
                 return {"type": "none"}
         except Exception as e:
             logger.warning("Failed to load compass correction: %s", e)
@@ -365,11 +365,17 @@ class Compass:
     # --------------------------------------------------------------
     # HEADING
     # --------------------------------------------------------------
-    def read_heading_magnetic(self):
-        """Return the magnetic heading (0–360°) WITHOUT correction.
+    def _read_heading_base(self):
+        """Return heading after sensor/mount calibration, before true-north mapping.
 
-        This is the raw calibrated-magnetometer reading — what the
-        Magnetic compass on the dashboard displays.
+        Includes:
+          - hard-iron offsets
+          - soft-iron scaling
+          - sensor mounting / axis heading_offset
+
+        Excludes:
+          - geographic declination
+          - diagnostic correction-table mapping
         """
         if not hasattr(self, '_lock'):
             import threading
@@ -389,31 +395,42 @@ class Compass:
 
         heading_deg = math.atan2(cy, cx) * 180.0 / math.pi
         heading_deg -= self._cal_heading_offset
-        heading_deg += self.declination * 180.0 / math.pi
         heading_deg %= 360.0
 
         return heading_deg
+
+    def read_heading_magnetic(self):
+        """Return magnetic heading (0–360°) before true-north correction.
+
+        This is the magnetic-north-referenced heading after magnetometer
+        calibration and robot mounting alignment, but before declination or
+        the optional diagnostic correction table are applied.
+        """
+        return self._read_heading_base()
 
     def read_heading(self):
         """Return the TRUE heading (0–360°) with correction applied.
 
         This is the corrected heading that the True North compass
         and the navigation controller use for bearing calculations.
-        If no correction file exists, this returns the same as
-        read_heading_magnetic().
+        If no correction file exists, this falls back to simple declination
+        correction on top of read_heading_magnetic().
         """
         magnetic = self.read_heading_magnetic()
+        if self._correction.get("type", "none") == "none":
+            return (magnetic + self.declination * 180.0 / math.pi) % 360.0
         return self.apply_correction(magnetic)
 
     # --------------------------------------------------------------
     # CALIBRATION
     # --------------------------------------------------------------
     def calibrate(self):
-        """Legacy calibrate - use scripts/calibrate_compass.py instead.
-        
-        This only prints min/max offsets but does NOT apply correction.
-        For full hard-iron + soft-iron + heading offset calibration,
-        run:  python3 scripts/calibrate_compass.py
+        """Legacy calibrate helper.
+
+        This only prints rough min/max offsets and does NOT apply the
+        full calibration workflow. Use your normal compass calibration
+        procedure first, then run `python3 tools/compass_diagnostic.py`
+        to build the magnetic -> true-heading correction table.
         """
         logger.info("Rotate compass 360° for 30 seconds")
 
@@ -434,7 +451,7 @@ class Compass:
         off_x = (max_x + min_x) / 2
         off_y = (max_y + min_y) / 2
         logger.info(f"Offsets: X={off_x:.1f}, Y={off_y:.1f}")
-        logger.info("For full calibration, run: python3 scripts/calibrate_compass.py")
+        logger.info("For full calibration, use the project compass calibration workflow, then run: python3 tools/compass_diagnostic.py")
 
         logger.info(f"Calibration offsets: X={off_x}, Y={off_y}")
         return off_x, off_y

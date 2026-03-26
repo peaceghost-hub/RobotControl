@@ -1,6 +1,6 @@
- /*
+/*
  * Obstacle Avoidance Header — NON-BLOCKING
- * HC-SR04 Ultrasonic Sensor (servo-scanned)
+ * HC-SR04 Ultrasonic Sensor (fixed mount)
  *
  * Blueprint rules:
  *   - No pulseIn(), no delay() — everything runs in < 20 µs per call.
@@ -28,11 +28,7 @@
 #define SERVO_RIGHT  20
 
 // Detection thresholds
-#define OBSTACLE_THRESHOLD 30   // cm — detect obstacles within 30 cm
-
-// Dead zone: ignore readings in this band (ground reflection from mount height)
-#define DEAD_ZONE_MIN  19   // cm — lower bound of ground-reflection band
-#define DEAD_ZONE_MAX  28   // cm — upper bound of ground-reflection band
+#define OBSTACLE_THRESHOLD 50   // cm — detect obstacles within 50 cm
 
 struct PathScan {
     int centerDist;

@@ -769,6 +769,22 @@ tr:hover {
     border: none;
 }
 
+.speed-control select,
+.manual-target-coords input {
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: white;
+    color: var(--text-primary);
+}
+
+.manual-target-coords {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 10px;
+}
+
 .btn-outline {
     background: transparent;
     border: 2px solid var(--primary-color);
@@ -778,6 +794,17 @@ tr:hover {
 .btn-outline:hover {
     background: var(--primary-color);
     color: white;
+}
+
+.btn-success {
+    background: #16a34a;
+    color: white;
+    border: 2px solid #16a34a;
+}
+
+.btn-success:hover {
+    background: #15803d;
+    border-color: #15803d;
 }
 
 /* Logs Panel */

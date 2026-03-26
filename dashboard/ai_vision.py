@@ -87,7 +87,7 @@ except ImportError:
 ROBOT_HEIGHT_CM = 20
 ROBOT_WIDTH_CM = 20
 WHEEL_RADIUS_CM = 2
-ACTION_DISTANCE_CM = 30   # cm — obstacle reaction distance (matches 30 cm ultrasonic range)
+ACTION_DISTANCE_CM = 50   # cm — obstacle reaction distance (matches 50 cm ultrasonic range)
 
 _VISION_CROP_PX = 378  # max image edge for local model
 
@@ -130,7 +130,8 @@ PROMPTS: Dict[str, str] = {
         "- CAUTION + FORWARD: minor obstacles visible but path is passable\n"
         "- CAUTION + LEFT or RIGHT: partial obstruction, navigate around it\n"
         f"- DANGER + STOP: path fully blocked within {ACTION_DISTANCE_CM}cm\n"
-        "- DANGER + LEFT or RIGHT: obstacle ahead but space to steer around\n"
+        "- If the scene is unsafe or uncertain, prefer STOP over FORWARD\n"
+        "- Do NOT output LEFT or RIGHT when SAFETY is DANGER; use STOP instead\n"
         f"- Objects taller than {WHEEL_RADIUS_CM}cm on the ground can block the wheels\n"
         f"- Objects wider than {ROBOT_WIDTH_CM}cm blocking the path cannot be passed\n"
         "- Holes, drops, steps, or uneven terrain are hazards for small wheels\n"
@@ -161,6 +162,7 @@ _FD_PROMPT_TEMPLATE = (
     "current camera frame, you MUST set ACTION=STOP and PROGRESS=completed IMMEDIATELY.\n"
     "- Do NOT keep driving past the objective. The moment you see what the mission "
     "describes (e.g. a door, a chair, a wall, a person), STOP and report completed.\n"
+    "- If the mission mentions a door or doorway, the moment a door or doorway is clearly visible, STOP and set PROGRESS=completed.\n"
     "- If the mission says 'turn to face X', once X is centered in the frame, STOP.\n"
     "- STOP immediately if path is blocked or unsafe\n"
     "- LEFT/RIGHT to navigate around obstacles toward your goal\n"

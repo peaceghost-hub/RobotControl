@@ -175,6 +175,9 @@
                             <input type="range" id="auto-speed-slider" min="80" max="255" value="120">
                             <span id="auto-speed-display">120</span>
                         </div>
+                        <div class="control-actions">
+                            <button id="auto-speed-mode-btn" class="btn btn-small btn-outline">Adaptive Speed: OFF</button>
+                        </div>
                         <button id="send-waypoints-btn" class="btn btn-outline"> Send Waypoints</button>
                         <button id="nav-return-home-btn" class="btn btn-outline" title="Reverse waypoints and navigate back to start">🏠 Return Home</button>
                     </div>
@@ -199,6 +202,20 @@
                             <label for="manual-speed-slider">Manual speed</label>
                             <input type="range" id="manual-speed-slider" min="80" max="255" value="180">
                             <span id="manual-speed-display">180</span>
+                        </div>
+                        <div class="speed-control">
+                            <label for="manual-forward-mode">Forward mode</label>
+                            <select id="manual-forward-mode">
+                                <option value="direct">Direct drive</option>
+                                <option value="target">Heading-lock target</option>
+                            </select>
+                        </div>
+                        <div id="manual-target-coords" class="manual-target-coords" style="display:none;">
+                            <input type="text" id="manual-target-lat" placeholder="Target latitude">
+                            <input type="text" id="manual-target-lon" placeholder="Target longitude">
+                        </div>
+                        <div id="manual-target-hint" class="control-help" style="display:none;">
+                            Align the robot yourself, then press Forward to drive to the target while keeping the current heading for re-acquire after obstacle avoidance.
                         </div>
                         <button id="sound-buzzer-btn" class="btn btn-warning">🔊 Sound Buzzer</button>
                     </div>
@@ -248,6 +265,9 @@
                                    style="accent-color:#00ff44; width:14px; height:14px; cursor:pointer;">
                             <span id="compass-correction-label">Correction: ON</span>
                         </label>
+                    </div>
+                    <div id="compass-correction-note" style="margin-top:4px; font-size:10px; color:#9ca3af; text-align:center;">
+                        Loading compass correction...
                     </div>
                     <div class="compass-legend" style="justify-content:center; gap:12px; margin-top:4px;">
                         <span class="legend-item"><span class="legend-dot" style="background:#00ff44;"></span> True Heading</span>

@@ -70,7 +70,10 @@ class NavController:
     ROTATION_SPEED_FAST  = 150    # PWM for big heading error
     ROTATION_SPEED_SLOW  = 100    # PWM for small heading error
     DRIVE_SPEED          = 150    # PWM forward
+    SAFE_AVOID_DISTANCE_CM = 40   # reverse back to at least this distance before avoiding
+    SAFE_REVERSE_TIMEOUT = 3.0    # seconds — never reverse indefinitely
     OBSTACLE_TURN_TIME   = 1.0    # seconds — rotate away from obstacle
+    OBSTACLE_PASS_TIME   = 1.5    # seconds — drive forward to get past obstacle before re-acquire
     OBSTACLE_CHECK_PAUSE = 0.3    # seconds — pause after stop before turning
     COURSE_DRIFT_THRESH  = 12.0   # degrees — re-acquire heading while driving
     NAV_GRACE_PERIOD     = 2.0    # seconds — skip drift check at start of NAVIGATING
@@ -105,6 +108,8 @@ class NavController:
         # Waypoints
         self._waypoints: List[Dict[str, Any]] = []
         self._current_wp_index = 0
+        self._heading_lock_active = False
+        self._heading_lock_bearing: Optional[float] = None
 
         # State
         self._state = NavState.IDLE
@@ -118,6 +123,8 @@ class NavController:
         self._obstacle_phase_start = 0.0
         self._avoid_direction = 'left'  # alternate each attempt
         self._avoid_attempts = 0
+        self._last_obstacle_distance_cm = -1
+        self._clearance_notice_phase = 0.0
 
         # Bearing / heading cache
         self._current_heading = 0.0
@@ -150,10 +157,21 @@ class NavController:
         self._motor_trim_right = int(nav_cfg.get('motor_trim_right', 0))
         self.DRIVE_SPEED = int(nav_cfg.get('drive_speed', self.DRIVE_SPEED))
         self.WAYPOINT_RADIUS = float(nav_cfg.get('waypoint_radius', self.WAYPOINT_RADIUS))
+        self._adaptive_speed = bool(nav_cfg.get('adaptive_speed', False))
+        self.SAFE_AVOID_DISTANCE_CM = max(20, min(60, int(nav_cfg.get(
+            'safe_avoid_distance_cm', self.SAFE_AVOID_DISTANCE_CM
+        ))))
+        self.SAFE_REVERSE_TIMEOUT = max(1.0, min(6.0, float(nav_cfg.get(
+            'safe_reverse_timeout', self.SAFE_REVERSE_TIMEOUT
+        ))))
+        self.OBSTACLE_PASS_TIME = max(0.5, min(4.0, float(nav_cfg.get(
+            'obstacle_pass_time', self.OBSTACLE_PASS_TIME
+        ))))
 
-        logger.info("NavController created (trim L=%+d R=%+d, speed=%d, radius=%.1fm)",
+        logger.info("NavController created (trim L=%+d R=%+d, speed=%d, radius=%.1fm, adaptive=%s, safe_avoid=%dcm)",
                      self._motor_trim_left, self._motor_trim_right,
-                     self.DRIVE_SPEED, self.WAYPOINT_RADIUS)
+                     self.DRIVE_SPEED, self.WAYPOINT_RADIUS,
+                     self._adaptive_speed, self.SAFE_AVOID_DISTANCE_CM)
 
     # ================================================================
     #  PUBLIC API
@@ -202,6 +220,7 @@ class NavController:
 
             return {
                 'state': self._state.name,
+                'nav_mode': 'heading_lock' if self._heading_lock_active else 'waypoint',
                 'current_heading': round(heading, 1),
                 'magnetic_heading': round(magnetic, 1),
                 'target_bearing': round(self._target_bearing, 1) if self._state not in (NavState.IDLE, NavState.COMPLETE, NavState.PAUSED) else None,
@@ -214,6 +233,11 @@ class NavController:
                 'countdown': countdown,
                 'notification': notif,
                 'neo_satellites': self._neo_satellites,
+                'adaptive_speed': self._adaptive_speed,
+                'base_drive_speed': int(self.DRIVE_SPEED),
+                'heading_lock_bearing': round(self._heading_lock_bearing, 1) if self._heading_lock_active and self._heading_lock_bearing is not None else None,
+                'safe_avoid_distance_cm': self.SAFE_AVOID_DISTANCE_CM,
+                'last_obstacle_distance_cm': self._last_obstacle_distance_cm if self._last_obstacle_distance_cm > 0 else None,
             }
 
     def return_home(self):
@@ -226,6 +250,8 @@ class NavController:
             if not self._waypoints:
                 logger.warning("Cannot return home — no waypoints")
                 return False
+            self._heading_lock_active = False
+            self._heading_lock_bearing = None
             # Reverse the FULL waypoint list (already visited + remaining)
             reversed_wps = list(reversed(self._waypoints))
             self._waypoints = reversed_wps
@@ -249,7 +275,65 @@ class NavController:
             self._waypoints = list(waypoints)
             self._current_wp_index = 0
             self._completed_waypoints = []
+            self._heading_lock_active = False
+            self._heading_lock_bearing = None
         logger.info("Loaded %d waypoints", len(waypoints))
+
+    def start_heading_lock_target(self, latitude: float, longitude: float):
+        """Navigate to a single target while preserving the current heading.
+
+        This supports the dashboard's manual "forward-to-coordinate" mode:
+        the operator physically aligns the robot first, then the Pi keeps
+        re-acquiring that same heading after obstacle avoidance.
+        """
+        heading = self._read_heading()
+        if heading is None:
+            heading = self._current_heading
+
+        try:
+            lat = float(latitude)
+            lon = float(longitude)
+        except (TypeError, ValueError):
+            logger.warning("Heading-lock target rejected — invalid coordinates")
+            return False
+
+        with self._lock:
+            self._waypoints = [{
+                'latitude': lat,
+                'longitude': lon,
+                'id': 1,
+                'description': 'Heading-lock target',
+            }]
+            self._current_wp_index = 0
+            self._completed_waypoints = []
+            self._avoid_attempts = 0
+            self._avoid_direction = 'left'
+            self._heading_lock_active = True
+            self._heading_lock_bearing = float(heading or 0.0) % 360.0
+
+        self._running = True
+        self._send_stop()
+        self._notification = {
+            'level': 'info',
+            'msg': f'Heading-lock target started — holding {self._heading_lock_bearing:.1f}°',
+        }
+        self._enter_state(NavState.NAVIGATING)
+        if not self._thread or not self._thread.is_alive():
+            self._thread = threading.Thread(target=self._nav_loop, daemon=True)
+            self._thread.start()
+        logger.info("Heading-lock navigation started to (%.6f, %.6f) on %.1f°",
+                    lat, lon, self._heading_lock_bearing)
+        return True
+
+    def set_drive_speed(self, speed: int) -> bool:
+        self.DRIVE_SPEED = max(60, min(255, int(speed)))
+        logger.info("Nav drive speed -> %d", self.DRIVE_SPEED)
+        return True
+
+    def set_adaptive_speed(self, enabled: bool) -> bool:
+        self._adaptive_speed = bool(enabled)
+        logger.info("Adaptive auto speed -> %s", self._adaptive_speed)
+        return True
 
     def start(self):
         """Begin autonomous navigation."""
@@ -261,6 +345,8 @@ class NavController:
             self._completed_waypoints = []
             self._avoid_attempts = 0
             self._avoid_direction = 'left'
+            self._heading_lock_active = False
+            self._heading_lock_bearing = None
         self._running = True
         self._send_stop()
         self._notification = {'level': 'info', 'msg': 'Navigation started — preparing...'}
@@ -276,6 +362,8 @@ class NavController:
         """Stop navigation completely."""
         self._running = False
         self._send_stop()
+        self._heading_lock_active = False
+        self._heading_lock_bearing = None
         self._enter_state(NavState.IDLE)
         logger.info("Navigation STOPPED")
 
@@ -373,7 +461,7 @@ class NavController:
         self._ai_analysis_triggered = True
         self._ai_advice_event.set()
         # Transition into obstacle-detected so the normal handler takes over
-        self._enter_state(NavState.OBSTACLE_DETECTED)
+        self._enter_obstacle_detected(skip_clearance=True)
 
     def _emit_event(self, event_type: str, payload: dict = None):
         """Fire an event to the dashboard via the registered callback."""
@@ -447,7 +535,10 @@ class NavController:
 
         self._gps_wait_logged = False  # GPS is available again
         self._distance_to_wp = self._haversine(cur_lat, cur_lon, wp_lat, wp_lon)
-        self._target_bearing = self._bearing(cur_lat, cur_lon, wp_lat, wp_lon)
+        if self._heading_lock_active and self._heading_lock_bearing is not None:
+            self._target_bearing = self._heading_lock_bearing
+        else:
+            self._target_bearing = self._bearing(cur_lat, cur_lon, wp_lat, wp_lon)
         self._last_heading_error = self._normalize_error(self._target_bearing - self._current_heading)
 
         # Debug log bearing calculation periodically (every ~2s at 10Hz)
@@ -515,11 +606,11 @@ class NavController:
         # Rotate toward target
         if error > 0:
             # Target is to the RIGHT → rotate right
-            speed = self.ROTATION_SPEED_SLOW if abs_error < self.ACQUIRE_SLOW_THRESH else self.ROTATION_SPEED_FAST
+            speed = self._get_turn_speed(fast=abs_error >= self.ACQUIRE_SLOW_THRESH)
             self._send_rotate_right(speed)
         else:
             # Target is to the LEFT → rotate left
-            speed = self.ROTATION_SPEED_SLOW if abs_error < self.ACQUIRE_SLOW_THRESH else self.ROTATION_SPEED_FAST
+            speed = self._get_turn_speed(fast=abs_error >= self.ACQUIRE_SLOW_THRESH)
             self._send_rotate_left(speed)
 
     def _handle_heading_acquired(self):
@@ -587,7 +678,8 @@ class NavController:
             return
 
         # Check obstacle (poll Mega)
-        if self._check_obstacle():
+        obstacle = self._read_obstacle()
+        if obstacle and obstacle.get('obstacle'):
             self._send_stop()
             # Clear previous AI advice results so we wait for fresh advice
             # for THIS obstacle.  But do NOT reset _ai_analysis_triggered —
@@ -596,7 +688,7 @@ class NavController:
             self._ai_advice_event.clear()
             self._ai_advice_direction = None
             self._ai_advice_safety = None
-            self._enter_state(NavState.OBSTACLE_DETECTED)
+            self._enter_obstacle_detected(skip_clearance=False)
             return
 
         # Check course drift — if heading drifted too far, re-acquire
@@ -611,7 +703,7 @@ class NavController:
                 return
 
         # All clear — drive forward
-        self._send_forward(self.DRIVE_SPEED)
+        self._send_forward(self._get_cruise_speed())
 
     def _handle_obstacle_detected(self):
         """Stop and wait for AI Vision advice on obstacle avoidance.
@@ -622,7 +714,15 @@ class NavController:
         3. If AI was triggered but no advice within AI_ADVICE_TIMEOUT → fallback
         4. If AI was NOT triggered → immediate traditional avoidance
         """
-        elapsed = time.time() - self._state_entry_time
+        if self._obstacle_phase == 'safety':
+            if self._run_safety_clearance():
+                return
+            self._obstacle_phase = 'decision'
+            self._obstacle_phase_start = time.time()
+            self._send_stop()
+            return
+
+        elapsed = time.time() - self._obstacle_phase_start
 
         # Brief safety pause before any action
         if elapsed < self.OBSTACLE_CHECK_PAUSE:
@@ -678,27 +778,55 @@ class NavController:
         self._enter_state(NavState.OBSTACLE_AVOID)
 
     def _handle_obstacle_avoid(self):
-        """Multi-phase: turn away → check clear → re-acquire heading."""
+        """Multi-phase: safety reverse → turn away → drive past → recheck."""
         elapsed = time.time() - self._obstacle_phase_start
+
+        if self._obstacle_phase == 'safety':
+            if self._run_safety_clearance():
+                return
+            self._obstacle_phase = 'turn'
+            self._obstacle_phase_start = time.time()
+            return
 
         if self._obstacle_phase == 'turn':
             # Rotate away from obstacle
             if elapsed < self.OBSTACLE_TURN_TIME:
                 if self._avoid_direction == 'left':
-                    self._send_rotate_left(self.ROTATION_SPEED_FAST)
+                    self._send_rotate_left(self._get_turn_speed(fast=True))
                 else:
-                    self._send_rotate_right(self.ROTATION_SPEED_FAST)
+                    self._send_rotate_right(self._get_turn_speed(fast=True))
             else:
-                # Turn complete — stop and recheck
+                # Turn complete — start moving past the obstacle
+                self._send_stop()
+                self._obstacle_phase = 'forward'
+                self._obstacle_phase_start = time.time()
+
+        elif self._obstacle_phase == 'forward':
+            obstacle = self._read_obstacle()
+            dist_cm = self._extract_obstacle_distance(obstacle)
+            if 0 < dist_cm < self.SAFE_AVOID_DISTANCE_CM:
+                logger.info("Avoid-forward interrupted at %d cm — backing to safe distance", dist_cm)
+                self._send_stop()
+                self._obstacle_phase = 'safety'
+                self._obstacle_phase_start = time.time()
+                return
+
+            if elapsed < self.OBSTACLE_PASS_TIME:
+                self._send_forward(self._get_avoid_forward_speed())
+            else:
                 self._send_stop()
                 self._obstacle_phase = 'recheck'
                 self._obstacle_phase_start = time.time()
 
         elif self._obstacle_phase == 'recheck':
             if elapsed >= self.OBSTACLE_CHECK_PAUSE:
-                if self._check_obstacle():
-                    # Still blocked — turn more
-                    self._obstacle_phase = 'turn'
+                obstacle = self._read_obstacle()
+                dist_cm = self._extract_obstacle_distance(obstacle)
+                if obstacle and obstacle.get('obstacle'):
+                    if 0 < dist_cm < self.SAFE_AVOID_DISTANCE_CM:
+                        self._obstacle_phase = 'safety'
+                    else:
+                        self._obstacle_phase = 'turn'
                     self._obstacle_phase_start = time.time()
                     if self._avoid_attempts > 5:
                         logger.warning("Too many obstacle attempts — skipping waypoint")
@@ -728,6 +856,12 @@ class NavController:
         """Drive both motors forward at `speed` PWM."""
         left = speed + self._motor_trim_left
         right = speed + self._motor_trim_right
+        self._send_motor_command(left, right)
+
+    def _send_reverse(self, speed: int):
+        """Reverse both motors slowly to regain safe obstacle clearance."""
+        left = -(speed + self._motor_trim_left)
+        right = -(speed + self._motor_trim_right)
         self._send_motor_command(left, right)
 
     def _send_rotate_left(self, speed: int):
@@ -806,14 +940,86 @@ class NavController:
 
     def _check_obstacle(self) -> bool:
         """Poll Mega for obstacle status."""
+        obstacle = self._read_obstacle()
+        return bool(obstacle and obstacle.get('obstacle'))
+
+    def _read_obstacle(self) -> Optional[dict]:
+        """Poll Mega for obstacle flag + distance and cache the latest reading."""
         try:
             if self.robot_link and hasattr(self.robot_link, 'request_obstacle_status'):
                 result = self.robot_link.request_obstacle_status()
                 if result:
-                    return result.get('obstacle', False)
+                    dist_cm = self._extract_obstacle_distance(result)
+                    if dist_cm > 0:
+                        self._last_obstacle_distance_cm = dist_cm
+                    return result
         except Exception:
             pass
+        return None
+
+    def _extract_obstacle_distance(self, obstacle: Optional[dict]) -> int:
+        if not obstacle:
+            return -1
+        try:
+            dist_cm = int(obstacle.get('distance_cm', -1))
+        except (TypeError, ValueError):
+            dist_cm = -1
+        return dist_cm if dist_cm > 0 else -1
+
+    def _get_cruise_speed(self) -> int:
+        base = max(60, min(255, int(self.DRIVE_SPEED)))
+        if not self._adaptive_speed:
+            return base
+        if self._distance_to_wp <= max(self.WAYPOINT_RADIUS + 1.0, 5.0):
+            return max(90, min(base, base - 10))
+        return max(95, min(170, base))
+
+    def _get_avoid_forward_speed(self) -> int:
+        base = int(self.DRIVE_SPEED)
+        if not self._adaptive_speed:
+            return max(85, min(base, 140))
+        return max(90, min(135, base - 10))
+
+    def _get_reverse_speed(self) -> int:
+        base = int(self.DRIVE_SPEED)
+        if not self._adaptive_speed:
+            return 90
+        return max(80, min(110, base - 25))
+
+    def _get_turn_speed(self, fast: bool) -> int:
+        if not self._adaptive_speed:
+            return self.ROTATION_SPEED_FAST if fast else self.ROTATION_SPEED_SLOW
+        base = int(self.DRIVE_SPEED)
+        if fast:
+            return max(140, min(180, base + 20))
+        return max(110, min(140, base))
+
+    def _run_safety_clearance(self) -> bool:
+        """Reverse slowly until the obstacle is at a safer distance."""
+        obstacle = self._read_obstacle()
+        dist_cm = self._extract_obstacle_distance(obstacle)
+        elapsed = time.time() - self._obstacle_phase_start
+
+        if 0 < dist_cm < self.SAFE_AVOID_DISTANCE_CM and elapsed < self.SAFE_REVERSE_TIMEOUT:
+            self._send_reverse(self._get_reverse_speed())
+            if self._clearance_notice_phase != self._obstacle_phase_start:
+                self._notification = {
+                    'level': 'warning',
+                    'msg': f'Obstacle too close ({dist_cm} cm) — backing to {self.SAFE_AVOID_DISTANCE_CM} cm',
+                }
+                self._clearance_notice_phase = self._obstacle_phase_start
+            return True
+
+        if 0 < dist_cm < self.SAFE_AVOID_DISTANCE_CM and elapsed >= self.SAFE_REVERSE_TIMEOUT:
+            logger.warning("Safe reverse timeout at %d cm — continuing with stop", dist_cm)
+
+        self._send_stop()
         return False
+
+    def _enter_obstacle_detected(self, skip_clearance: bool = False):
+        self._obstacle_phase = 'decision' if skip_clearance else 'safety'
+        self._obstacle_phase_start = time.time()
+        self._enter_state(NavState.OBSTACLE_DETECTED)
 
     # ================================================================
     #  HELPERS
@@ -844,6 +1050,8 @@ class NavController:
 
             if self._current_wp_index >= len(self._waypoints):
                 self._send_stop()
+                self._heading_lock_active = False
+                self._heading_lock_bearing = None
                 self._notification = {
                     'level': 'success',
                     'msg': 'All waypoints complete! Navigation finished.'

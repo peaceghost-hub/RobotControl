@@ -977,7 +977,7 @@ class RobotController:
                 # If NavController is actively driving, pause it so the user
                 # gets immediate control.  They can resume nav later.
                 direction = (payload or {}).get('direction', '').lower()
-                if direction not in ('', 'stop', 'brake', 'none'):
+                if direction not in ('', 'none'):
                     if self.nav_controller and self.nav_controller.is_active:
                         logger.info("Manual drive '%s' — pausing NavController (manual priority)",
                                     direction)
@@ -989,6 +989,11 @@ class RobotController:
                 success = self._handle_manual_speed(payload)
             elif command_type == 'AUTO_SPEED':
                 success = self._handle_auto_speed(payload)
+            elif command_type == 'AUTO_SPEED_MODE':
+                success = self._handle_auto_speed_mode(payload)
+            elif command_type == 'MANUAL_TARGET_START':
+                self._ai_resume_epoch += 1   # cancel stale AI resumes
+                success = self._handle_manual_target_start(payload)
             elif command_type == 'ENGAGE_WIRELESS':
                 engage = payload.get('engage', False)
                 if self.robot_link and hasattr(self.robot_link, 'engage_wireless_control'):
@@ -1177,9 +1182,42 @@ class RobotController:
         """Set autonomous navigation base speed (affects waypoint following)."""
         speed = int((payload or {}).get('value', 120))
         speed = max(60, min(255, speed))
-        if not hasattr(self.robot_link, 'set_auto_speed'):
+        applied = False
+        if self.nav_controller and hasattr(self.nav_controller, 'set_drive_speed'):
+            applied = bool(self.nav_controller.set_drive_speed(speed))
+        elif self.robot_link and hasattr(self.robot_link, 'set_auto_speed'):
+            applied = bool(self.robot_link.set_auto_speed(speed))
+        return applied
+
+    def _handle_auto_speed_mode(self, payload: dict) -> bool:
+        enabled = bool((payload or {}).get('enabled', False))
+        if not self.nav_controller or not hasattr(self.nav_controller, 'set_adaptive_speed'):
             return False
-        return bool(self.robot_link.set_auto_speed(speed))
+        return bool(self.nav_controller.set_adaptive_speed(enabled))
+
+    def _handle_manual_target_start(self, payload: dict) -> bool:
+        """Start heading-lock navigation to a single target coordinate."""
+        if not self.nav_controller or not hasattr(self.nav_controller, 'start_heading_lock_target'):
+            return False
+
+        try:
+            latitude = float((payload or {}).get('latitude'))
+            longitude = float((payload or {}).get('longitude'))
+        except (TypeError, ValueError):
+            logger.warning("MANUAL_TARGET_START rejected — invalid coordinates")
+            return False
+
+        with self._manual_drive_lock:
+            self._manual_drive_active = False
+            self._manual_drive_direction = 'stop'
+
+        try:
+            self._manual_drive_apply_once()
+        except Exception:
+            pass
+
+        logger.info("Starting heading-lock target navigation to %.6f, %.6f", latitude, longitude)
+        return bool(self.nav_controller.start_heading_lock_target(latitude, longitude))
 
     def _handle_waypoint_push(self) -> bool:
         """Load waypoints from dashboard DB into Pi nav controller (NOT Mega)."""
