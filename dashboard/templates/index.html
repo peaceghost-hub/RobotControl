@@ -66,7 +66,7 @@
                 </div>
                 <button id="toggle-layout-btn" class="btn btn-small" title="Toggle between fit-screen and scroll layout">📐 Fit Screen</button>
                 <button id="reset-layout-btn" class="btn btn-small" title="Reset overlay positions and sizes">♻ Reset layout</button>
-                <span class="toolbar-hint">Drag or resize windows. Use zoom to fit your screen.</span>
+                <span class="toolbar-hint">Drag split lines or use Alt + mouse wheel on a main panel. Use page zoom only for the whole dashboard.</span>
             </div>
         </div>
 
@@ -78,7 +78,7 @@
         <div class="dashboard-grid">
             
             <!-- Top Row: Camera Feed (Left) and GPS Map (Right) -->
-            <div class="panel camera-panel top-left">
+            <div class="panel camera-panel top-left" data-grid-panel="camera">
                 <div class="panel-header">
                     <h2>Live Camera Feed</h2>
                     <div class="camera-controls">
@@ -109,7 +109,7 @@
             </div>
 
             <!-- GPS Map Panel (Right of Camera) -->
-            <div class="panel map-panel top-right">
+            <div class="panel map-panel top-right" data-grid-panel="map">
                 <div class="panel-header">
                     <h2>Robot Location & Navigation</h2>
                     <div class="map-controls">
@@ -153,7 +153,7 @@
             </div>
 
             <!-- Automatic Control Panel (Bottom-left) -->
-            <div class="panel control-panel bottom-left">
+            <div class="panel control-panel bottom-left" data-grid-panel="control">
                 <div class="panel-header">
                     <h2> Automatic Control</h2>
                     <span id="control-mode-label" class="status-badge">AUTO</span>
@@ -215,7 +215,10 @@
                             <input type="text" id="manual-target-lon" placeholder="Target longitude">
                         </div>
                         <div id="manual-target-hint" class="control-help" style="display:none;">
-                            Align the robot yourself, then press Forward to drive to the target while keeping the current heading for re-acquire after obstacle avoidance.
+                            Align the robot yourself, then press Forward to drive to the target while keeping the current heading for re-acquire after obstacle avoidance. Return Home will use the saved departure point and the opposite heading.
+                        </div>
+                        <div id="manual-target-actions" class="manual-target-actions" style="display:none;">
+                            <button id="manual-target-return-home-btn" class="btn btn-outline" title="Return to the saved departure coordinates for the current heading-lock run">🏠 Return Home</button>
                         </div>
                         <button id="sound-buzzer-btn" class="btn btn-warning">🔊 Sound Buzzer</button>
                     </div>
@@ -227,7 +230,7 @@
             </div>
 
             <!-- Compass & Navigation Status Panel (Bottom-right) -->
-            <div class="panel compass-panel bottom-right">
+            <div class="panel compass-panel bottom-right" data-grid-panel="compass">
                 <div class="panel-header">
                     <h2>🧭 Compass & Navigation</h2>
                     <span id="nav-state-pill" class="status-badge subtle">IDLE</span>
@@ -345,6 +348,8 @@
 
             <!-- Close grid containers -->
         </div>
+        <div id="grid-splitter-vertical" class="grid-splitter vertical" title="Drag to resize left and right panels"></div>
+        <div id="grid-splitter-horizontal" class="grid-splitter horizontal" title="Drag to resize top and bottom panels"></div>
         </div>
 
         </div>

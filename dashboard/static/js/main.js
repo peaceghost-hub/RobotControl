@@ -60,6 +60,7 @@ const state = {
     autoSpeed: 120,
     adaptiveAutoSpeed: false,
     manualForwardMode: 'direct',
+    manualTargetHomeAvailable: false,
     manualOverride: false,
     navigationActive: false,
     controlMode: 'AUTO',
@@ -94,6 +95,7 @@ function initDashboard() {
     initDeviceSelector();
     initOverlaySystem();
     initZoomControls();
+    initMainPanelLayoutControls();
 
     // Connect to WebSocket
     connectWebSocket();
@@ -1205,6 +1207,37 @@ async function startManualTargetNavigation() {
     }
 
     state.manualOverride = false;
+    state.manualTargetHomeAvailable = false;
+    state.navigationActive = true;
+    updateControlIndicators();
+    if (typeof window._updateAiBaseNav === 'function') {
+        window._updateAiBaseNav('waypoint');
+    }
+}
+
+async function returnManualTargetHome() {
+    if (state.backup.active) {
+        addLog('warning', 'Manual target return-home unavailable while backup control is active');
+        return;
+    }
+    if (!state.manualTargetHomeAvailable) {
+        addLog('warning', 'No saved departure point is available for heading-lock return home yet');
+        return;
+    }
+    if (!confirm('Return to the saved departure point for this heading-lock run?')) return;
+
+    if (socket && socket.connected) {
+        socket.emit('instant_command', {
+            command: 'MANUAL_TARGET_RETURN_HOME',
+            payload: {},
+            device_id: state.deviceId
+        });
+        addLog('info', 'Instant command: MANUAL_TARGET_RETURN_HOME');
+    } else {
+        await sendRobotCommand('MANUAL_TARGET_RETURN_HOME');
+    }
+
+    state.manualOverride = false;
     state.navigationActive = true;
     updateControlIndicators();
     if (typeof window._updateAiBaseNav === 'function') {
@@ -1327,10 +1360,13 @@ function syncManualForwardModeUI() {
     const select = document.getElementById('manual-forward-mode');
     const coords = document.getElementById('manual-target-coords');
     const hint = document.getElementById('manual-target-hint');
+    const actions = document.getElementById('manual-target-actions');
     const mode = select ? select.value : state.manualForwardMode;
     state.manualForwardMode = mode || 'direct';
     if (coords) coords.style.display = state.manualForwardMode === 'target' ? '' : 'none';
     if (hint) hint.style.display = state.manualForwardMode === 'target' ? '' : 'none';
+    if (actions) actions.style.display = state.manualForwardMode === 'target' ? '' : 'none';
+    updateControlIndicators();
 }
 
 function updateAutoSpeedMode(enabled) {
@@ -1790,6 +1826,11 @@ function updateControlIndicators() {
         releaseBtn.disabled = !state.manualOverride || state.backup.active;
     }
 
+    const manualTargetReturnHomeBtn = document.getElementById('manual-target-return-home-btn');
+    if (manualTargetReturnHomeBtn) {
+        manualTargetReturnHomeBtn.disabled = state.backup.active || !state.manualTargetHomeAvailable;
+    }
+
     const navButtonIds = ['nav-start-btn', 'nav-pause-btn', 'nav-resume-btn', 'nav-stop-btn', 'send-waypoints-btn', 'nav-return-home-btn'];
     navButtonIds.forEach(id => {
         const button = document.getElementById(id);
@@ -1919,6 +1960,9 @@ function setupEventListeners() {
             toggleLayoutBtn.textContent = '📐 Scroll';
             // Leaflet needs a size recalc after switching
             setTimeout(() => { if (window.map) window.map.invalidateSize(); }, 100);
+            if (typeof window.__refreshMainGridLayout === 'function') {
+                setTimeout(window.__refreshMainGridLayout, 120);
+            }
         }
         toggleLayoutBtn.addEventListener('click', () => {
             const isScroll = document.body.classList.toggle('layout-scroll');
@@ -1927,6 +1971,9 @@ function setupEventListeners() {
             // Leaflet map must recalculate its container size
             setTimeout(() => {
                 if (window.map) window.map.invalidateSize();
+                if (typeof window.__refreshMainGridLayout === 'function') {
+                    window.__refreshMainGridLayout();
+                }
             }, 150);
         });
     }
@@ -2104,6 +2151,11 @@ function setupEventListeners() {
             syncManualForwardModeUI();
         });
         syncManualForwardModeUI();
+    }
+
+    const manualTargetReturnHomeBtn = document.getElementById('manual-target-return-home-btn');
+    if (manualTargetReturnHomeBtn) {
+        manualTargetReturnHomeBtn.addEventListener('click', returnManualTargetHome);
     }
 
     const soundBuzzerBtn = document.getElementById('sound-buzzer-btn');
@@ -2732,6 +2784,9 @@ function updateNavStatusUI(nav) {
         compassState.magneticHeading = Number(nav.magnetic_heading);
         compassState.hasNavHeading = true;
     }
+    if (nav.heading_lock_home_available !== undefined) {
+        state.manualTargetHomeAvailable = Boolean(nav.heading_lock_home_available);
+    }
     if (nav.target_bearing !== undefined) {
         compassState.targetBearing = nav.target_bearing !== null ? Number(nav.target_bearing) : null;
     }
@@ -3219,6 +3274,190 @@ window.toggleOverlay = toggleOverlay;
         });
     });
 })();
+
+function initMainPanelLayoutControls() {
+    const wrapper = document.getElementById('dashboard-scale');
+    const grid = wrapper ? wrapper.querySelector('.dashboard-grid') : null;
+    const verticalSplitter = document.getElementById('grid-splitter-vertical');
+    const horizontalSplitter = document.getElementById('grid-splitter-horizontal');
+    if (!wrapper || !grid || !verticalSplitter || !horizontalSplitter) {
+        return;
+    }
+
+    const LAYOUT_KEY = 'dashboardLayout.v1';
+    const MIN_RATIO = 0.28;
+    const MAX_RATIO = 0.72;
+    const PANEL_STEP = 0.04;
+    const presets = {
+        camera:  { colRatio: 0.64, rowRatio: 0.64 },
+        map:     { colRatio: 0.36, rowRatio: 0.64 },
+        control: { colRatio: 0.64, rowRatio: 0.36 },
+        compass: { colRatio: 0.36, rowRatio: 0.36 }
+    };
+    const vectors = {
+        camera:  { col: 1, row: 1 },
+        map:     { col: -1, row: 1 },
+        control: { col: 1, row: -1 },
+        compass: { col: -1, row: -1 }
+    };
+    const gridState = {
+        colRatio: 0.5,
+        rowRatio: 0.5
+    };
+    let dragAxis = null;
+    let refreshTimer = null;
+
+    function clamp(value, min, max) {
+        return Math.min(max, Math.max(min, value));
+    }
+
+    function loadSavedLayout() {
+        try {
+            const saved = JSON.parse(localStorage.getItem(LAYOUT_KEY) || '{}');
+            const mainGrid = saved.mainGrid || {};
+            if (typeof mainGrid.colRatio === 'number') {
+                gridState.colRatio = clamp(mainGrid.colRatio, MIN_RATIO, MAX_RATIO);
+            }
+            if (typeof mainGrid.rowRatio === 'number') {
+                gridState.rowRatio = clamp(mainGrid.rowRatio, MIN_RATIO, MAX_RATIO);
+            }
+        } catch (error) {
+            console.warn('Failed to load main-grid layout', error);
+        }
+    }
+
+    function persistLayout() {
+        try {
+            const saved = JSON.parse(localStorage.getItem(LAYOUT_KEY) || '{}');
+            saved.mainGrid = {
+                colRatio: gridState.colRatio,
+                rowRatio: gridState.rowRatio
+            };
+            localStorage.setItem(LAYOUT_KEY, JSON.stringify(saved));
+        } catch (error) {
+            console.warn('Failed to save main-grid layout', error);
+        }
+    }
+
+    function schedulePanelRefresh() {
+        if (refreshTimer) clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(() => {
+            if (window.map) window.map.invalidateSize();
+            updateDualCompass();
+        }, 70);
+    }
+
+    function isStackedLayout() {
+        return window.matchMedia('(max-width: 768px)').matches || document.body.classList.contains('layout-scroll');
+    }
+
+    function applyLayout() {
+        if (isStackedLayout()) {
+            verticalSplitter.style.display = 'none';
+            horizontalSplitter.style.display = 'none';
+            grid.style.removeProperty('--grid-col-left');
+            grid.style.removeProperty('--grid-col-right');
+            grid.style.removeProperty('--grid-row-top');
+            grid.style.removeProperty('--grid-row-bottom');
+            schedulePanelRefresh();
+            return;
+        }
+
+        const left = clamp(gridState.colRatio, MIN_RATIO, MAX_RATIO);
+        const right = 1 - left;
+        const top = clamp(gridState.rowRatio, MIN_RATIO, MAX_RATIO);
+        const bottom = 1 - top;
+
+        grid.style.setProperty('--grid-col-left', `${left.toFixed(4)}fr`);
+        grid.style.setProperty('--grid-col-right', `${right.toFixed(4)}fr`);
+        grid.style.setProperty('--grid-row-top', `${top.toFixed(4)}fr`);
+        grid.style.setProperty('--grid-row-bottom', `${bottom.toFixed(4)}fr`);
+
+        verticalSplitter.style.display = '';
+        horizontalSplitter.style.display = '';
+        verticalSplitter.style.left = `${(left * 100).toFixed(2)}%`;
+        horizontalSplitter.style.top = `${(top * 100).toFixed(2)}%`;
+        schedulePanelRefresh();
+    }
+
+    function nudgePanel(panelId, delta) {
+        const vector = vectors[panelId];
+        if (!vector) return;
+        gridState.colRatio = clamp(gridState.colRatio + (vector.col * delta), MIN_RATIO, MAX_RATIO);
+        gridState.rowRatio = clamp(gridState.rowRatio + (vector.row * delta), MIN_RATIO, MAX_RATIO);
+        applyLayout();
+        persistLayout();
+    }
+
+    function focusPanel(panelId) {
+        const preset = presets[panelId];
+        if (!preset) return;
+        const alreadyFocused = Math.abs(gridState.colRatio - preset.colRatio) < 0.02 &&
+            Math.abs(gridState.rowRatio - preset.rowRatio) < 0.02;
+        if (alreadyFocused) {
+            gridState.colRatio = 0.5;
+            gridState.rowRatio = 0.5;
+        } else {
+            gridState.colRatio = preset.colRatio;
+            gridState.rowRatio = preset.rowRatio;
+        }
+        applyLayout();
+        persistLayout();
+    }
+
+    function beginDrag(axis, event) {
+        if (isStackedLayout()) return;
+        dragAxis = axis;
+        document.body.classList.add('dragging-grid-splitter');
+        event.preventDefault();
+    }
+
+    verticalSplitter.addEventListener('mousedown', event => beginDrag('col', event));
+    horizontalSplitter.addEventListener('mousedown', event => beginDrag('row', event));
+
+    document.addEventListener('mousemove', event => {
+        if (!dragAxis) return;
+        const rect = wrapper.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        if (dragAxis === 'col') {
+            gridState.colRatio = clamp((event.clientX - rect.left) / rect.width, MIN_RATIO, MAX_RATIO);
+        } else {
+            gridState.rowRatio = clamp((event.clientY - rect.top) / rect.height, MIN_RATIO, MAX_RATIO);
+        }
+        applyLayout();
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (!dragAxis) return;
+        dragAxis = null;
+        document.body.classList.remove('dragging-grid-splitter');
+        persistLayout();
+    });
+
+    document.querySelectorAll('[data-grid-panel]').forEach(panel => {
+        const panelId = panel.getAttribute('data-grid-panel');
+        if (!panelId) return;
+        panel.title = 'Alt + mouse wheel to resize this panel';
+        panel.addEventListener('wheel', event => {
+            if (!event.altKey) return;
+            event.preventDefault();
+            nudgePanel(panelId, event.deltaY < 0 ? PANEL_STEP : -PANEL_STEP);
+        }, { passive: false });
+
+        const header = panel.querySelector('.panel-header');
+        if (header) {
+            header.title = 'Double-click to focus this panel';
+            header.addEventListener('dblclick', () => {
+                focusPanel(panelId);
+            });
+        }
+    });
+
+    loadSavedLayout();
+    applyLayout();
+    window.addEventListener('resize', applyLayout);
+    window.__refreshMainGridLayout = applyLayout;
+}
 
 function initZoomControls() {
     const outBtn = document.getElementById('zoom-out-btn');

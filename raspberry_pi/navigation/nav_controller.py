@@ -110,6 +110,8 @@ class NavController:
         self._current_wp_index = 0
         self._heading_lock_active = False
         self._heading_lock_bearing: Optional[float] = None
+        self._heading_lock_home: Optional[Dict[str, Any]] = None
+        self._heading_lock_outbound_bearing: Optional[float] = None
 
         # State
         self._state = NavState.IDLE
@@ -236,6 +238,7 @@ class NavController:
                 'adaptive_speed': self._adaptive_speed,
                 'base_drive_speed': int(self.DRIVE_SPEED),
                 'heading_lock_bearing': round(self._heading_lock_bearing, 1) if self._heading_lock_active and self._heading_lock_bearing is not None else None,
+                'heading_lock_home_available': self._heading_lock_home is not None,
                 'safe_avoid_distance_cm': self.SAFE_AVOID_DISTANCE_CM,
                 'last_obstacle_distance_cm': self._last_obstacle_distance_cm if self._last_obstacle_distance_cm > 0 else None,
             }
@@ -246,6 +249,13 @@ class NavController:
         Takes the full waypoint list (in original order), reverses it,
         and begins navigation so the robot retraces its path.
         """
+        with self._lock:
+            heading_lock_home_available = self._heading_lock_home is not None and (
+                self._heading_lock_active or len(self._waypoints) <= 1
+            )
+        if heading_lock_home_available:
+            return self.return_to_heading_lock_home()
+
         with self._lock:
             if not self._waypoints:
                 logger.warning("Cannot return home — no waypoints")
@@ -277,6 +287,8 @@ class NavController:
             self._completed_waypoints = []
             self._heading_lock_active = False
             self._heading_lock_bearing = None
+            self._heading_lock_home = None
+            self._heading_lock_outbound_bearing = None
         logger.info("Loaded %d waypoints", len(waypoints))
 
     def start_heading_lock_target(self, latitude: float, longitude: float):
@@ -297,6 +309,21 @@ class NavController:
             logger.warning("Heading-lock target rejected — invalid coordinates")
             return False
 
+        home_wp = None
+        gps = self._get_gps()
+        if gps and gps.get('latitude') is not None and gps.get('longitude') is not None:
+            try:
+                home_wp = {
+                    'latitude': float(gps['latitude']),
+                    'longitude': float(gps['longitude']),
+                    'id': 'heading_lock_home',
+                    'description': 'Heading-lock departure point',
+                }
+            except (TypeError, ValueError):
+                home_wp = None
+
+        outbound_bearing = float(heading or 0.0) % 360.0
+
         with self._lock:
             self._waypoints = [{
                 'latitude': lat,
@@ -309,13 +336,16 @@ class NavController:
             self._avoid_attempts = 0
             self._avoid_direction = 'left'
             self._heading_lock_active = True
-            self._heading_lock_bearing = float(heading or 0.0) % 360.0
+            self._heading_lock_bearing = outbound_bearing
+            self._heading_lock_outbound_bearing = outbound_bearing
+            self._heading_lock_home = home_wp
 
         self._running = True
         self._send_stop()
         self._notification = {
             'level': 'info',
-            'msg': f'Heading-lock target started — holding {self._heading_lock_bearing:.1f}°',
+            'msg': f'Heading-lock target started — holding {self._heading_lock_bearing:.1f}°'
+                   + (' (home saved)' if home_wp else ' (home unavailable)'),
         }
         self._enter_state(NavState.NAVIGATING)
         if not self._thread or not self._thread.is_alive():
@@ -323,6 +353,45 @@ class NavController:
             self._thread.start()
         logger.info("Heading-lock navigation started to (%.6f, %.6f) on %.1f°",
                     lat, lon, self._heading_lock_bearing)
+        return True
+
+    def return_to_heading_lock_home(self):
+        """Return to the saved departure point for the current heading-lock run."""
+        with self._lock:
+            if not self._heading_lock_home:
+                logger.warning("Cannot return to heading-lock home — no saved departure point")
+                return False
+            home_wp = dict(self._heading_lock_home)
+            outbound_bearing = self._heading_lock_outbound_bearing
+            return_bearing = ((outbound_bearing or 0.0) + 180.0) % 360.0 if outbound_bearing is not None else None
+
+            self._waypoints = [home_wp]
+            self._current_wp_index = 0
+            self._completed_waypoints = []
+            self._avoid_attempts = 0
+            self._avoid_direction = 'left'
+            self._heading_lock_active = return_bearing is not None
+            self._heading_lock_bearing = return_bearing
+
+        self._running = True
+        self._send_stop()
+        if return_bearing is not None:
+            self._notification = {
+                'level': 'info',
+                'msg': f'Returning to saved departure point — acquiring {return_bearing:.1f}°',
+            }
+        else:
+            self._notification = {
+                'level': 'info',
+                'msg': 'Returning to saved departure point — preparing...',
+            }
+        self._enter_state(NavState.PREPARING)
+        if not self._thread or not self._thread.is_alive():
+            self._thread = threading.Thread(target=self._nav_loop, daemon=True)
+            self._thread.start()
+        logger.info("Heading-lock return-home started to (%.6f, %.6f)%s",
+                    home_wp['latitude'], home_wp['longitude'],
+                    f" on {return_bearing:.1f}°" if return_bearing is not None else "")
         return True
 
     def set_drive_speed(self, speed: int) -> bool:
@@ -347,6 +416,8 @@ class NavController:
             self._avoid_direction = 'left'
             self._heading_lock_active = False
             self._heading_lock_bearing = None
+            self._heading_lock_home = None
+            self._heading_lock_outbound_bearing = None
         self._running = True
         self._send_stop()
         self._notification = {'level': 'info', 'msg': 'Navigation started — preparing...'}

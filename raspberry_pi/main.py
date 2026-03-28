@@ -994,6 +994,9 @@ class RobotController:
             elif command_type == 'MANUAL_TARGET_START':
                 self._ai_resume_epoch += 1   # cancel stale AI resumes
                 success = self._handle_manual_target_start(payload)
+            elif command_type == 'MANUAL_TARGET_RETURN_HOME':
+                self._ai_resume_epoch += 1   # cancel stale AI resumes
+                success = self._handle_manual_target_return_home(payload)
             elif command_type == 'ENGAGE_WIRELESS':
                 engage = payload.get('engage', False)
                 if self.robot_link and hasattr(self.robot_link, 'engage_wireless_control'):
@@ -1195,6 +1198,16 @@ class RobotController:
             return False
         return bool(self.nav_controller.set_adaptive_speed(enabled))
 
+    def _stop_latched_manual_drive(self) -> None:
+        with self._manual_drive_lock:
+            self._manual_drive_active = False
+            self._manual_drive_direction = 'stop'
+
+        try:
+            self._manual_drive_apply_once()
+        except Exception:
+            pass
+
     def _handle_manual_target_start(self, payload: dict) -> bool:
         """Start heading-lock navigation to a single target coordinate."""
         if not self.nav_controller or not hasattr(self.nav_controller, 'start_heading_lock_target'):
@@ -1207,17 +1220,19 @@ class RobotController:
             logger.warning("MANUAL_TARGET_START rejected — invalid coordinates")
             return False
 
-        with self._manual_drive_lock:
-            self._manual_drive_active = False
-            self._manual_drive_direction = 'stop'
-
-        try:
-            self._manual_drive_apply_once()
-        except Exception:
-            pass
+        self._stop_latched_manual_drive()
 
         logger.info("Starting heading-lock target navigation to %.6f, %.6f", latitude, longitude)
         return bool(self.nav_controller.start_heading_lock_target(latitude, longitude))
+
+    def _handle_manual_target_return_home(self, payload: dict) -> bool:
+        """Return to the saved departure point for the current heading-lock run."""
+        if not self.nav_controller or not hasattr(self.nav_controller, 'return_to_heading_lock_home'):
+            return False
+
+        self._stop_latched_manual_drive()
+        logger.info("Starting heading-lock return-home navigation")
+        return bool(self.nav_controller.return_to_heading_lock_home())
 
     def _handle_waypoint_push(self) -> bool:
         """Load waypoints from dashboard DB into Pi nav controller (NOT Mega)."""

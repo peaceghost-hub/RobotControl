@@ -163,8 +163,8 @@ body {
 /* Dashboard Grid — all 4 panels visible in one viewport */
 .dashboard-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, var(--grid-col-left, 1fr)) minmax(0, var(--grid-col-right, 1fr));
+    grid-template-rows: minmax(0, var(--grid-row-top, 1fr)) minmax(0, var(--grid-row-bottom, 1fr));
     gap: 12px;
     height: calc(100vh - 160px);   /* fill viewport minus header+toolbar */
 }
@@ -785,6 +785,13 @@ tr:hover {
     margin-top: 10px;
 }
 
+.manual-target-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+}
+
 .btn-outline {
     background: transparent;
     border: 2px solid var(--primary-color);
@@ -920,9 +927,46 @@ tr:hover {
 }
 
 #dashboard-scale {
+    position: relative;
     transform-origin: 0 0;
     transition: transform 0.2s ease;
     width: 100%;
+}
+
+.grid-splitter {
+    position: absolute;
+    z-index: 20;
+    background: rgba(255, 255, 255, 0.72);
+    border: 1px solid rgba(37, 99, 235, 0.35);
+    border-radius: 999px;
+    box-shadow: 0 4px 14px rgba(17, 24, 39, 0.16);
+    transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.grid-splitter:hover {
+    background: rgba(255, 255, 255, 0.95);
+    box-shadow: 0 6px 18px rgba(17, 24, 39, 0.24);
+}
+
+.grid-splitter.vertical {
+    top: 18px;
+    bottom: 18px;
+    width: 12px;
+    margin-left: -6px;
+    cursor: col-resize;
+}
+
+.grid-splitter.horizontal {
+    left: 18px;
+    right: 18px;
+    height: 12px;
+    margin-top: -6px;
+    cursor: row-resize;
+}
+
+body.dragging-grid-splitter,
+body.dragging-grid-splitter * {
+    user-select: none;
 }
 
 /* Camera & Map containers fill available flex space */
@@ -950,6 +994,10 @@ body.layout-scroll .map-container {
 
 body.layout-scroll .panel-content {
     overflow: visible;
+}
+
+body.layout-scroll .grid-splitter {
+    display: none;
 }
 
 /* Toast Notifications */
@@ -1028,6 +1076,9 @@ body.layout-scroll .panel-content {
         grid-template-columns: 1fr;
         grid-template-rows: auto;
         height: auto;
+    }
+    .grid-splitter {
+        display: none;
     }
     .dashboard-grid > * {
         grid-column: 1 !important;
