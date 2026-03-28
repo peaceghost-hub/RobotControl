@@ -934,6 +934,7 @@ class RobotController:
                 # Pi-side navigation: start nav controller (NOT Mega)
                 self._ai_resume_epoch += 1   # cancel stale AI resumes
                 if self.nav_controller:
+                    self._handoff_to_navigation()
                     success = self.nav_controller.start()
                 else:
                     logger.warning("NavController not available")
@@ -948,6 +949,7 @@ class RobotController:
             elif command_type == 'NAV_RESUME':
                 self._ai_resume_epoch += 1   # cancel stale AI resumes
                 if self.nav_controller:
+                    self._handoff_to_navigation()
                     self.nav_controller.resume()
                     success = True
                 else:
@@ -1010,6 +1012,7 @@ class RobotController:
             elif command_type == 'NAV_RETURN_HOME':
                 self._ai_resume_epoch += 1   # cancel stale AI resumes
                 if self.nav_controller:
+                    self._handoff_to_navigation()
                     success = self.nav_controller.return_home()
                 else:
                     success = False
@@ -1169,9 +1172,21 @@ class RobotController:
 
     def _handle_manual_override(self, payload: dict) -> bool:
         mode = (payload or {}).get('mode', 'hold')
+        logger.info(f"Manual override -> {mode}")
+        normalized = str(mode or 'hold').strip().lower()
+
+        if normalized in ('release', 'off', 'disable', 'disabled', 'auto'):
+            self._stop_latched_manual_drive(release_override=True)
+            return True
+
+        if normalized in ('hold', 'on', 'enable', 'enabled'):
+            if self.nav_controller and self.nav_controller.is_active:
+                logger.info("Manual override requested — pausing NavController")
+                self._ai_resume_epoch += 1
+                self.nav_controller.pause()
+
         if not hasattr(self.robot_link, 'manual_override'):
             return False
-        logger.info(f"Manual override -> {mode}")
         return self.robot_link.manual_override(mode)
 
     def _handle_manual_speed(self, payload: dict) -> bool:
@@ -1198,7 +1213,19 @@ class RobotController:
             return False
         return bool(self.nav_controller.set_adaptive_speed(enabled))
 
-    def _stop_latched_manual_drive(self) -> None:
+    def _release_manual_override(self) -> None:
+        if not self.robot_link:
+            return
+
+        try:
+            if hasattr(self.robot_link, 'release_manual_override_only'):
+                self.robot_link.release_manual_override_only()
+            elif hasattr(self.robot_link, 'send_manual_control'):
+                self.robot_link.send_manual_control(0, 0, joystick_active=False)
+        except Exception as exc:
+            logger.debug("Manual override release failed: %s", exc)
+
+    def _stop_latched_manual_drive(self, release_override: bool = False) -> None:
         with self._manual_drive_lock:
             self._manual_drive_active = False
             self._manual_drive_direction = 'stop'
@@ -1207,6 +1234,13 @@ class RobotController:
             self._manual_drive_apply_once()
         except Exception:
             pass
+
+        if release_override:
+            self._release_manual_override()
+
+    def _handoff_to_navigation(self) -> None:
+        """Ensure manual latching is fully released before Pi nav takes over."""
+        self._stop_latched_manual_drive(release_override=True)
 
     def _handle_manual_target_start(self, payload: dict) -> bool:
         """Start heading-lock navigation to a single target coordinate."""
@@ -1220,7 +1254,7 @@ class RobotController:
             logger.warning("MANUAL_TARGET_START rejected — invalid coordinates")
             return False
 
-        self._stop_latched_manual_drive()
+        self._handoff_to_navigation()
 
         logger.info("Starting heading-lock target navigation to %.6f, %.6f", latitude, longitude)
         return bool(self.nav_controller.start_heading_lock_target(latitude, longitude))
@@ -1230,7 +1264,7 @@ class RobotController:
         if not self.nav_controller or not hasattr(self.nav_controller, 'return_to_heading_lock_home'):
             return False
 
-        self._stop_latched_manual_drive()
+        self._handoff_to_navigation()
         logger.info("Starting heading-lock return-home navigation")
         return bool(self.nav_controller.return_to_heading_lock_home())
 

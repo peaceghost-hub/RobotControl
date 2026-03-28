@@ -329,6 +329,14 @@ class I2CComm:
 
         return False
 
+    def release_manual_override_only(self) -> bool:
+        """Release manual override without resuming Mega-side navigation.
+
+        Pi-side navigation owns the higher-level state machine now, so handoff
+        back to the Pi should not implicitly resume any legacy Mega navigation.
+        """
+        return self.send_manual_control(0, 0, joystick_active=False)
+
     def manual_drive(self, direction: str, speed: int = 180) -> bool:
         """Drive robot in a direction using differential motor outputs.
 

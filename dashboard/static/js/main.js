@@ -1125,6 +1125,9 @@ async function sendNavigationCommand(action) {
         await sendRobotCommand(entry.cmd);
     }
 
+    if (action === 'start' || action === 'resume') {
+        state.manualOverride = false;
+    }
     state.navigationActive = entry.active;
     updateControlIndicators();
 
@@ -1145,6 +1148,7 @@ async function sendManualCommand(direction) {
         return;
     }
     state.manualOverride = true;
+    state.navigationActive = false;
     updateControlIndicators();
 
     const payload = {
@@ -1258,11 +1262,13 @@ async function releaseManualMode() {
             device_id: state.deviceId
         });
         state.manualOverride = false;
+        state.navigationActive = false;
         updateControlIndicators();
     } else {
         const success = await sendRobotCommand('MANUAL_OVERRIDE', { mode: 'release' });
         if (success) {
             state.manualOverride = false;
+            state.navigationActive = false;
             updateControlIndicators();
         }
     }
@@ -1281,11 +1287,13 @@ async function requestManualMode() {
             device_id: state.deviceId
         });
         state.manualOverride = true;
+        state.navigationActive = false;
         updateControlIndicators();
     } else {
         const success = await sendRobotCommand('MANUAL_OVERRIDE', { mode: 'hold' });
         if (success) {
             state.manualOverride = true;
+            state.navigationActive = false;
             updateControlIndicators();
         }
     }
@@ -2111,6 +2119,7 @@ function setupEventListeners() {
                         device_id: state.deviceId
                     });
                     state.manualOverride = true;
+                    state.navigationActive = false;
                     updateControlIndicators();
                 }
                 await sendManualCommand(direction);
