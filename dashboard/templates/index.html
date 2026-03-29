@@ -588,6 +588,32 @@
                         <textarea id="ai-fd-task" class="ai-fd-task" rows="2"
                                   placeholder="Describe the mission… e.g. 'Drive forward until you see a chair, then turn left'"></textarea>
                     </div>
+                    <details class="ai-mission-guide">
+                        <summary>Mission Writing Guide</summary>
+                        <div class="ai-mission-guide-body">
+                            <div class="ai-mission-guide-section">
+                                <strong>Works Best</strong>
+                                <ul>
+                                    <li>Drive forward until a door or doorway is clearly visible, then stop immediately.</li>
+                                    <li>Move forward down the corridor until you are facing the doorway ahead, then stop.</li>
+                                    <li>Turn right until the open doorway is centered in the camera, then stop.</li>
+                                    <li>Drive forward until you see a chair, then stop.</li>
+                                </ul>
+                            </div>
+                            <div class="ai-mission-guide-section">
+                                <strong>Avoid These</strong>
+                                <ul>
+                                    <li>Go to the next room.</li>
+                                    <li>Move a little further and stop near it.</li>
+                                    <li>Take the second left after the first door.</li>
+                                    <li>Find the best path and stop at the correct place.</li>
+                                </ul>
+                            </div>
+                            <div class="ai-mission-guide-note">
+                                Full Drive works best with one visible goal and one clear stop condition. It follows the dashboard Auto Speed setting while it is driving.
+                            </div>
+                        </div>
+                    </details>
                     <div class="ai-control-row ai-fd-controls">
                         <button id="ai-fd-start" class="btn btn-small btn-success" title="Start Full Drive">▶ Start</button>
                         <button id="ai-fd-pause" class="btn btn-small btn-warning" title="Pause Full Drive" style="display:none;">⏸ Pause</button>
@@ -597,7 +623,7 @@
                     </div>
                     <div id="ai-fd-log" class="ai-fd-log"></div>
                     <div class="ai-info-hint" style="margin-top:0;">
-                        🤖 Full Drive: AI IS the driver. Describe a task and the AI navigates autonomously. Manual controls always override.
+                        🤖 Full Drive: AI IS the driver. Describe a task and the AI navigates autonomously. Manual controls always override, and Full Drive uses the dashboard Auto Speed control.
                     </div>
                 </div>
 

@@ -84,7 +84,7 @@ class NavController:
     NAV_GRACE_PERIOD     = 2.0    # seconds — skip drift check at start of NAVIGATING
     HEADING_ACQUIRE_TIMEOUT = 30.0  # seconds — give up if can't acquire
     HEADING_HOLD_TIME    = 10.0   # seconds — countdown before forward drive
-    AI_ADVICE_TIMEOUT    = 30.0   # seconds — wait for AI obstacle advice before fallback
+    AI_ADVICE_TIMEOUT    = 10.0   # seconds — wait for AI obstacle advice before fallback
     PREPARE_TIME         = 3.0    # seconds — pause before acquiring heading
     WAYPOINT_HOLD_TIME   = 3.0    # seconds — pause after waypoint reached
     NAV_LOOP_HZ         = 10     # control loop frequency

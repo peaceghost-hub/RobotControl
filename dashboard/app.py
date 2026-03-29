@@ -226,6 +226,22 @@ if hasattr(ai_vision, '_drive_command_fn'):
                     cmd_data.get('payload', {}).get('direction', '?'), seq)
     ai_vision._drive_command_fn = _ai_push_drive
 
+def _queue_instant_command(command_type: str, payload: dict | None = None, device_id: str | None = None) -> int:
+    """Append a low-latency command for the Pi to pick up."""
+    global _instant_command_seq
+    with thread_lock:
+        _instant_command_seq += 1
+        seq = _instant_command_seq
+        _instant_queue.append({
+            'command_type': command_type,
+            'payload': payload or {},
+            'device_id': device_id or app.config.get('DEFAULT_DEVICE_ID', 'robot_01'),
+            'seq': seq,
+            'timestamp': datetime.utcnow().isoformat()
+        })
+    logger.info("Instant command queued: %s seq=%d", command_type, seq)
+    return seq
+
 # Helper to set latest camera frame (bytes)
 def _store_camera_frame_bytes(frame_bytes: bytes, timestamp: Optional[str] = None, device_id: Optional[str] = None):
     """Store raw jpeg bytes and precompute base64 for backward compatibility"""
@@ -1727,6 +1743,12 @@ def ai_full_drive_start():
         return jsonify({'status': 'error', 'message': 'No task provided'}), 400
     result = ai_vision.start_full_drive(task)
     if result.get('ok'):
+        # Full Drive must own motion. Stop any active waypoint nav path first.
+        try:
+            _queue_instant_command('NAV_STOP', {}, data.get('device_id') or app.config.get('DEFAULT_DEVICE_ID', 'robot_01'))
+            ai_vision.set_base_nav('none')
+        except Exception:
+            logger.debug("Could not queue NAV_STOP for Full Drive start", exc_info=True)
         return jsonify({'status': 'ok', **result})
     return jsonify({'status': 'error', 'message': result.get('error', 'Unknown error')}), 400
 
@@ -1842,10 +1864,10 @@ def handle_instant_command(data):
     # ── Manual controls always override Full Drive ────────────────
     # Any manual drive or nav command auto-pauses Full Drive so the
     # user has instant priority.  They can resume via the UI.
-    if cmd == 'MANUAL_DRIVE' and hasattr(ai_vision, '_fd_active') and ai_vision._fd_active:
+    if cmd in ('MANUAL_DRIVE', 'NAV_START', 'NAV_RESUME', 'NAV_STOP', 'NAV_PAUSE', 'NAV_RETURN_HOME') and hasattr(ai_vision, '_fd_active') and ai_vision._fd_active:
         if not ai_vision._fd_paused:
             ai_vision.pause_full_drive()
-            logger.info("Full Drive auto-paused — manual override")
+            logger.info("Full Drive auto-paused — control override (%s)", cmd)
 
 
 # ============= DATABASE INITIALIZATION =============

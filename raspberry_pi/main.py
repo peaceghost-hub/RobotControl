@@ -1061,15 +1061,16 @@ class RobotController:
                                      ai_safety, nav_state_name)
                     success = True
                 else:
-                    # Manual driving — execute direction directly
+                    # Direct AI driving — execute using the current autonomous speed
+                    ai_speed = self._get_ai_drive_speed(payload)
                     if ai_dir == 'STOP':
-                        success = self._handle_manual_drive({'direction': 'stop'})
+                        success = self._handle_manual_drive({'direction': 'stop', 'speed': ai_speed})
                     elif ai_dir == 'FORWARD':
-                        success = self._handle_manual_drive({'direction': 'forward'})
+                        success = self._handle_manual_drive({'direction': 'forward', 'speed': ai_speed})
                     elif ai_dir == 'LEFT':
-                        success = self._handle_manual_drive({'direction': 'left'})
+                        success = self._handle_manual_drive({'direction': 'left', 'speed': ai_speed})
                     elif ai_dir == 'RIGHT':
-                        success = self._handle_manual_drive({'direction': 'right'})
+                        success = self._handle_manual_drive({'direction': 'right', 'speed': ai_speed})
                     else:
                         logger.warning("Unknown AI_DRIVE direction: %s", ai_dir)
                         success = False
@@ -1140,6 +1141,24 @@ class RobotController:
         except Exception as exc:
             logger.warning("Manual drive apply failed: %s", exc)
             return False
+
+    def _get_ai_drive_speed(self, payload: dict) -> int:
+        requested = (payload or {}).get('speed')
+        if requested is not None:
+            try:
+                return max(60, min(255, int(requested)))
+            except (TypeError, ValueError):
+                logger.debug("Invalid AI speed payload: %r", requested)
+
+        if self.nav_controller:
+            nav_speed = getattr(self.nav_controller, 'DRIVE_SPEED', None)
+            if nav_speed is not None:
+                try:
+                    return max(60, min(255, int(nav_speed)))
+                except (TypeError, ValueError):
+                    logger.debug("Invalid NavController DRIVE_SPEED: %r", nav_speed)
+
+        return max(60, min(255, int(self._manual_drive_speed or 180)))
 
     def _manual_drive_apply_once(self) -> bool:
         if not self.robot_link or not hasattr(self.robot_link, 'manual_drive'):

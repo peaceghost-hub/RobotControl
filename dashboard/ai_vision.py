@@ -29,6 +29,7 @@ import io
 import os
 import time
 import logging
+import re
 import threading
 from typing import Optional, Dict, Any, Callable, List
 
@@ -167,6 +168,9 @@ _FD_PROMPT_TEMPLATE = (
     "describes (e.g. a door, a chair, a wall, a person), STOP and report completed.\n"
     "- If the mission mentions a door or doorway, the moment a door or doorway is clearly visible, STOP and set PROGRESS=completed.\n"
     "- If the mission says 'turn to face X', once X is centered in the frame, STOP.\n"
+    "- If the mission says 'move/go/drive forward until X', then the first clear sight of X means STOP and PROGRESS=completed.\n"
+    "- Treat common visual synonyms as equivalent when sensible: door and doorway, corridor and hallway, person and human.\n"
+    "- Mention the actual mission target noun in your REASON when you see it.\n"
     "- STOP immediately if path is blocked or unsafe\n"
     "- LEFT/RIGHT to navigate around obstacles toward your goal\n"
     "- FORWARD when path is clear and aligned with the mission\n"
@@ -1549,6 +1553,97 @@ class MoondreamVision:
             "reason": reason,
         }
 
+    @staticmethod
+    def _extract_task_keywords(task: str) -> List[str]:
+        """Return visual keywords that Full Drive can use for completion hints."""
+        text = str(task or "").lower()
+        keyword_groups = [
+            ("door", "doorway"),
+            ("corridor", "hallway"),
+            ("chair",),
+            ("table", "desk"),
+            ("person", "human"),
+            ("wall",),
+            ("room",),
+            ("stairs", "step"),
+            ("window",),
+            ("gate",),
+            ("entrance", "entry"),
+        ]
+        found: List[str] = []
+        for group in keyword_groups:
+            if any(word in text for word in group):
+                found.extend(group)
+        return found
+
+    @staticmethod
+    def _looks_centered(text: str) -> bool:
+        text = str(text or "").lower()
+        return any(phrase in text for phrase in (
+            "centered", "centred", "in the center", "in the centre",
+            "straight ahead", "directly ahead", "in front", "facing",
+        ))
+
+    def _finalize_fd_decision(
+        self,
+        raw_text: str,
+        decision: Dict[str, str],
+        task: str,
+    ) -> Dict[str, str]:
+        """Strengthen mission completion detection from structured + raw output."""
+        final = dict(decision or {})
+        raw_lower = str(raw_text or "").lower()
+        task_lower = str(task or "").lower()
+        reason = str(final.get("reason") or "")
+        reason_lower = reason.lower()
+        action = str(final.get("action") or "STOP").upper()
+        safety = str(final.get("safety") or "DANGER").upper()
+        progress = str(final.get("progress") or "ongoing").lower()
+        keywords = self._extract_task_keywords(task)
+
+        mentions_completion = any(phrase in raw_lower for phrase in (
+            "mission completed", "objective reached", "goal reached",
+            "task completed", "arrived at", "reached the target",
+        ))
+        found_target = bool(keywords) and any(word in raw_lower for word in keywords)
+        face_target = any(phrase in task_lower for phrase in ("turn to face", "face the", "facing the"))
+        forward_until_target = any(phrase in task_lower for phrase in (
+            "until it sees", "until you see", "until it finds", "until you find",
+            "until it reaches", "until you reach", "until it detects", "until you detect",
+        ))
+
+        if progress != "completed":
+            if mentions_completion:
+                progress = "completed"
+            elif found_target and action == "STOP":
+                progress = "completed"
+            elif found_target and face_target and self._looks_centered(raw_lower):
+                action = "STOP"
+                progress = "completed"
+            elif found_target and forward_until_target and action == "STOP":
+                progress = "completed"
+            elif action == "STOP" and any(phrase in reason_lower for phrase in (
+                "objective", "goal", "arrived", "found", "visible", "centered", "facing",
+            )):
+                progress = "completed"
+
+        if progress == "completed":
+            action = "STOP"
+            if not reason or reason == "Could not parse AI response":
+                reason = f"Mission target visible: {keywords[0]}" if keywords else "Mission target reached"
+        elif action == "STOP" and safety == "SAFE" and found_target:
+            progress = "completed"
+            if not reason:
+                reason = "Mission target visible"
+
+        final.update({
+            "action": action,
+            "safety": safety,
+            "progress": progress,
+            "reason": reason,
+        })
+        return final
+
     def _full_drive_loop(self) -> None:
         """Vision-action loop: capture → query → parse → drive → repeat."""
         logger.info("Full Drive loop started — task: %s", self._fd_task[:80])
@@ -1608,7 +1703,11 @@ class MoondreamVision:
 
             # ── Parse response ────────────────────────────────────────
             raw_text = answer.get("answer", "") if answer else ""
-            decision = self._parse_fd_response(raw_text)
+            decision = self._finalize_fd_decision(
+                raw_text,
+                self._parse_fd_response(raw_text),
+                self._fd_task,
+            )
             self._fd_step += 1
 
             log_msg = (
@@ -1674,8 +1773,14 @@ class MoondreamVision:
             self._broadcast_fd_update(decision, elapsed, raw_text)
 
             # ── Throttle: wait before next cycle ──────────────────────
-            # Don't hammer the API — wait proportional to confidence
-            wait = 2.0 if decision["confidence"] == "high" else 3.0
+            # Re-check more quickly while moving so visible targets are
+            # caught sooner and forward overshoot is reduced.
+            if decision["action"] == "FORWARD":
+                wait = 1.2 if decision["confidence"] == "high" else 1.6
+            elif decision["action"] in ("LEFT", "RIGHT"):
+                wait = 1.0 if decision["confidence"] == "high" else 1.4
+            else:
+                wait = 0.8
             self._fd_stop_event.wait(wait)
 
         # ── Loop exited ───────────────────────────────────────────────
