@@ -69,6 +69,11 @@ class NavController:
     ACQUIRE_SLOW_THRESH  = 15.0   # degrees — switch to slow rotation
     ROTATION_SPEED_FAST  = 150    # PWM for big heading error
     ROTATION_SPEED_SLOW  = 100    # PWM for small heading error
+    ACQUIRE_SETTLE_TIME  = 0.35   # seconds — stay inside deadband before accept
+    ACQUIRE_MIN_TURN_TIME = 0.45  # seconds — avoid instant left/right reversal
+    ACQUIRE_REVERSE_HYST = 10.0   # degrees — error required before turn reversal
+    HEADING_FILTER_ALPHA = 0.35   # low-pass smoothing for compass heading
+    ACQUIRE_BEARING_SAMPLES = 6   # number of live bearing samples to average
     DRIVE_SPEED          = 150    # PWM forward
     SAFE_AVOID_DISTANCE_CM = 40   # reverse back to at least this distance before avoiding
     SAFE_REVERSE_TIMEOUT = 3.0    # seconds — never reverse indefinitely
@@ -131,7 +136,14 @@ class NavController:
         # Bearing / heading cache
         self._current_heading = 0.0
         self._current_heading_magnetic = 0.0  # raw magnetic for dashboard
+        self._filtered_heading: Optional[float] = None
         self._target_bearing = 0.0
+        self._live_target_bearing: Optional[float] = None
+        self._acquire_target_bearing: Optional[float] = None
+        self._acquire_deadband_since = None
+        self._acquire_turn_direction = 0   # -1 left, +1 right
+        self._acquire_turn_since = 0.0
+        self._bearing_samples: List[float] = []
         self._last_heading_error = 0.0
 
         # AI obstacle advice (received from AI Vision via main.py)
@@ -570,8 +582,18 @@ class NavController:
         if state == NavState.IDLE or state == NavState.COMPLETE or state == NavState.PAUSED:
             return
 
-        # Read sensors every tick
-        self._current_heading = self._read_heading()
+        # Read sensors every tick. Use a light circular low-pass filter so
+        # compass jitter does not cause left/right dithering during acquire.
+        raw_heading = self._read_heading()
+        if self._filtered_heading is None:
+            self._filtered_heading = raw_heading
+        else:
+            self._filtered_heading = self._blend_angle(
+                self._filtered_heading,
+                raw_heading,
+                self.HEADING_FILTER_ALPHA,
+            )
+        self._current_heading = self._filtered_heading
 
         # PREPARING state: motors stopped, waiting for timer — no GPS needed
         if state == NavState.PREPARING:
@@ -607,9 +629,21 @@ class NavController:
         self._gps_wait_logged = False  # GPS is available again
         self._distance_to_wp = self._haversine(cur_lat, cur_lon, wp_lat, wp_lon)
         if self._heading_lock_active and self._heading_lock_bearing is not None:
-            self._target_bearing = self._heading_lock_bearing
+            live_target_bearing = self._heading_lock_bearing
         else:
-            self._target_bearing = self._bearing(cur_lat, cur_lon, wp_lat, wp_lon)
+            live_target_bearing = self._bearing(cur_lat, cur_lon, wp_lat, wp_lon)
+
+        self._live_target_bearing = live_target_bearing
+        self._record_bearing_sample(live_target_bearing)
+
+        if state in (NavState.ACQUIRING_HEADING, NavState.HEADING_ACQUIRED) and self._acquire_target_bearing is None:
+            self._acquire_target_bearing = self._lock_acquire_target_bearing()
+
+        if state in (NavState.ACQUIRING_HEADING, NavState.HEADING_ACQUIRED) and self._acquire_target_bearing is not None:
+            self._target_bearing = self._acquire_target_bearing
+        else:
+            self._target_bearing = live_target_bearing
+
         self._last_heading_error = self._normalize_error(self._target_bearing - self._current_heading)
 
         # Debug log bearing calculation periodically (every ~2s at 10Hz)
@@ -643,6 +677,32 @@ class NavController:
         Motors stay stopped.  Dashboard shows 'PREPARING' with countdown.
         User can click Accept Heading during this window if already aligned.
         """
+        try:
+            gps = self._get_gps()
+        except Exception:
+            gps = None
+
+        if gps:
+            with self._lock:
+                wp = self._waypoints[self._current_wp_index] if self._current_wp_index < len(self._waypoints) else None
+            if wp:
+                try:
+                    wp_lat = float(wp['latitude'])
+                    wp_lon = float(wp['longitude'])
+                    cur_lat = float(gps['latitude'])
+                    cur_lon = float(gps['longitude'])
+                    self._distance_to_wp = self._haversine(cur_lat, cur_lon, wp_lat, wp_lon)
+                    if self._heading_lock_active and self._heading_lock_bearing is not None:
+                        live_target_bearing = self._heading_lock_bearing
+                    else:
+                        live_target_bearing = self._bearing(cur_lat, cur_lon, wp_lat, wp_lon)
+                    self._live_target_bearing = live_target_bearing
+                    self._target_bearing = live_target_bearing
+                    self._record_bearing_sample(live_target_bearing)
+                    self._last_heading_error = self._normalize_error(self._target_bearing - self._current_heading)
+                except Exception:
+                    pass
+
         elapsed = time.time() - self._state_entry_time
         # Reinforce motor stop every second
         if int(elapsed) != getattr(self, '_prep_last_sec', -1):
@@ -656,32 +716,45 @@ class NavController:
         """Rotate robot until heading matches target bearing (within deadband)."""
         error = self._last_heading_error
         abs_error = abs(error)
+        now = time.time()
 
         # Timeout check
-        elapsed = time.time() - self._state_entry_time
+        elapsed = now - self._state_entry_time
         if elapsed > self.HEADING_ACQUIRE_TIMEOUT:
             logger.warning("Heading acquire timeout — proceeding anyway")
             self._enter_state(NavState.NAVIGATING)
             return
 
         if abs_error <= self.HEADING_DEADBAND:
-            # Heading acquired! — stop motors and begin countdown
             self._send_stop()
-            self._send_stop()  # double-send for reliability
-            self._heading_acquired_emitted = False  # reset for _handle_heading_acquired
-            logger.info("Heading auto-acquired (error=%.1f°) — %.0fs countdown",
-                         abs_error, self.HEADING_HOLD_TIME)
-            self._enter_state(NavState.HEADING_ACQUIRED)
+            if self._acquire_deadband_since is None:
+                self._acquire_deadband_since = now
+                logger.debug("Heading inside deadband — settling (error=%.1f°)", abs_error)
+                return
+            if (now - self._acquire_deadband_since) >= self.ACQUIRE_SETTLE_TIME:
+                self._send_stop()  # double-send for reliability
+                self._heading_acquired_emitted = False  # reset for _handle_heading_acquired
+                logger.info("Heading auto-acquired (error=%.1f°) — %.0fs countdown",
+                             abs_error, self.HEADING_HOLD_TIME)
+                self._enter_state(NavState.HEADING_ACQUIRED)
             return
+        self._acquire_deadband_since = None
 
-        # Rotate toward target
-        if error > 0:
-            # Target is to the RIGHT → rotate right
-            speed = self._get_turn_speed(fast=abs_error >= self.ACQUIRE_SLOW_THRESH)
+        desired_dir = 1 if error > 0 else -1
+        if self._acquire_turn_direction == 0:
+            self._acquire_turn_direction = desired_dir
+            self._acquire_turn_since = now
+        elif desired_dir != self._acquire_turn_direction:
+            committed_long_enough = (now - self._acquire_turn_since) >= self.ACQUIRE_MIN_TURN_TIME
+            if committed_long_enough and abs_error >= self.ACQUIRE_REVERSE_HYST:
+                self._acquire_turn_direction = desired_dir
+                self._acquire_turn_since = now
+                logger.debug("Acquire turn reversed — error now %.1f°", error)
+
+        speed = self._get_acquire_turn_speed(abs_error)
+        if self._acquire_turn_direction > 0:
             self._send_rotate_right(speed)
         else:
-            # Target is to the LEFT → rotate left
-            speed = self._get_turn_speed(fast=abs_error >= self.ACQUIRE_SLOW_THRESH)
             self._send_rotate_left(speed)
 
     def _handle_heading_acquired(self):
@@ -1065,6 +1138,20 @@ class NavController:
             return max(140, min(180, base + 20))
         return max(110, min(140, base))
 
+    def _get_acquire_turn_speed(self, abs_error: float) -> int:
+        """Gentler turn profile for heading acquisition to reduce overshoot."""
+        if abs_error >= 45.0:
+            return self._get_turn_speed(fast=True)
+        if abs_error >= self.ACQUIRE_SLOW_THRESH:
+            if not self._adaptive_speed:
+                return max(105, min(self.ROTATION_SPEED_FAST - 20, 130))
+            base = int(self.DRIVE_SPEED)
+            return max(115, min(145, base + 5))
+        if not self._adaptive_speed:
+            return max(85, min(self.ROTATION_SPEED_SLOW, 100))
+        base = int(self.DRIVE_SPEED)
+        return max(95, min(120, base - 5))
+
     def _run_safety_clearance(self) -> bool:
         """Reverse slowly until the obstacle is at a safer distance."""
         obstacle = self._read_obstacle()
@@ -1103,6 +1190,35 @@ class NavController:
             self._state_entry_time = time.time()
         if old != new_state:
             logger.info("NAV: %s → %s", old.name, new_state.name)
+        if new_state == NavState.ACQUIRING_HEADING:
+            self._acquire_deadband_since = None
+            self._acquire_turn_direction = 0
+            self._acquire_turn_since = 0.0
+            allow_cached_target = old != NavState.PREPARING or bool(self._bearing_samples) or self._live_target_bearing is not None
+            self._acquire_target_bearing = self._lock_acquire_target_bearing(
+                allow_cached_target=allow_cached_target
+            )
+            if self._acquire_target_bearing is not None:
+                self._target_bearing = self._acquire_target_bearing
+                self._last_heading_error = self._normalize_error(
+                    self._target_bearing - self._current_heading
+                )
+        elif new_state == NavState.HEADING_ACQUIRED:
+            self._acquire_deadband_since = None
+            self._acquire_turn_direction = 0
+            self._acquire_turn_since = 0.0
+        elif new_state == NavState.PREPARING:
+            self._acquire_target_bearing = None
+            self._acquire_deadband_since = None
+            self._acquire_turn_direction = 0
+            self._acquire_turn_since = 0.0
+            self._bearing_samples = []
+            self._live_target_bearing = None
+        elif new_state not in (NavState.ACQUIRING_HEADING, NavState.HEADING_ACQUIRED):
+            self._acquire_target_bearing = None
+            self._acquire_deadband_since = None
+            self._acquire_turn_direction = 0
+            self._acquire_turn_since = 0.0
         # When leaving obstacle handling, reset AI advice flags so the
         # next obstacle encounter starts with a clean slate.
         if new_state not in (NavState.OBSTACLE_DETECTED, NavState.OBSTACLE_AVOID):
@@ -1188,3 +1304,49 @@ class NavController:
         while error < -180:
             error += 360
         return error
+
+    @classmethod
+    def _blend_angle(cls, previous: float, current: float, alpha: float) -> float:
+        """Circular low-pass blend between two headings."""
+        if previous is None:
+            return current
+        alpha = max(0.0, min(1.0, float(alpha)))
+        delta = cls._normalize_error(current - previous)
+        return (previous + alpha * delta) % 360.0
+
+    @classmethod
+    def _circular_mean_deg(cls, values: List[float]) -> Optional[float]:
+        """Mean of compass bearings in degrees, accounting for wraparound."""
+        if not values:
+            return None
+        sin_sum = 0.0
+        cos_sum = 0.0
+        for deg in values:
+            rad = math.radians(deg)
+            sin_sum += math.sin(rad)
+            cos_sum += math.cos(rad)
+        if abs(sin_sum) < 1e-9 and abs(cos_sum) < 1e-9:
+            return values[-1] % 360.0
+        return math.degrees(math.atan2(sin_sum, cos_sum)) % 360.0
+
+    def _record_bearing_sample(self, bearing: float) -> None:
+        if bearing is None:
+            return
+        self._bearing_samples.append(float(bearing) % 360.0)
+        if len(self._bearing_samples) > self.ACQUIRE_BEARING_SAMPLES:
+            self._bearing_samples.pop(0)
+
+    def _lock_acquire_target_bearing(self, allow_cached_target: bool = True) -> Optional[float]:
+        """Freeze a stable target bearing for acquire/countdown phases."""
+        if self._heading_lock_active and self._heading_lock_bearing is not None:
+            latched = float(self._heading_lock_bearing) % 360.0
+        else:
+            latched = self._circular_mean_deg(self._bearing_samples)
+            if latched is None and self._live_target_bearing is not None:
+                latched = float(self._live_target_bearing) % 360.0
+            elif latched is None and allow_cached_target and self._target_bearing is not None:
+                latched = float(self._target_bearing) % 360.0
+        if latched is None:
+            return None
+        logger.info("Acquire bearing locked at %.1f°", latched)
+        return latched

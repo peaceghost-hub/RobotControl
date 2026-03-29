@@ -115,7 +115,7 @@ PROMPTS: Dict[str, str] = {
         "You are the autonomous AI vision system for a small wheeled ground robot. "
         f"Robot specs: height {ROBOT_HEIGHT_CM}cm, width {ROBOT_WIDTH_CM}cm, "
         f"wheel radius {WHEEL_RADIUS_CM}cm, reaction distance {ACTION_DISTANCE_CM}cm. "
-        f"The camera is at {ROBOT_HEIGHT_CM}cm above ground (low perspective). "
+        f"The camera is intentionally mounted low at {ROBOT_HEIGHT_CM}cm above ground because this robot is small. "
         "Analyze this scene for safe navigation. "
         "Respond in EXACTLY this format (seven lines, nothing else):\n"
         "SAFETY: SAFE or CAUTION or DANGER\n"
@@ -135,7 +135,10 @@ PROMPTS: Dict[str, str] = {
         f"- Objects taller than {WHEEL_RADIUS_CM}cm on the ground can block the wheels\n"
         f"- Objects wider than {ROBOT_WIDTH_CM}cm blocking the path cannot be passed\n"
         "- Holes, drops, steps, or uneven terrain are hazards for small wheels\n"
-        "- Consider the low ground-level camera perspective\n"
+        "- Corridor or hallway side walls are normal and are NOT obstacles by themselves if the center path ahead is open\n"
+        "- Prefer FORWARD in a corridor when the center path is open, even if a wall is visible on the left or right edge\n"
+        "- Only mark OBSTACLE_POSITION as center when something actually blocks forward motion\n"
+        "- The camera height is intentional for this prototype; do not complain that the camera is too low unless the view is physically blocked\n"
         "- CLEAR_PATH: indicate which side of the frame has the most open space\n"
         "- CONFIDENCE: high if scene is clear and unambiguous, low if uncertain"
     ),
@@ -146,7 +149,7 @@ _FD_PROMPT_TEMPLATE = (
     "You are the autonomous AI pilot for a small wheeled ground robot. "
     f"Robot specs: height {ROBOT_HEIGHT_CM}cm, width {ROBOT_WIDTH_CM}cm, "
     f"wheel radius {WHEEL_RADIUS_CM}cm. "
-    f"Camera is at {ROBOT_HEIGHT_CM}cm above ground (low perspective).\n\n"
+    f"Camera is intentionally mounted low at {ROBOT_HEIGHT_CM}cm above ground because this robot is small.\n\n"
     "YOUR MISSION: {task}\n\n"
     "Previous action: {last_action}\n"
     "Step number: {step}\n\n"
@@ -168,7 +171,9 @@ _FD_PROMPT_TEMPLATE = (
     "- LEFT/RIGHT to navigate around obstacles toward your goal\n"
     "- FORWARD when path is clear and aligned with the mission\n"
     "- PROGRESS=stuck if you have been repeating the same action 3+ times with no visible change\n"
-    "- Consider the low ground-level camera perspective\n"
+    "- Corridor or hallway side walls are normal and are NOT obstacles by themselves if the center passage is open\n"
+    "- Prefer FORWARD through corridors when the center path is visible, even if walls appear on the sides\n"
+    "- The camera height is intentional for this small prototype; do not complain that the camera is too low unless the view is physically blocked\n"
     f"- React to obstacles within {ACTION_DISTANCE_CM}cm\n"
     "- Prioritise safety above all else"
 )
@@ -662,6 +667,80 @@ class MoondreamVision:
             "confidence": confidence,
             "reason": reason,
         }
+
+    @staticmethod
+    def _normalize_nav_decision(nav: Dict[str, str]) -> Dict[str, str]:
+        """Bias decisions toward corridor-following when the center path is open."""
+        normalized = dict(nav or {})
+        safety = str(normalized.get("safety") or "DANGER").upper()
+        direction = str(normalized.get("direction") or "STOP").upper()
+        obstacle_type = str(normalized.get("obstacle_type") or "unknown").lower()
+        obstacle_position = str(normalized.get("obstacle_position") or "unknown").lower()
+        clear_path = str(normalized.get("clear_path") or "unknown").lower()
+        confidence = str(normalized.get("confidence") or "low").lower()
+        reason = str(normalized.get("reason") or "Could not parse AI response").strip()
+        reason_lower = reason.lower()
+
+        if any(phrase in reason_lower for phrase in (
+            "camera too low",
+            "too low to the ground",
+            "low to the ground",
+            "ground-level camera",
+        )):
+            reason = "Low camera height is expected for this robot; using visible free space ahead."
+
+        center_open = clear_path == "center"
+        side_only_obstacle = obstacle_position in ("left", "right", "none", "unknown")
+
+        if safety != "DANGER" and center_open and side_only_obstacle:
+            direction = "FORWARD"
+            if obstacle_position in ("left", "right") and obstacle_type == "wall":
+                reason = f"Side wall on the {obstacle_position} does not block the corridor; center path is open."
+            elif obstacle_position in ("left", "right"):
+                reason = f"Object on the {obstacle_position} does not block forward travel; center path is open."
+            elif obstacle_type == "none":
+                reason = "Center path is open ahead."
+
+        elif safety != "DANGER" and clear_path in ("left", "right") and direction in ("LEFT", "RIGHT"):
+            if direction.lower() != clear_path:
+                direction = clear_path.upper()
+                reason = f"{clear_path.capitalize()} side appears more open for passage."
+
+        elif (
+            safety == "SAFE"
+            and direction in ("LEFT", "RIGHT")
+            and obstacle_position != "center"
+            and clear_path in ("center", "none", "unknown")
+        ):
+            direction = "FORWARD"
+            if obstacle_position in ("left", "right"):
+                reason = f"Side obstacle on the {obstacle_position} is not blocking the forward corridor."
+            else:
+                reason = "Path ahead appears safe to continue forward."
+
+        normalized.update({
+            "safety": safety,
+            "direction": direction,
+            "obstacle_type": obstacle_type,
+            "obstacle_position": obstacle_position,
+            "clear_path": clear_path,
+            "confidence": confidence,
+            "reason": reason,
+        })
+        return normalized
+
+    @staticmethod
+    def _format_nav_decision(nav: Dict[str, str]) -> str:
+        """Render a normalized nav decision back into the structured response format."""
+        return "\n".join([
+            f"SAFETY: {nav.get('safety', 'DANGER')}",
+            f"DIRECTION: {nav.get('direction', 'STOP')}",
+            f"OBSTACLE_TYPE: {nav.get('obstacle_type', 'unknown')}",
+            f"OBSTACLE_POSITION: {nav.get('obstacle_position', 'unknown')}",
+            f"CLEAR_PATH: {nav.get('clear_path', 'unknown')}",
+            f"CONFIDENCE: {nav.get('confidence', 'low')}",
+            f"REASON: {nav.get('reason', 'Could not parse AI response')}",
+        ])
 
     def _send_drive_command(self, nav: Dict[str, str]) -> None:
         """Send obstacle avoidance advice to the Pi.
@@ -1224,10 +1303,11 @@ class MoondreamVision:
                 prompt = PROMPTS["navigate"]
                 answer = self._query(image_for_query, prompt, self._NAV_SETTINGS)
                 raw = answer.get("answer", "")
-                result["response"] = raw
+                result["raw_response"] = raw
                 result["prompt"] = prompt
 
-                nav = self._parse_nav_decision(raw)
+                nav = self._normalize_nav_decision(self._parse_nav_decision(raw))
+                result["response"] = self._format_nav_decision(nav)
                 result["nav_decision"] = nav
                 self._last_nav = nav
                 # NOTE: drive command is sent by the analysis loop caller,

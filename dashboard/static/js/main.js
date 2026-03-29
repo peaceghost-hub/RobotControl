@@ -2095,8 +2095,8 @@ function setupEventListeners() {
 
     const manualButtonMap = {
         'manual-forward-btn': 'forward',
-        'manual-left-btn': 'left',
-        'manual-right-btn': 'right',
+        'manual-left-btn': 'right',
+        'manual-right-btn': 'left',
         'manual-reverse-btn': 'reverse',
         'manual-stop-btn': 'stop'
     };
