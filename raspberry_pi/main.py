@@ -1240,7 +1240,7 @@ class RobotController:
         except Exception:
             return -1
 
-    def _read_current_heading(self) -> float | None:
+    def _read_current_heading(self) -> Optional[float]:
         try:
             if self.compass and hasattr(self.compass, 'read_heading'):
                 heading = self.compass.read_heading()
@@ -1292,7 +1292,7 @@ class RobotController:
         except Exception as exc:
             logger.debug("Manual forward resume apply failed: %s", exc)
 
-    def _run_manual_assist_avoidance(self, resume_heading: float | None, resume_speed: int) -> None:
+    def _run_manual_assist_avoidance(self, resume_heading: Optional[float], resume_speed: int) -> None:
         logger.info("Manual assist avoidance started (heading=%s speed=%d)",
                     f"{resume_heading:.1f}°" if resume_heading is not None else "unknown",
                     resume_speed)
