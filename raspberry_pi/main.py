@@ -186,6 +186,14 @@ class RobotController:
         self._manual_drive_direction = 'stop'
         self._manual_drive_speed = 180
         self._manual_drive_thread = None
+        self._manual_assist_lock = Lock()
+        self._manual_assist_active = False
+        self._manual_assist_thread = None
+        self._manual_assist_cancel = Event()
+        self._manual_assist_resume_heading = None
+        self._manual_assist_resume_speed = 180
+        self._manual_assist_resume_direction = 'forward'
+        self._manual_assist_last_turn = 'right'
         self.wireless_backup_active = False  # Track wireless backup control engagement
         try:
             if CONFIG.get('i2c'):
@@ -203,6 +211,9 @@ class RobotController:
                 logger.warning("No communication configuration found for Mega controller - running without navigation")
         except Exception as e:
             logger.warning(f"Arduino Mega communication not available: {e}")
+
+        nav_cfg = CONFIG.get('navigation', {})
+        self._invert_rotation_direction = bool(nav_cfg.get('invert_rotation_direction', False))
         
         # Dashboard API (required)
         try:
@@ -822,8 +833,27 @@ class RobotController:
                                 and self.nav_controller
                                 and self.nav_controller.is_active):
                             self.nav_controller.notify_ai_triggered()
+                        elif not (resp and resp.get('ai_triggered')):
+                            with self._manual_drive_lock:
+                                manual_forward_active = (
+                                    self._manual_drive_active
+                                    and self._manual_drive_direction == 'forward'
+                                )
+                            if manual_forward_active and not (self.nav_controller and self.nav_controller.is_active):
+                                started = self._start_manual_assist_avoidance()
+                                if started:
+                                    logger.info("Manual forward obstacle detected — Pi traditional avoidance takeover")
                     except Exception as exc:
                         logger.debug(f"Failed to send obstacle event: {exc}")
+                        with self._manual_drive_lock:
+                            manual_forward_active = (
+                                self._manual_drive_active
+                                and self._manual_drive_direction == 'forward'
+                            )
+                        if manual_forward_active and not (self.nav_controller and self.nav_controller.is_active):
+                            started = self._start_manual_assist_avoidance()
+                            if started:
+                                logger.info("Manual forward obstacle detected — Pi traditional avoidance takeover (dashboard unavailable)")
 
                 last_state = state
 
@@ -1111,6 +1141,8 @@ class RobotController:
         if requested in ('', 'none'):
             requested = 'stop'
 
+        self._cancel_manual_assist(reason=f"manual {requested or 'command'}")
+
         with self._manual_drive_lock:
             if requested in ('stop', 'brake'):
                 self._manual_drive_active = False
@@ -1189,6 +1221,226 @@ class RobotController:
 
             shutdown_event.wait(0.2)
 
+    @staticmethod
+    def _normalize_heading_error(error: float) -> float:
+        while error > 180.0:
+            error -= 360.0
+        while error < -180.0:
+            error += 360.0
+        return error
+
+    def _read_obstacle_distance_cm(self) -> int:
+        if not self.robot_link or not hasattr(self.robot_link, 'request_obstacle_status'):
+            return -1
+        try:
+            obstacle = self.robot_link.request_obstacle_status()
+            if not obstacle:
+                return -1
+            return int(obstacle.get('distance_cm', -1))
+        except Exception:
+            return -1
+
+    def _read_current_heading(self) -> float | None:
+        try:
+            if self.compass and hasattr(self.compass, 'read_heading'):
+                heading = self.compass.read_heading()
+                if heading is not None:
+                    return float(heading) % 360.0
+        except Exception:
+            pass
+        if self.nav_controller is not None:
+            try:
+                return float(getattr(self.nav_controller, '_current_heading', 0.0)) % 360.0
+            except Exception:
+                pass
+        return None
+
+    def _manual_assist_turn_direction(self, logical_direction: str) -> str:
+        direction = (logical_direction or 'left').strip().lower()
+        if self._invert_rotation_direction:
+            return 'right' if direction == 'left' else 'left'
+        return direction
+
+    def _send_manual_assist_drive(self, direction: str, speed: int) -> bool:
+        if not self.robot_link or not hasattr(self.robot_link, 'manual_drive'):
+            return False
+        direction = (direction or 'stop').strip().lower()
+        if direction in ('left', 'right'):
+            direction = self._manual_assist_turn_direction(direction)
+        return bool(self.robot_link.manual_drive(direction, speed))
+
+    def _cancel_manual_assist(self, reason: str = 'cancelled') -> None:
+        with self._manual_assist_lock:
+            was_active = self._manual_assist_active
+            self._manual_assist_active = False
+        self._manual_assist_cancel.set()
+        if was_active:
+            logger.info("Manual assist avoidance cancelled — %s", reason)
+
+    def _resume_latched_manual_forward(self, speed: int) -> None:
+        with self._manual_drive_lock:
+            self._manual_drive_active = True
+            self._manual_drive_direction = 'forward'
+            self._manual_drive_speed = max(60, min(255, int(speed)))
+
+        if not self._manual_drive_thread or not self._manual_drive_thread.is_alive():
+            self._manual_drive_thread = Thread(target=self._manual_drive_loop, daemon=True)
+            self._manual_drive_thread.start()
+
+        try:
+            self._manual_drive_apply_once()
+        except Exception as exc:
+            logger.debug("Manual forward resume apply failed: %s", exc)
+
+    def _run_manual_assist_avoidance(self, resume_heading: float | None, resume_speed: int) -> None:
+        logger.info("Manual assist avoidance started (heading=%s speed=%d)",
+                    f"{resume_heading:.1f}°" if resume_heading is not None else "unknown",
+                    resume_speed)
+
+        nav = self.nav_controller
+        safe_distance_cm = int(getattr(nav, 'SAFE_AVOID_DISTANCE_CM', 40) or 40)
+        reverse_timeout = float(getattr(nav, 'SAFE_REVERSE_TIMEOUT', 3.0) or 3.0)
+        obstacle_turn_time = float(getattr(nav, 'OBSTACLE_TURN_TIME', 1.0) or 1.0)
+        obstacle_pass_time = float(getattr(nav, 'OBSTACLE_PASS_TIME', 1.5) or 1.5)
+        heading_deadband = float(getattr(nav, 'HEADING_DEADBAND', 5.0) or 5.0)
+        reacquire_timeout = float(CONFIG.get('manual_assist_reacquire_timeout', 8.0))
+        max_attempts = int(CONFIG.get('manual_assist_max_attempts', 3))
+
+        reverse_speed = int(nav._get_reverse_speed()) if nav and hasattr(nav, '_get_reverse_speed') else 90
+        turn_speed = int(nav._get_turn_speed(fast=True)) if nav and hasattr(nav, '_get_turn_speed') else 150
+        forward_speed = int(nav._get_avoid_forward_speed()) if nav and hasattr(nav, '_get_avoid_forward_speed') else max(95, min(140, int(resume_speed)))
+
+        success = False
+
+        try:
+            for attempt in range(1, max_attempts + 1):
+                if self._manual_assist_cancel.is_set() or shutdown_event.is_set():
+                    return
+
+                self._manual_assist_last_turn = 'left' if self._manual_assist_last_turn == 'right' else 'right'
+                avoid_direction = self._manual_assist_last_turn
+                logger.info("Manual assist attempt %d/%d using %s avoidance", attempt, max_attempts, avoid_direction)
+
+                # Phase 1: reverse until safe distance
+                reverse_start = time.time()
+                while not self._manual_assist_cancel.is_set() and not shutdown_event.is_set():
+                    dist_cm = self._read_obstacle_distance_cm()
+                    if dist_cm <= 0 or dist_cm >= safe_distance_cm:
+                        break
+                    if (time.time() - reverse_start) >= reverse_timeout:
+                        logger.warning("Manual assist reverse timeout at %d cm", dist_cm)
+                        break
+                    self._send_manual_assist_drive('reverse', reverse_speed)
+                    shutdown_event.wait(0.1)
+
+                self._send_manual_assist_drive('stop', reverse_speed)
+                if self._manual_assist_cancel.is_set() or shutdown_event.is_set():
+                    return
+
+                # Phase 2: turn away
+                turn_start = time.time()
+                while (time.time() - turn_start) < obstacle_turn_time:
+                    if self._manual_assist_cancel.is_set() or shutdown_event.is_set():
+                        return
+                    self._send_manual_assist_drive(avoid_direction, turn_speed)
+                    shutdown_event.wait(0.1)
+
+                self._send_manual_assist_drive('stop', turn_speed)
+                if self._manual_assist_cancel.is_set() or shutdown_event.is_set():
+                    return
+
+                # Phase 3: move past obstacle
+                forward_start = time.time()
+                obstacle_reappeared = False
+                while (time.time() - forward_start) < obstacle_pass_time:
+                    if self._manual_assist_cancel.is_set() or shutdown_event.is_set():
+                        return
+                    dist_cm = self._read_obstacle_distance_cm()
+                    if 0 < dist_cm < safe_distance_cm:
+                        obstacle_reappeared = True
+                        logger.info("Manual assist forward interrupted at %d cm", dist_cm)
+                        break
+                    self._send_manual_assist_drive('forward', forward_speed)
+                    shutdown_event.wait(0.1)
+
+                self._send_manual_assist_drive('stop', forward_speed)
+                if self._manual_assist_cancel.is_set() or shutdown_event.is_set():
+                    return
+
+                if obstacle_reappeared:
+                    continue
+
+                # Phase 4: reacquire original heading before resuming forward
+                if resume_heading is not None:
+                    reacquire_start = time.time()
+                    while not self._manual_assist_cancel.is_set() and not shutdown_event.is_set():
+                        current_heading = self._read_current_heading()
+                        if current_heading is None:
+                            break
+                        error = self._normalize_heading_error(resume_heading - current_heading)
+                        if abs(error) <= heading_deadband:
+                            break
+                        if (time.time() - reacquire_start) >= reacquire_timeout:
+                            logger.warning("Manual assist heading reacquire timeout at error %.1f°", error)
+                            break
+                        turn_dir = 'right' if error > 0 else 'left'
+                        self._send_manual_assist_drive(turn_dir, turn_speed)
+                        shutdown_event.wait(0.1)
+                    self._send_manual_assist_drive('stop', turn_speed)
+
+                success = True
+                break
+        finally:
+            self._send_manual_assist_drive('stop', resume_speed)
+            with self._manual_assist_lock:
+                cancelled = self._manual_assist_cancel.is_set()
+                self._manual_assist_active = False
+
+            if not cancelled and success:
+                logger.info("Manual assist avoidance complete — resuming forward")
+                self._resume_latched_manual_forward(resume_speed)
+            elif cancelled:
+                logger.info("Manual assist avoidance exited due to operator override")
+            else:
+                logger.warning("Manual assist avoidance ended without a clean resume")
+
+    def _start_manual_assist_avoidance(self) -> bool:
+        if not self.robot_link or not hasattr(self.robot_link, 'manual_drive'):
+            return False
+
+        with self._manual_assist_lock:
+            if self._manual_assist_active:
+                return False
+
+        with self._manual_drive_lock:
+            if not self._manual_drive_active or self._manual_drive_direction != 'forward':
+                return False
+            resume_speed = self._manual_drive_speed
+            self._manual_drive_active = False
+            self._manual_drive_direction = 'stop'
+
+        resume_heading = self._read_current_heading()
+        self._manual_assist_cancel.clear()
+        with self._manual_assist_lock:
+            self._manual_assist_active = True
+            self._manual_assist_resume_heading = resume_heading
+            self._manual_assist_resume_speed = resume_speed
+            self._manual_assist_resume_direction = 'forward'
+
+        try:
+            self._manual_drive_apply_once()
+        except Exception:
+            pass
+
+        self._manual_assist_thread = Thread(
+            target=self._run_manual_assist_avoidance,
+            args=(resume_heading, resume_speed),
+            daemon=True,
+            name='manual-assist-avoidance',
+        )
+        self._manual_assist_thread.start()
+        return True
+
     def _handle_manual_override(self, payload: dict) -> bool:
         mode = (payload or {}).get('mode', 'hold')
         logger.info(f"Manual override -> {mode}")
@@ -1245,6 +1497,7 @@ class RobotController:
             logger.debug("Manual override release failed: %s", exc)
 
     def _stop_latched_manual_drive(self, release_override: bool = False) -> None:
+        self._cancel_manual_assist(reason="manual latch released")
         with self._manual_drive_lock:
             self._manual_drive_active = False
             self._manual_drive_direction = 'stop'
