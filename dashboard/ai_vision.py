@@ -684,6 +684,7 @@ class MoondreamVision:
         confidence = str(normalized.get("confidence") or "low").lower()
         reason = str(normalized.get("reason") or "Could not parse AI response").strip()
         reason_lower = reason.lower()
+        blocking_types = {"wall", "rock", "furniture", "person", "hole", "step", "vegetation"}
 
         if any(phrase in reason_lower for phrase in (
             "camera too low",
@@ -695,6 +696,43 @@ class MoondreamVision:
 
         center_open = clear_path == "center"
         side_only_obstacle = obstacle_position in ("left", "right", "none", "unknown")
+        front_blocked = obstacle_position == "center" and obstacle_type in blocking_types
+
+        if any(phrase in reason_lower for phrase in (
+            "wall ahead",
+            "wall in front",
+            "blocked ahead",
+            "path blocked",
+            "dead end",
+            "obstacle ahead",
+        )):
+            front_blocked = True
+
+        if direction == "FORWARD" and (front_blocked or clear_path == "none"):
+            if clear_path in ("left", "right") and safety != "DANGER":
+                direction = clear_path.upper()
+                safety = "CAUTION"
+                reason = f"Center path is blocked; {clear_path} side is the clearer avoidance route."
+            else:
+                direction = "STOP"
+                safety = "DANGER"
+                reason = "Forward path is blocked ahead."
+
+        if direction == "LEFT" and obstacle_position == "left" and safety != "DANGER":
+            if clear_path == "right":
+                direction = "RIGHT"
+                reason = "Left side is obstructed while the right side appears clearer."
+            elif clear_path in ("center", "none", "unknown") or obstacle_type == "wall":
+                direction = "FORWARD"
+                reason = "Left-side wall does not block the forward corridor."
+
+        if direction == "RIGHT" and obstacle_position == "right" and safety != "DANGER":
+            if clear_path == "left":
+                direction = "LEFT"
+                reason = "Right side is obstructed while the left side appears clearer."
+            elif clear_path in ("center", "none", "unknown") or obstacle_type == "wall":
+                direction = "FORWARD"
+                reason = "Right-side wall does not block the forward corridor."
 
         if safety != "DANGER" and center_open and side_only_obstacle:
             direction = "FORWARD"
@@ -746,6 +784,10 @@ class MoondreamVision:
             f"REASON: {nav.get('reason', 'Could not parse AI response')}",
         ])
 
+    def _assist_nav_active(self) -> bool:
+        """Auto-drive assist may only move when a base navigation owner is active."""
+        return self._auto_drive and self._base_nav_mode in ("manual", "waypoint")
+
     def _send_drive_command(self, nav: Dict[str, str]) -> None:
         """Send obstacle avoidance advice to the Pi.
 
@@ -756,9 +798,9 @@ class MoondreamVision:
         """
         if not self._drive_command_fn:
             return
-        if not self._auto_drive or self._ai_paused:
-            logger.debug("AI drive command suppressed (auto=%s, paused=%s)",
-                         self._auto_drive, self._ai_paused)
+        if not self._assist_nav_active() or self._ai_paused:
+            logger.debug("AI drive command suppressed (assist_active=%s, paused=%s, base_nav=%s)",
+                         self._assist_nav_active(), self._ai_paused, self._base_nav_mode)
             return
 
         try:
@@ -799,7 +841,8 @@ class MoondreamVision:
             return
         if not self._enabled:
             return
-        if not (self._auto_drive or self._fd_active):
+        assist_active = self._assist_nav_active()
+        if not (assist_active or self._fd_active):
             return
         if self._ai_paused:
             logger.debug("Coupled drive suppressed — AI paused")
@@ -836,7 +879,7 @@ class MoondreamVision:
     @property
     def coupled_active(self) -> bool:
         """True when Auto Analyse is feeding drive commands to a drive mode."""
-        return self._enabled and (self._auto_drive or self._fd_active)
+        return self._enabled and (self._assist_nav_active() or self._fd_active)
 
     # ══════════════════════════════════════════════════════════════════
     #  MODEL LIFECYCLE
@@ -1046,7 +1089,7 @@ class MoondreamVision:
             # When coupled, the timer path ALSO sends drive commands to
             # the Pi, providing continuous terrain / obstacle / direction
             # advice rather than only reacting to obstacle-detected events.
-            coupled = self._enabled and (self._auto_drive or self._fd_active)
+            coupled = self._enabled and (self._assist_nav_active() or self._fd_active)
 
             try:
                 frame_bytes = (

@@ -881,9 +881,27 @@ function checkSensorAlerts(data) {
     function evalGas(key, rawPpm, elevTh, warnTh, dangerTh, gasName, unit, elevNote, warnNote, dangerNote) {
         // Alert decisions use the smoothed (rolling average) PPM — not raw per-reading
         // values — to filter out transient ADC spikes from MQ sensor heating cycles.
-        const ppm = smoothPpm(key, rawPpm);
-        if (ppm == null) return;
+        const currentPpm = (typeof rawPpm === 'number' && isFinite(rawPpm) && rawPpm >= 0) ? rawPpm : null;
+        const smoothedPpm = smoothPpm(key, currentPpm);
+        if (currentPpm == null || smoothedPpm == null) return;
 
+        // Clear immediately when the live displayed ppm has already dropped
+        // below the first alert threshold so banners do not lag far behind
+        // the sensor cards.
+        if (currentPpm < elevTh) {
+            const buf = state.gasPpmBuffer[key];
+            if (buf) {
+                buf.length = 0;
+                buf.push(currentPpm);
+            }
+            state.gasAlerts[key] = {};
+            return;
+        }
+
+        // Use the higher of live and smoothed ppm for thresholding so real
+        // spikes still alert immediately, but display the live ppm value so
+        // the warning matches the visible sensor card.
+        const ppm = Math.max(currentPpm, smoothedPpm);
         const lvl  = ppm >= dangerTh ? 'danger'
                    : ppm >= warnTh   ? 'warn'
                    : ppm >= elevTh   ? 'elevated'
@@ -894,7 +912,7 @@ function checkSensorAlerts(data) {
             const icon  = lvl === 'danger' ? '🚨' : lvl === 'warn' ? '⚠️' : '🔔';
             const label = lvl === 'danger' ? 'DANGER' : lvl === 'warn' ? 'WARNING' : 'ELEVATED';
             const note  = lvl === 'danger' ? dangerNote : lvl === 'warn' ? warnNote : elevNote;
-            const valStr = ppm < 10 ? ppm.toFixed(1) : ppm.toFixed(0);
+            const valStr = currentPpm < 10 ? currentPpm.toFixed(1) : currentPpm.toFixed(0);
             const msg = `${label} — ${gasName}: ${valStr} ${unit}  (${note})`;
 
             // addLog + toast with debounce

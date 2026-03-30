@@ -226,6 +226,33 @@ if hasattr(ai_vision, '_drive_command_fn'):
                     cmd_data.get('payload', {}).get('direction', '?'), seq)
     ai_vision._drive_command_fn = _ai_push_drive
 
+
+def _update_ai_base_nav_from_command(command_type, payload=None):
+    """Keep AI assist ownership aligned with the real motion owner."""
+    payload = payload or {}
+
+    if command_type in ('NAV_START', 'NAV_RESUME', 'NAV_RETURN_HOME', 'MANUAL_TARGET_START', 'MANUAL_TARGET_RETURN_HOME'):
+        ai_vision.set_base_nav('waypoint')
+        return
+
+    if command_type in ('NAV_STOP', 'NAV_PAUSE'):
+        ai_vision.set_base_nav('none')
+        return
+
+    if command_type == 'MANUAL_OVERRIDE':
+        mode = str(payload.get('mode', '')).strip().lower()
+        if mode in ('release', 'off', 'disable', 'disabled', 'auto'):
+            ai_vision.set_base_nav('none')
+        return
+
+    if command_type == 'MANUAL_DRIVE':
+        direction = str(payload.get('direction', '')).strip().lower()
+        if direction in ('stop', 'brake', ''):
+            ai_vision.set_base_nav('none')
+        else:
+            ai_vision.set_base_nav('manual')
+        return
+
 def _queue_instant_command(command_type: str, payload: dict | None = None, device_id: str | None = None) -> int:
     """Append a low-latency command for the Pi to pick up."""
     global _instant_command_seq
@@ -1298,17 +1325,7 @@ def set_instant_command():
         logger.info("Instant command queued (POST): %s seq=%d", command_type, seq)
 
         # Track base navigation state for AI auto-drive gating
-        if command_type == 'NAV_START' or command_type == 'NAV_RESUME':
-            ai_vision.set_base_nav('waypoint')
-        elif command_type in ('NAV_STOP', 'NAV_PAUSE'):
-            ai_vision.set_base_nav('none')
-        elif command_type == 'MANUAL_DRIVE':
-            direction = data.get('payload', {}).get('direction', '')
-            if direction in ('forward', 'reverse'):
-                ai_vision.set_base_nav('manual')
-            elif direction in ('stop', 'brake', ''):
-                if ai_vision.base_nav_mode == 'manual' and not ai_vision.auto_drive:
-                    ai_vision.set_base_nav('none')
+        _update_ai_base_nav_from_command(command_type, data.get('payload'))
 
         return jsonify({'status': 'success', 'seq': seq}), 200
     except Exception as e:
@@ -1485,7 +1502,9 @@ def receive_robot_event():
             # NavController should only wait for AI advice when auto-drive
             # is ON and not paused — otherwise it should fallback immediately.
             ai_triggered = (
-                ai_vision._auto_drive and not ai_vision._ai_paused
+                ai_vision._auto_drive
+                and not ai_vision._ai_paused
+                and ai_vision.base_nav_mode in ('manual', 'waypoint')
             )
 
         return jsonify({
@@ -1836,26 +1855,14 @@ def handle_instant_command(data):
     # RULE: manual arrows (left/right/stop) do NOT clear base nav, so
     # the user can steer freely without disrupting auto-drive.
     cmd = data['command']
-    if cmd == 'NAV_START' or cmd == 'NAV_RESUME':
-        ai_vision.set_base_nav('waypoint')
-    elif cmd in ('NAV_STOP', 'NAV_PAUSE'):
-        ai_vision.set_base_nav('none')
-    elif cmd == 'MANUAL_DRIVE':
-        direction = (data.get('payload') or {}).get('direction', '')
-        if direction in ('forward', 'reverse'):
-            ai_vision.set_base_nav('manual')
-        elif direction in ('stop', 'brake', ''):
-            # Only clear manual base nav if auto-drive is OFF.
-            # If auto-drive is ON, let user press stop freely —
-            # they're just temporarily intervening.
-            if ai_vision.base_nav_mode == 'manual' and not ai_vision.auto_drive:
-                ai_vision.set_base_nav('none')
+    _update_ai_base_nav_from_command(cmd, data.get('payload'))
 
     # Send the updated AI status back to THIS client directly.
     # socketio.emit() (global broadcast) inside a SocketIO event handler can be
     # swallowed in some Flask-SocketIO/threading contexts; the locally-imported
     # emit() is guaranteed to reach the current client from within a handler.
-    if cmd in ('NAV_START', 'NAV_RESUME', 'NAV_STOP', 'NAV_PAUSE', 'MANUAL_DRIVE'):
+    if cmd in ('NAV_START', 'NAV_RESUME', 'NAV_RETURN_HOME', 'NAV_STOP', 'NAV_PAUSE',
+               'MANUAL_DRIVE', 'MANUAL_OVERRIDE', 'MANUAL_TARGET_START', 'MANUAL_TARGET_RETURN_HOME'):
         try:
             emit('ai_vision_status', ai_vision.get_status())
         except Exception:
