@@ -220,6 +220,20 @@
                         <div id="manual-target-actions" class="manual-target-actions" style="display:none;">
                             <button id="manual-target-return-home-btn" class="btn btn-outline" title="Return to the saved departure coordinates for the current heading-lock run">🏠 Return Home</button>
                         </div>
+                        <div class="joystick-status-card">
+                            <div class="section-header">
+                                <h3>USB Joystick Bridge</h3>
+                                <span id="joystick-status-pill" class="status-badge subtle">Disabled</span>
+                            </div>
+                            <div class="control-help" id="joystick-hint">Waiting for joystick bridge status...</div>
+                            <div class="joystick-status-grid">
+                                <div><strong>Status:</strong> <span id="joystick-status-text">Disabled</span></div>
+                                <div><strong>Port:</strong> <span id="joystick-port">--</span></div>
+                                <div><strong>Last update:</strong> <span id="joystick-last-update">--</span></div>
+                                <div><strong>Timeout:</strong> <span id="joystick-timeout">--</span></div>
+                                <div class="joystick-span"><strong>Last command:</strong> <span id="joystick-last-command">--</span></div>
+                            </div>
+                        </div>
                         <button id="sound-buzzer-btn" class="btn btn-warning">🔊 Sound Buzzer</button>
                     </div>
                     <div class="control-section gsm-hint">

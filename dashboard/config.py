@@ -6,6 +6,31 @@ import os
 from datetime import timedelta
 
 
+def _load_dotenv() -> None:
+    """Read dashboard/.env into os.environ without requiring python-dotenv."""
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+    if not os.path.exists(env_path):
+        return
+
+    try:
+        with open(env_path, 'r', encoding='utf-8') as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except OSError:
+        # Keep config startup non-blocking if the env file is unreadable.
+        pass
+
+
+_load_dotenv()
+
+
 class Config:
     """Application configuration"""
     
@@ -89,3 +114,14 @@ class Config:
     ZIGBEE_DEVICE_ID = os.environ.get('ZIGBEE_DEVICE_ID', 'robot_backup')
     ZIGBEE_FORWARD_COMMANDS = os.environ.get('ZIGBEE_FORWARD_COMMANDS', 'True') == 'True'
     BACKUP_LOCATION_TTL = int(os.environ.get('BACKUP_LOCATION_TTL', 30))  # seconds
+
+    # USB Joystick Bridge (ESP8266 -> Dashboard backend -> Pi)
+    JOYSTICK_ENABLED = os.environ.get('JOYSTICK_ENABLED', 'False') == 'True'
+    JOYSTICK_PORT = os.environ.get('JOYSTICK_PORT', '/dev/ttyUSB0')
+    JOYSTICK_BAUDRATE = int(os.environ.get('JOYSTICK_BAUDRATE', 115200))
+    JOYSTICK_DEVICE_ID = os.environ.get('JOYSTICK_DEVICE_ID', 'esp8266_joystick')
+    JOYSTICK_TIMEOUT_MS = int(os.environ.get('JOYSTICK_TIMEOUT_MS', 450))
+    JOYSTICK_DEADBAND = int(os.environ.get('JOYSTICK_DEADBAND', 18))
+    JOYSTICK_FORWARD_INTERVAL_MS = int(os.environ.get('JOYSTICK_FORWARD_INTERVAL_MS', 120))
+    JOYSTICK_STEER_GAIN = float(os.environ.get('JOYSTICK_STEER_GAIN', 1.35))
+    JOYSTICK_MIN_OUTPUT = int(os.environ.get('JOYSTICK_MIN_OUTPUT', 38))

@@ -1009,7 +1009,14 @@ class RobotController:
                 # If NavController is actively driving, pause it so the user
                 # gets immediate control.  They can resume nav later.
                 direction = (payload or {}).get('direction', '').lower()
-                if direction not in ('', 'none'):
+                raw_left = (payload or {}).get('left_motor')
+                raw_right = (payload or {}).get('right_motor')
+                analog_motion = False
+                try:
+                    analog_motion = abs(int(raw_left or 0)) > 0 or abs(int(raw_right or 0)) > 0
+                except (TypeError, ValueError):
+                    analog_motion = False
+                if direction not in ('', 'none') or analog_motion:
                     if self.nav_controller and self.nav_controller.is_active:
                         logger.info("Manual drive '%s' — pausing NavController (manual priority)",
                                     direction)
@@ -1124,8 +1131,16 @@ class RobotController:
                 self.api_client.ack_command(command_id, status=status, error_message=error_message)
 
     def _handle_manual_drive(self, payload: dict) -> bool:
+        mode = str((payload or {}).get('mode', '')).strip().lower()
         direction = (payload or {}).get('direction', '').lower()
-        speed = int((payload or {}).get('speed', 180))
+
+        if mode == 'analog' or 'left_motor' in (payload or {}) or 'right_motor' in (payload or {}):
+            return self._handle_manual_drive_analog(payload)
+
+        try:
+            speed = int((payload or {}).get('speed', 180))
+        except (TypeError, ValueError):
+            speed = 180
         speed = max(60, min(255, speed))
 
         if not hasattr(self.robot_link, 'manual_drive'):
@@ -1173,6 +1188,31 @@ class RobotController:
         except Exception as exc:
             logger.warning("Manual drive apply failed: %s", exc)
             return False
+
+    def _handle_manual_drive_analog(self, payload: dict) -> bool:
+        """Apply continuous raw left/right motor control from the dashboard joystick."""
+        if not self.robot_link or not hasattr(self.robot_link, 'send_manual_control'):
+            logger.warning("Analog manual drive not supported by current comm link")
+            return False
+
+        try:
+            left_motor = int((payload or {}).get('left_motor', 0))
+            right_motor = int((payload or {}).get('right_motor', 0))
+        except (TypeError, ValueError):
+            logger.warning("Invalid analog manual payload: %r", payload)
+            return False
+
+        left_motor = max(-127, min(127, left_motor))
+        right_motor = max(-127, min(127, right_motor))
+
+        self._cancel_manual_assist(reason="analog manual command")
+
+        with self._manual_drive_lock:
+            self._manual_drive_active = False
+            self._manual_drive_direction = 'stop'
+            self._manual_drive_speed = max(abs(left_motor), abs(right_motor), 0)
+
+        return bool(self.robot_link.send_manual_control(left_motor, right_motor, joystick_active=True))
 
     def _get_ai_drive_speed(self, payload: dict) -> int:
         requested = (payload or {}).get('speed')

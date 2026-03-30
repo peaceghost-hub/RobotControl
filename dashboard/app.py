@@ -17,7 +17,7 @@ from collections import deque
 from datetime import datetime
 import json
 import logging
-from threading import Lock
+from threading import Event, Lock, Thread
 import base64
 from typing import Optional
 import time
@@ -96,6 +96,14 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     ZigbeeBridge = None
 
+try:
+    from joystick_bridge import JoystickBridge
+except ImportError:  # pragma: no cover - optional dependency
+    try:
+        from .joystick_bridge import JoystickBridge
+    except ImportError:
+        JoystickBridge = None
+
 # Optional Moondream AI Vision
 try:
     from ai_vision import MoondreamVision, NullVision
@@ -145,7 +153,8 @@ latest_data = {
         'reason': None,
         'last_command': None
     },
-    'nav_status': None
+    'nav_status': None,
+    'joystick': None
 }
 
 # Buffer robot events (optional, small ring buffer)
@@ -170,6 +179,36 @@ backup_state = {
 }
 
 zigbee_bridge = None
+joystick_bridge = None
+joystick_watchdog_thread = None
+joystick_watchdog_stop = Event()
+
+joystick_state = {
+    'enabled': False,
+    'serial_available': bool(getattr(JoystickBridge, 'SERIAL_AVAILABLE', False)),
+    'connected': False,
+    'armed': False,
+    'active': False,
+    'timed_out': False,
+    'device_id': None,
+    'port': None,
+    'baudrate': None,
+    'direction': 'stop',
+    'speed': None,
+    'last_update': None,
+    'last_command': None,
+    'raw': None,
+}
+
+joystick_runtime = {
+    'last_packet_mono': 0.0,
+    'last_direction': 'stop',
+    'last_speed': None,
+    'last_signature': None,
+    'last_forward_mono': 0.0,
+    'override_engaged': False,
+    'last_reconnect_attempt': 0.0,
+}
 
 # ---- AI Vision Engine (Moondream 2) ----
 # Runs on the dashboard server (GPU/CPU), NOT on the Pi.
@@ -247,11 +286,21 @@ def _update_ai_base_nav_from_command(command_type, payload=None):
 
     if command_type == 'MANUAL_DRIVE':
         direction = str(payload.get('direction', '')).strip().lower()
-        if direction in ('stop', 'brake', ''):
+        if direction in ('stop', 'brake', '') and not payload.get('left_motor') and not payload.get('right_motor'):
             ai_vision.set_base_nav('none')
         else:
             ai_vision.set_base_nav('manual')
         return
+
+
+def _maybe_pause_full_drive(command_type: str) -> None:
+    """Manual/nav overrides must pause Full Drive immediately."""
+    if command_type not in ('MANUAL_DRIVE', 'MANUAL_OVERRIDE', 'NAV_START', 'NAV_RESUME', 'NAV_STOP', 'NAV_PAUSE', 'NAV_RETURN_HOME'):
+        return
+
+    if hasattr(ai_vision, '_fd_active') and ai_vision._fd_active and not ai_vision._fd_paused:
+        ai_vision.pause_full_drive()
+        logger.info("Full Drive auto-paused — control override (%s)", command_type)
 
 def _queue_instant_command(command_type: str, payload: dict | None = None, device_id: str | None = None) -> int:
     """Append a low-latency command for the Pi to pick up."""
@@ -267,6 +316,8 @@ def _queue_instant_command(command_type: str, payload: dict | None = None, devic
             'timestamp': datetime.utcnow().isoformat()
         })
     logger.info("Instant command queued: %s seq=%d", command_type, seq)
+    _update_ai_base_nav_from_command(command_type, payload)
+    _maybe_pause_full_drive(command_type)
     return seq
 
 # Helper to set latest camera frame (bytes)
@@ -360,6 +411,378 @@ def set_backup_state(
         socketio.emit('backup_update', snapshot, namespace='/realtime')
 
     return snapshot
+
+
+def _snapshot_joystick_state() -> dict:
+    """Return a JSON-friendly copy of the current joystick bridge state."""
+    return {
+        'enabled': bool(joystick_state.get('enabled', False)),
+        'serial_available': bool(joystick_state.get('serial_available', False)),
+        'connected': bool(joystick_state.get('connected', False)),
+        'armed': bool(joystick_state.get('armed', False)),
+        'active': bool(joystick_state.get('active', False)),
+        'timed_out': bool(joystick_state.get('timed_out', False)),
+        'device_id': joystick_state.get('device_id'),
+        'port': joystick_state.get('port'),
+        'baudrate': joystick_state.get('baudrate'),
+        'direction': joystick_state.get('direction', 'stop'),
+        'speed': joystick_state.get('speed'),
+        'last_update': joystick_state.get('last_update'),
+        'last_command': joystick_state.get('last_command'),
+        'raw': _sanitize_for_json(joystick_state.get('raw')),
+    }
+
+
+def _emit_joystick_state() -> dict:
+    """Broadcast the latest joystick state to dashboard clients."""
+    snapshot = _snapshot_joystick_state()
+    with thread_lock:
+        latest_data['joystick'] = snapshot
+    socketio.emit('joystick_update', snapshot, namespace='/realtime')
+    return snapshot
+
+
+def _set_joystick_state(*, emit_event: bool = True, **updates) -> dict:
+    """Update joystick tracking state and optionally emit it."""
+    joystick_state.update(updates)
+    if emit_event:
+        return _emit_joystick_state()
+    snapshot = _snapshot_joystick_state()
+    with thread_lock:
+        latest_data['joystick'] = snapshot
+    return snapshot
+
+
+def _normalize_joystick_speed(raw_speed) -> Optional[int]:
+    """Clamp an arbitrary speed value into the Mega-safe PWM range."""
+    if raw_speed is None:
+        return None
+    try:
+        numeric = int(round(float(raw_speed)))
+    except (TypeError, ValueError):
+        return None
+    return max(80, min(255, numeric))
+
+
+def _get_joystick_input_scale(x: float, y: float) -> float:
+    """Infer the joystick axis scale from the observed payload range."""
+    peak = max(abs(x), abs(y))
+    if peak > 100.0:
+        return 255.0
+    return 100.0
+
+
+def _scale_signed_axis_to_int8(value: float, scale: float) -> int:
+    """Map a signed joystick axis into the Mega's signed-int8 motor domain."""
+    if scale <= 0:
+        return 0
+    normalized = max(-1.0, min(1.0, float(value) / float(scale)))
+    return int(round(normalized * 127.0))
+
+
+def _apply_min_output(value: int, threshold: int) -> int:
+    """Lift tiny non-zero motor commands above the motors' stall zone."""
+    numeric = int(value)
+    if numeric == 0:
+        return 0
+    if abs(numeric) >= threshold:
+        return numeric
+    return threshold if numeric > 0 else -threshold
+
+
+def _build_joystick_drive_payload(payload: dict) -> dict:
+    """Convert joystick input into a MANUAL_DRIVE payload."""
+    direction = str(payload.get('direction', '')).strip().lower()
+    speed = _normalize_joystick_speed(payload.get('speed'))
+
+    if direction in {'forward', 'reverse', 'left', 'right', 'stop'}:
+        result = {'direction': direction}
+        if speed is not None:
+            result['speed'] = speed
+        return result
+
+    deadband = int(app.config.get('JOYSTICK_DEADBAND', 18))
+    min_output = max(0, min(120, int(app.config.get('JOYSTICK_MIN_OUTPUT', 38))))
+    steer_gain = float(app.config.get('JOYSTICK_STEER_GAIN', 1.35))
+
+    try:
+        x = float(payload.get('x', 0) or 0)
+    except (TypeError, ValueError):
+        x = 0.0
+    try:
+        y = float(payload.get('y', 0) or 0)
+    except (TypeError, ValueError):
+        y = 0.0
+
+    magnitude = max(abs(x), abs(y))
+    if magnitude <= deadband:
+        return {
+            'direction': 'stop',
+            'mode': 'analog',
+            'left_motor': 0,
+            'right_motor': 0,
+            'axes': {'x': x, 'y': y},
+        }
+
+    scale = _get_joystick_input_scale(x, y)
+    throttle = _scale_signed_axis_to_int8(y, scale)
+    # Keep analog joystick steering aligned with the dashboard button swap:
+    # the robot's physical left/right response is inverted at the motor layer.
+    steer = _scale_signed_axis_to_int8((-x) * steer_gain, scale)
+
+    left = max(-127, min(127, throttle + steer))
+    right = max(-127, min(127, throttle - steer))
+
+    # Weak DIY motors need a little help to break static friction.
+    left = _apply_min_output(left, min_output)
+    right = _apply_min_output(right, min_output)
+
+    motor_peak = max(abs(left), abs(right))
+    analog_speed = max(80, min(255, int(round(motor_peak * 255 / 127)))) if motor_peak > 0 else 0
+
+    return {
+        'direction': 'analog' if motor_peak > 0 else 'stop',
+        'mode': 'analog',
+        'left_motor': int(left),
+        'right_motor': int(right),
+        'speed': analog_speed,
+        'axes': {'x': x, 'y': y},
+    }
+
+
+def _send_ai_status_update() -> None:
+    """Broadcast current AI status after an ownership change."""
+    try:
+        socketio.emit('ai_vision_status', ai_vision.get_status(), namespace='/realtime')
+    except Exception:
+        pass
+
+
+def _release_joystick_override(reason: str) -> None:
+    """Stop the robot and release joystick manual ownership."""
+    if not joystick_runtime.get('override_engaged'):
+        _set_joystick_state(
+            armed=False,
+            active=False,
+            timed_out=reason == 'timeout',
+            direction='stop',
+            speed=None,
+            last_command=f'{reason}: idle',
+            raw=joystick_state.get('raw'),
+        )
+        return
+
+    device_id = app.config.get('DEFAULT_DEVICE_ID', 'robot_01')
+    _queue_instant_command('MANUAL_DRIVE', {'direction': 'stop', 'speed': 0}, device_id)
+    _queue_instant_command('MANUAL_OVERRIDE', {'mode': 'release'}, device_id)
+
+    joystick_runtime['override_engaged'] = False
+    joystick_runtime['last_direction'] = 'stop'
+    joystick_runtime['last_speed'] = None
+    joystick_runtime['last_signature'] = None
+
+    _set_joystick_state(
+        armed=False,
+        active=False,
+        timed_out=reason == 'timeout',
+        direction='stop',
+        speed=None,
+        last_command=f'{reason}: stop/release',
+        raw=joystick_state.get('raw'),
+    )
+    _send_ai_status_update()
+    logger.info("Joystick override released (%s)", reason)
+
+
+def _forward_joystick_command(direction: str, speed: Optional[int], *, raw: Optional[dict] = None) -> None:
+    """Forward joystick-derived manual commands to the Pi instant queue."""
+    device_id = app.config.get('DEFAULT_DEVICE_ID', 'robot_01')
+
+    if not joystick_runtime.get('override_engaged'):
+        _queue_instant_command('MANUAL_OVERRIDE', {'mode': 'hold'}, device_id)
+        joystick_runtime['override_engaged'] = True
+
+    payload = {'direction': direction}
+    if speed is not None:
+        payload['speed'] = speed
+    _queue_instant_command('MANUAL_DRIVE', payload, device_id)
+
+    joystick_runtime['last_direction'] = direction
+    joystick_runtime['last_speed'] = speed
+
+    command_label = direction if speed is None else f'{direction}@{speed}'
+    _set_joystick_state(
+        armed=True,
+        active=direction != 'stop',
+        timed_out=False,
+        direction=direction,
+        speed=speed,
+        last_command=command_label,
+        raw=raw,
+    )
+    _send_ai_status_update()
+    logger.info("Joystick forwarded command: %s", command_label)
+
+
+def _forward_joystick_payload(payload: dict, *, raw: Optional[dict] = None, armed: bool = True) -> None:
+    """Forward a mixed analog/discrete payload to the Pi manual drive lane."""
+    device_id = app.config.get('DEFAULT_DEVICE_ID', 'robot_01')
+
+    if not joystick_runtime.get('override_engaged'):
+        _queue_instant_command('MANUAL_OVERRIDE', {'mode': 'hold'}, device_id)
+        joystick_runtime['override_engaged'] = True
+
+    _queue_instant_command('MANUAL_DRIVE', payload, device_id)
+
+    direction = str(payload.get('direction', 'stop')).lower()
+    speed = payload.get('speed')
+    signature = (
+        direction,
+        payload.get('left_motor'),
+        payload.get('right_motor'),
+        speed,
+    )
+    joystick_runtime['last_direction'] = direction
+    joystick_runtime['last_speed'] = speed
+    joystick_runtime['last_signature'] = signature
+    joystick_runtime['last_forward_mono'] = time.monotonic()
+
+    command_label = payload.get('last_command')
+    if not command_label:
+        if payload.get('mode') == 'analog':
+            command_label = f"L{int(payload.get('left_motor', 0))} R{int(payload.get('right_motor', 0))}"
+        else:
+            command_label = direction if speed is None else f'{direction}@{speed}'
+
+    _set_joystick_state(
+        armed=armed,
+        active=direction != 'stop',
+        timed_out=False,
+        direction=direction,
+        speed=speed,
+        last_command=command_label,
+        raw=raw,
+    )
+    _send_ai_status_update()
+
+
+def handle_joystick_message(message: dict) -> None:
+    """Callback for inbound USB joystick packets."""
+    if not isinstance(message, dict):
+        return
+
+    drive_payload = _build_joystick_drive_payload(message)
+    direction = str(drive_payload.get('direction', 'stop')).lower()
+    speed = drive_payload.get('speed')
+
+    has_explicit_enable = 'enable' in message
+    enable_raw = message.get('enable', True)
+    if has_explicit_enable:
+        enabled = str(enable_raw).strip().lower() not in {'0', 'false', 'off', 'no', ''}
+    else:
+        enabled = direction != 'stop'
+
+    joystick_runtime['last_packet_mono'] = time.monotonic()
+
+    _set_joystick_state(
+        connected=True,
+        device_id=message.get('device_id') or app.config.get('JOYSTICK_DEVICE_ID', 'esp8266_joystick'),
+        port=app.config.get('JOYSTICK_PORT'),
+        baudrate=app.config.get('JOYSTICK_BAUDRATE'),
+        timed_out=False,
+        raw=message,
+        last_update=datetime.utcnow().isoformat(),
+    )
+
+    if not enabled:
+        if joystick_runtime.get('override_engaged'):
+            _release_joystick_override('deadman released' if has_explicit_enable else 'neutral')
+        else:
+            _set_joystick_state(
+                armed=False,
+                active=False,
+                timed_out=False,
+                direction='stop',
+                speed=0,
+                last_command='idle',
+                raw=message,
+            )
+        return
+
+    if backup_state.get('active'):
+        if joystick_runtime.get('override_engaged'):
+            _release_joystick_override('backup active')
+        _set_joystick_state(
+            armed=False,
+            active=False,
+            timed_out=False,
+            direction='stop',
+            speed=None,
+            last_command='blocked: backup active',
+            raw=message,
+        )
+        return
+
+    signature = (
+        direction,
+        drive_payload.get('left_motor'),
+        drive_payload.get('right_motor'),
+        speed,
+    )
+    forward_interval_s = max(0.08, float(app.config.get('JOYSTICK_FORWARD_INTERVAL_MS', 120)) / 1000.0)
+    now = time.monotonic()
+    due_for_refresh = (now - joystick_runtime.get('last_forward_mono', 0.0)) >= forward_interval_s
+
+    if signature == joystick_runtime.get('last_signature') and not due_for_refresh:
+        _set_joystick_state(
+            armed=True,
+            active=direction != 'stop',
+            timed_out=False,
+            direction=direction,
+            speed=speed,
+            last_command=joystick_state.get('last_command'),
+            raw=message,
+        )
+        return
+
+    _forward_joystick_payload(drive_payload, raw=message, armed=True)
+
+
+def _joystick_watchdog_loop() -> None:
+    """Stop and release joystick control when packets go stale."""
+    timeout_s = max(0.2, float(app.config.get('JOYSTICK_TIMEOUT_MS', 450)) / 1000.0)
+
+    while not joystick_watchdog_stop.wait(0.1):
+        _attempt_joystick_reconnect()
+
+        last_packet = joystick_runtime.get('last_packet_mono', 0.0)
+        if last_packet <= 0:
+            if joystick_bridge is not None:
+                ready = bool(joystick_bridge.ready)
+                if ready != bool(joystick_state.get('connected')):
+                    _set_joystick_state(connected=ready, emit_event=True)
+            continue
+
+        expired = (time.monotonic() - last_packet) > timeout_s
+        if expired:
+            if joystick_runtime.get('override_engaged'):
+                _release_joystick_override('timeout')
+            elif not joystick_state.get('timed_out'):
+                _set_joystick_state(
+                    connected=bool(joystick_bridge.ready) if joystick_bridge else False,
+                    armed=False,
+                    active=False,
+                    timed_out=True,
+                    direction='stop',
+                    speed=None,
+                    last_command='timeout',
+                    raw=joystick_state.get('raw'),
+                )
+
+        if joystick_bridge is not None:
+            ready = bool(joystick_bridge.ready)
+            if ready != bool(joystick_state.get('connected')):
+                _set_joystick_state(connected=ready, emit_event=True)
 
 
 def process_backup_location(data: dict) -> dict:
@@ -494,6 +917,93 @@ def initialize_zigbee() -> None:
         logger.warning("ZigBee bridge failed to start; backup commands will require REST ingestion")
 
 
+def initialize_joystick() -> None:
+    """Start the USB joystick bridge and watchdog if enabled."""
+    global joystick_bridge, joystick_watchdog_thread
+
+    _set_joystick_state(
+        enabled=app.config.get('JOYSTICK_ENABLED', False),
+        serial_available=bool(getattr(JoystickBridge, 'SERIAL_AVAILABLE', False)),
+        connected=False,
+        armed=False,
+        active=False,
+        timed_out=False,
+        device_id=app.config.get('JOYSTICK_DEVICE_ID'),
+        port=app.config.get('JOYSTICK_PORT'),
+        baudrate=app.config.get('JOYSTICK_BAUDRATE'),
+        direction='stop',
+        speed=None,
+        last_update=None,
+        last_command='idle',
+        raw=None,
+        emit_event=False,
+    )
+
+    if joystick_watchdog_thread is None or not joystick_watchdog_thread.is_alive():
+        joystick_watchdog_stop.clear()
+        joystick_watchdog_thread = Thread(target=_joystick_watchdog_loop, daemon=True)
+        joystick_watchdog_thread.start()
+
+    if not app.config.get('JOYSTICK_ENABLED', False):
+        logger.info("USB joystick bridge disabled in config")
+        joystick_bridge = None
+        return
+
+    if JoystickBridge is None or not getattr(JoystickBridge, 'SERIAL_AVAILABLE', False):
+        logger.warning("Joystick bridge module not available; install pyserial to enable USB joystick control")
+        return
+
+    _attempt_joystick_reconnect(force=True)
+
+
+def _attempt_joystick_reconnect(force: bool = False) -> bool:
+    """Try to open the joystick serial port again when it becomes available."""
+    global joystick_bridge
+
+    if not app.config.get('JOYSTICK_ENABLED', False):
+        return False
+
+    if JoystickBridge is None or not getattr(JoystickBridge, 'SERIAL_AVAILABLE', False):
+        return False
+
+    if joystick_bridge is not None and joystick_bridge.ready:
+        return True
+
+    now = time.monotonic()
+    if not force and (now - joystick_runtime.get('last_reconnect_attempt', 0.0)) < 2.0:
+        return False
+    joystick_runtime['last_reconnect_attempt'] = now
+
+    if joystick_bridge is not None:
+        try:
+            joystick_bridge.stop()
+        except Exception:
+            pass
+        joystick_bridge = None
+
+    bridge = JoystickBridge(
+        port=app.config.get('JOYSTICK_PORT', '/dev/ttyUSB0'),
+        baudrate=app.config.get('JOYSTICK_BAUDRATE', 115200),
+        device_id=app.config.get('JOYSTICK_DEVICE_ID', 'esp8266_joystick'),
+        on_message=handle_joystick_message,
+    )
+
+    if bridge.start():
+        joystick_bridge = bridge
+        _set_joystick_state(
+            connected=True,
+            timed_out=False,
+            last_command=joystick_state.get('last_command') or 'listening',
+            emit_event=True,
+        )
+        logger.info("USB joystick bridge connected on %s", app.config.get('JOYSTICK_PORT', '/dev/ttyUSB0'))
+        return True
+
+    joystick_bridge = None
+    _set_joystick_state(connected=False, emit_event=True)
+    return False
+
+
 def build_frontend_config():
     """Expose selected server configuration to the frontend"""
     cfg = app.config
@@ -525,6 +1035,12 @@ def build_frontend_config():
             'supportsCommands': cfg.get('ZIGBEE_FORWARD_COMMANDS', False),
             'deviceId': cfg.get('ZIGBEE_DEVICE_ID'),
             'ttl': cfg.get('BACKUP_LOCATION_TTL', 30)
+        },
+        'joystick': {
+            'enabled': cfg.get('JOYSTICK_ENABLED', False),
+            'port': cfg.get('JOYSTICK_PORT'),
+            'baudrate': cfg.get('JOYSTICK_BAUDRATE'),
+            'timeoutMs': cfg.get('JOYSTICK_TIMEOUT_MS', 450)
         }
     }
 
@@ -1304,29 +1820,19 @@ def acknowledge_command(command_id: int):
 @app.route('/api/commands/instant', methods=['POST'])
 def set_instant_command():
     """Enqueue an instant command for the Pi to pick up immediately."""
-    global _instant_command_seq
     try:
         data = request.get_json() or {}
         command_type = data.get('command')
         if not command_type:
             return jsonify({'status': 'error', 'message': 'Missing command'}), 400
 
-        with thread_lock:
-            _instant_command_seq += 1
-            seq = _instant_command_seq
-            _instant_queue.append({
-                'command_type': command_type,
-                'payload': data.get('payload', {}),
-                'device_id': data.get('device_id') or app.config.get('DEFAULT_DEVICE_ID', 'robot_01'),
-                'seq': seq,
-                'timestamp': datetime.utcnow().isoformat()
-            })
+        seq = _queue_instant_command(
+            command_type,
+            data.get('payload', {}),
+            data.get('device_id') or app.config.get('DEFAULT_DEVICE_ID', 'robot_01'),
+        )
 
-        logger.info("Instant command queued (POST): %s seq=%d", command_type, seq)
-
-        # Track base navigation state for AI auto-drive gating
-        _update_ai_base_nav_from_command(command_type, data.get('payload'))
-
+        _send_ai_status_update()
         return jsonify({'status': 'success', 'seq': seq}), 200
     except Exception as e:
         logger.error("Error in instant command: %s", e)
@@ -1842,6 +2348,7 @@ def handle_update_request(data):
                 # We do not include large frame payloads here to keep event light
             },
             'backup': latest_data.get('backup'),
+            'joystick': latest_data.get('joystick'),
             'nav_status': latest_data.get('nav_status'),
             'ai_vision': ai_vision.get_status()
         })
@@ -1851,19 +2358,13 @@ def handle_update_request(data):
 def handle_instant_command(data):
     """Handle ALL dashboard→Pi commands via WebSocket.
     Commands are appended to a queue so nothing is lost between polls."""
-    global _instant_command_seq
     if not data or not data.get('command'):
         return
-    with thread_lock:
-        _instant_command_seq += 1
-        seq = _instant_command_seq
-        _instant_queue.append({
-            'command_type': data['command'],
-            'payload': data.get('payload', {}),
-            'device_id': data.get('device_id') or app.config.get('DEFAULT_DEVICE_ID', 'robot_01'),
-            'seq': seq,
-            'timestamp': datetime.utcnow().isoformat()
-        })
+    seq = _queue_instant_command(
+        data['command'],
+        data.get('payload', {}),
+        data.get('device_id') or app.config.get('DEFAULT_DEVICE_ID', 'robot_01'),
+    )
     logger.info("Instant command queued (WS): %s seq=%d  (queue depth: %d)",
                 data['command'], seq, len(_instant_queue))
 
@@ -1872,7 +2373,6 @@ def handle_instant_command(data):
     # RULE: manual arrows (left/right/stop) do NOT clear base nav, so
     # the user can steer freely without disrupting auto-drive.
     cmd = data['command']
-    _update_ai_base_nav_from_command(cmd, data.get('payload'))
 
     # Send the updated AI status back to THIS client directly.
     # socketio.emit() (global broadcast) inside a SocketIO event handler can be
@@ -1885,14 +2385,6 @@ def handle_instant_command(data):
         except Exception:
             pass
 
-    # ── Manual controls always override Full Drive ────────────────
-    # Any manual drive or nav command auto-pauses Full Drive so the
-    # user has instant priority.  They can resume via the UI.
-    if cmd in ('MANUAL_DRIVE', 'NAV_START', 'NAV_RESUME', 'NAV_STOP', 'NAV_PAUSE', 'NAV_RETURN_HOME') and hasattr(ai_vision, '_fd_active') and ai_vision._fd_active:
-        if not ai_vision._fd_paused:
-            ai_vision.pause_full_drive()
-            logger.info("Full Drive auto-paused — control override (%s)", cmd)
-
 
 # ============= DATABASE INITIALIZATION =============
 
@@ -1902,6 +2394,7 @@ def initialize_app():
         db.create_all()
         logger.info("Database tables created")
         initialize_zigbee()
+        initialize_joystick()
 
 
 # ============= MAIN =============

@@ -30,6 +30,7 @@ const CONFIG = {
     camera: DASHBOARD_CONFIG.camera || {},
     commands: DASHBOARD_CONFIG.commands || {},
     backup: DASHBOARD_CONFIG.backup || {},
+    joystick: DASHBOARD_CONFIG.joystick || {},
     manualDefaults: {
         speed: 180,
         minSpeed: 80,
@@ -74,6 +75,18 @@ const state = {
         lastCommand: null,
         ttl: CONFIG.backup && CONFIG.backup.ttl ? Number(CONFIG.backup.ttl) : null
     },
+    joystick: {
+        enabled: Boolean(CONFIG.joystick && CONFIG.joystick.enabled),
+        connected: false,
+        armed: false,
+        active: false,
+        timedOut: false,
+        port: (CONFIG.joystick && CONFIG.joystick.port) || '--',
+        baudrate: (CONFIG.joystick && CONFIG.joystick.baudrate) || null,
+        lastUpdate: null,
+        lastCommand: 'idle',
+        direction: 'stop'
+    },
     backupSpeed: 160,
     gasAlerts: {},
     gasPpmBuffer: { mq2: [], mq135: [], mq7: [] }  // rolling PPM window for smoothing
@@ -114,6 +127,7 @@ function initDashboard() {
     
     updateControlIndicators();
     updateBackupIndicators();
+    updateJoystickIndicators();
 
     const speedSlider = document.getElementById('manual-speed-slider');
     if (speedSlider) {
@@ -220,6 +234,7 @@ function connectWebSocket() {
         if (data.status) handleStatusUpdate(data.status);
         if (data.camera) handleCameraFrame(data.camera);
         if (data.backup) handleBackupUpdate(data.backup);
+        if (data.joystick) handleJoystickUpdate(data.joystick);
         if (data.nav_status && data.nav_status.nav) updateNavStatusUI(data.nav_status.nav);
     });
     
@@ -235,6 +250,10 @@ function connectWebSocket() {
 
     socket.on('backup_update', (data) => {
         handleBackupUpdate(data);
+    });
+
+    socket.on('joystick_update', (data) => {
+        handleJoystickUpdate(data);
     });
 
     // Robot events (e.g., obstacle detected)
@@ -1584,6 +1603,102 @@ function updateBackupIndicators() {
     }
 }
 
+function handleJoystickUpdate(data) {
+    if (!data) return;
+
+    const previous = { ...state.joystick };
+    state.joystick.enabled = data.enabled !== undefined ? Boolean(data.enabled) : state.joystick.enabled;
+    state.joystick.connected = Boolean(data.connected);
+    state.joystick.armed = Boolean(data.armed);
+    state.joystick.active = Boolean(data.active);
+    state.joystick.timedOut = Boolean(data.timed_out ?? data.timedOut);
+    state.joystick.port = data.port || state.joystick.port || '--';
+    state.joystick.baudrate = data.baudrate || state.joystick.baudrate || null;
+    state.joystick.lastUpdate = data.last_update || data.lastUpdate || state.joystick.lastUpdate;
+    state.joystick.lastCommand = data.last_command || data.lastCommand || state.joystick.lastCommand;
+    state.joystick.direction = data.direction || state.joystick.direction || 'stop';
+
+    updateJoystickIndicators();
+    updateControlIndicators();
+
+    if (!previous.connected && state.joystick.connected) {
+        addLog('success', `USB joystick connected on ${state.joystick.port}`);
+    } else if (previous.connected && !state.joystick.connected) {
+        addLog('warning', 'USB joystick disconnected');
+    }
+
+    if (!previous.active && state.joystick.active) {
+        addLog('info', `USB joystick active: ${state.joystick.lastCommand || state.joystick.direction}`);
+    } else if ((previous.active || previous.armed) && !state.joystick.active && !state.joystick.armed && state.joystick.timedOut) {
+        addLog('warning', 'USB joystick timed out - robot stopped safely');
+    }
+}
+
+function updateJoystickIndicators() {
+    const statusPill = document.getElementById('joystick-status-pill');
+    const statusText = document.getElementById('joystick-status-text');
+    const portEl = document.getElementById('joystick-port');
+    const lastUpdateEl = document.getElementById('joystick-last-update');
+    const lastCommandEl = document.getElementById('joystick-last-command');
+    const timeoutEl = document.getElementById('joystick-timeout');
+    const hintEl = document.getElementById('joystick-hint');
+
+    let status = 'Disabled';
+    let statusClass = '';
+
+    if (state.joystick.enabled) {
+        if (state.joystick.timedOut) {
+            status = 'Timeout';
+            statusClass = 'warning';
+        } else if (state.joystick.active) {
+            status = 'Active';
+            statusClass = 'danger';
+        } else if (state.joystick.armed) {
+            status = 'Armed';
+            statusClass = 'warning';
+        } else if (state.joystick.connected) {
+            status = 'Standby';
+        } else {
+            status = 'Disconnected';
+        }
+    }
+
+    if (statusPill) {
+        statusPill.textContent = status;
+        statusPill.classList.toggle('warning', statusClass === 'warning');
+        statusPill.classList.toggle('danger', statusClass === 'danger');
+    }
+    if (statusText) {
+        statusText.textContent = status;
+    }
+    if (portEl) {
+        portEl.textContent = state.joystick.port || '--';
+    }
+    if (lastUpdateEl) {
+        lastUpdateEl.textContent = state.joystick.lastUpdate ? new Date(state.joystick.lastUpdate).toLocaleTimeString() : '--';
+    }
+    if (lastCommandEl) {
+        lastCommandEl.textContent = state.joystick.lastCommand || '--';
+    }
+    if (timeoutEl) {
+        const timeoutMs = Number(CONFIG.joystick && CONFIG.joystick.timeoutMs);
+        timeoutEl.textContent = Number.isFinite(timeoutMs) ? `${timeoutMs} ms` : '--';
+    }
+    if (hintEl) {
+        if (!state.joystick.enabled) {
+            hintEl.textContent = 'USB joystick bridge is disabled in the dashboard config.';
+        } else if (state.joystick.timedOut) {
+            hintEl.textContent = 'Packet timeout triggered STOP + release. Re-arm the joystick to drive again.';
+        } else if (state.joystick.active || state.joystick.armed) {
+            hintEl.textContent = 'Joystick currently owns manual control. Center the stick or release deadman to stop safely.';
+        } else if (state.joystick.connected) {
+            hintEl.textContent = 'Joystick connected. Hold the deadman/enable switch and move the stick to send manual drive commands.';
+        } else {
+            hintEl.textContent = 'Waiting for ESP8266 joystick packets on the configured USB serial port.';
+        }
+    }
+}
+
 function formatBackupCommand(command) {
     if (!command) return '--';
     try {
@@ -1845,12 +1960,14 @@ function updateControlIndicators() {
         let modeText = state.controlMode || 'AUTO';
         if (state.backup.active) {
             modeText = 'BACKUP';
+        } else if (state.joystick.active || state.joystick.armed) {
+            modeText = 'JOYSTICK';
         } else if (state.manualOverride) {
             modeText = 'MANUAL';
         }
         modeLabel.textContent = modeText;
-        modeLabel.classList.toggle('danger', state.manualOverride || state.backup.active);
-        modeLabel.classList.toggle('warning', state.backup.active);
+        modeLabel.classList.toggle('danger', state.manualOverride || state.backup.active || state.joystick.active);
+        modeLabel.classList.toggle('warning', state.backup.active || state.joystick.armed || state.joystick.timedOut);
     }
 
     const manualButtons = document.querySelectorAll('.manual-grid .control-key');
@@ -1861,7 +1978,7 @@ function updateControlIndicators() {
 
     const releaseBtn = document.getElementById('manual-release-btn');
     if (releaseBtn) {
-        releaseBtn.disabled = !state.manualOverride || state.backup.active;
+        releaseBtn.disabled = (!state.manualOverride && !state.joystick.armed && !state.joystick.active) || state.backup.active;
     }
 
     const manualTargetReturnHomeBtn = document.getElementById('manual-target-return-home-btn');
@@ -1873,7 +1990,7 @@ function updateControlIndicators() {
     navButtonIds.forEach(id => {
         const button = document.getElementById(id);
         if (button) {
-            button.disabled = state.backup.active;
+            button.disabled = state.backup.active || state.joystick.armed || state.joystick.active;
         }
     });
 }
