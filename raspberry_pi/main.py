@@ -1292,6 +1292,8 @@ class RobotController:
         waypoints = self.api_client.get_waypoints()
         if not waypoints:
             logger.warning("No waypoints to load")
+            if self.nav_controller:
+                self.nav_controller.set_waypoints([])
             return False
         waypoints = sorted(waypoints, key=lambda w: w.get('sequence', 0))
         if self.nav_controller:

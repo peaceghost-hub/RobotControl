@@ -8,6 +8,9 @@ let waypointMarkers = [];
 let robotPath;
 let mapClickEnabled = false;
 let obstacleCircles = [];
+let headingLockTargetMarker = null;
+let headingLockTargetLine = null;
+let currentHeadingLockTarget = null;
 
 /**
  * Initialize Map
@@ -106,6 +109,8 @@ function updateRobotPosition(lat, lon, heading = 0, source = 'primary') {
         Heading: ${heading.toFixed(1)}°<br>
         Source: ${source === 'backup' ? 'Backup (LoRa)' : 'Primary'}
     `);
+
+    syncHeadingLockTargetOverlay();
 }
 
 /**
@@ -243,6 +248,94 @@ function updateMapWaypoints(waypoints) {
     }
 }
 
+function syncHeadingLockTargetOverlay(options = {}) {
+    if (!map) return;
+
+    if (!currentHeadingLockTarget) {
+        if (headingLockTargetMarker) {
+            map.removeLayer(headingLockTargetMarker);
+            headingLockTargetMarker = null;
+        }
+        if (headingLockTargetLine) {
+            map.removeLayer(headingLockTargetLine);
+            headingLockTargetLine = null;
+        }
+        return;
+    }
+
+    const lat = Number(currentHeadingLockTarget.latitude);
+    const lon = Number(currentHeadingLockTarget.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+        currentHeadingLockTarget = null;
+        syncHeadingLockTargetOverlay(options);
+        return;
+    }
+
+    const targetPos = [lat, lon];
+    if (!headingLockTargetMarker) {
+        const targetIcon = L.divIcon({
+            className: 'heading-lock-target-marker',
+            html: `<div style="
+                background: #f59e0b;
+                color: white;
+                border-radius: 50%;
+                width: 28px;
+                height: 28px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-weight: bold;
+                border: 3px solid white;
+                box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+            ">T</div>`,
+            iconSize: [28, 28],
+            iconAnchor: [14, 14]
+        });
+        headingLockTargetMarker = L.marker(targetPos, { icon: targetIcon }).addTo(map);
+    } else {
+        headingLockTargetMarker.setLatLng(targetPos);
+    }
+
+    headingLockTargetMarker.bindPopup(`
+        <b>Heading-Lock Target</b><br>
+        ${currentHeadingLockTarget.description || 'Manual target'}<br>
+        Lat: ${lat.toFixed(6)}<br>
+        Lon: ${lon.toFixed(6)}
+    `);
+
+    if (robotMarker) {
+        const robotPos = robotMarker.getLatLng();
+        const lineCoords = [
+            [robotPos.lat, robotPos.lng],
+            targetPos
+        ];
+        if (!headingLockTargetLine) {
+            headingLockTargetLine = L.polyline(lineCoords, {
+                color: '#f59e0b',
+                weight: 2,
+                opacity: 0.8,
+                dashArray: '6, 6'
+            }).addTo(map);
+        } else {
+            headingLockTargetLine.setLatLngs(lineCoords);
+        }
+    } else if (headingLockTargetLine) {
+        map.removeLayer(headingLockTargetLine);
+        headingLockTargetLine = null;
+    }
+
+    if (options.fit && robotMarker) {
+        const bounds = L.latLngBounds([targetPos]);
+        bounds.extend(robotMarker.getLatLng());
+        map.fitBounds(bounds, { padding: [50, 50] });
+    }
+}
+
+function updateHeadingLockTarget(target, options = {}) {
+    currentHeadingLockTarget = target || null;
+    syncHeadingLockTargetOverlay(options);
+}
+
 /**
  * Add Waypoint from Map Click
  */
@@ -338,6 +431,7 @@ window.addEventListener('resize', () => {
 // Export functions to global scope
 window.updateRobotPosition = updateRobotPosition;
 window.updateMapWaypoints = updateMapWaypoints;
+window.updateHeadingLockTarget = updateHeadingLockTarget;
 window.centerMapOnRobot = centerMapOnRobot;
 window.setBackupMapMode = setBackupMapMode;
 window.showObstacleIndicator = showObstacleIndicator;

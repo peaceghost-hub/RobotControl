@@ -1210,6 +1210,14 @@ async function startManualTargetNavigation() {
         await sendRobotCommand('MANUAL_TARGET_START', payload);
     }
 
+    if (window.updateHeadingLockTarget) {
+        window.updateHeadingLockTarget({
+            latitude,
+            longitude,
+            description: 'Heading-lock target'
+        }, { fit: true });
+    }
+
     state.manualOverride = false;
     state.manualTargetHomeAvailable = false;
     state.navigationActive = true;
@@ -1314,6 +1322,10 @@ async function sendWaypointsToRobot() {
         addLog('info', 'Instant command: WAYPOINT_PUSH');
     } else {
         await sendRobotCommand('WAYPOINT_PUSH');
+    }
+
+    if (window.updateHeadingLockTarget) {
+        window.updateHeadingLockTarget(null);
     }
 }
 
@@ -2795,6 +2807,9 @@ function updateNavStatusUI(nav) {
     }
     if (nav.heading_lock_home_available !== undefined) {
         state.manualTargetHomeAvailable = Boolean(nav.heading_lock_home_available);
+    }
+    if (nav.heading_lock_target !== undefined && typeof window.updateHeadingLockTarget === 'function') {
+        window.updateHeadingLockTarget(nav.heading_lock_target || null);
     }
     if (nav.target_bearing !== undefined) {
         compassState.targetBearing = nav.target_bearing !== null ? Number(nav.target_bearing) : null;

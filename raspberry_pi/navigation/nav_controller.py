@@ -113,6 +113,7 @@ class NavController:
 
         # Waypoints
         self._waypoints: List[Dict[str, Any]] = []
+        self._waypoint_source = 'dashboard'
         self._current_wp_index = 0
         self._heading_lock_active = False
         self._heading_lock_bearing: Optional[float] = None
@@ -235,10 +236,23 @@ class NavController:
             # Pop one-shot notification
             notif = self._notification
             self._notification = None
+            heading_lock_target = None
+            if self._running and self._waypoint_source == 'heading_lock':
+                if 0 <= self._current_wp_index < len(self._waypoints):
+                    current_target = self._waypoints[self._current_wp_index]
+                    try:
+                        heading_lock_target = {
+                            'latitude': float(current_target['latitude']),
+                            'longitude': float(current_target['longitude']),
+                            'description': current_target.get('description', 'Heading-lock target'),
+                        }
+                    except (TypeError, ValueError, KeyError):
+                        heading_lock_target = None
 
             return {
                 'state': self._state.name,
                 'nav_mode': 'heading_lock' if self._heading_lock_active else 'waypoint',
+                'waypoint_source': self._waypoint_source,
                 'current_heading': round(heading, 1),
                 'magnetic_heading': round(magnetic, 1),
                 'target_bearing': round(self._target_bearing, 1) if self._state not in (NavState.IDLE, NavState.COMPLETE, NavState.PAUSED) else None,
@@ -255,6 +269,7 @@ class NavController:
                 'base_drive_speed': int(self.DRIVE_SPEED),
                 'heading_lock_bearing': round(self._heading_lock_bearing, 1) if self._heading_lock_active and self._heading_lock_bearing is not None else None,
                 'heading_lock_home_available': self._heading_lock_home is not None,
+                'heading_lock_target': heading_lock_target,
                 'safe_avoid_distance_cm': self.SAFE_AVOID_DISTANCE_CM,
                 'last_obstacle_distance_cm': self._last_obstacle_distance_cm if self._last_obstacle_distance_cm > 0 else None,
             }
@@ -278,6 +293,7 @@ class NavController:
                 return False
             self._heading_lock_active = False
             self._heading_lock_bearing = None
+            self._waypoint_source = 'dashboard'
             # Reverse the FULL waypoint list (already visited + remaining)
             reversed_wps = list(reversed(self._waypoints))
             self._waypoints = reversed_wps
@@ -299,6 +315,7 @@ class NavController:
         """Load waypoints from dashboard.  Each: {latitude, longitude, id, description}."""
         with self._lock:
             self._waypoints = list(waypoints)
+            self._waypoint_source = 'dashboard'
             self._current_wp_index = 0
             self._completed_waypoints = []
             self._heading_lock_active = False
@@ -347,6 +364,7 @@ class NavController:
                 'id': 1,
                 'description': 'Heading-lock target',
             }]
+            self._waypoint_source = 'heading_lock'
             self._current_wp_index = 0
             self._completed_waypoints = []
             self._avoid_attempts = 0
@@ -383,6 +401,7 @@ class NavController:
             return_bearing = ((outbound_bearing or 0.0) + 180.0) % 360.0 if outbound_bearing is not None else None
 
             self._waypoints = [home_wp]
+            self._waypoint_source = 'heading_lock'
             self._current_wp_index = 0
             self._completed_waypoints = []
             self._avoid_attempts = 0
@@ -425,8 +444,8 @@ class NavController:
     def start(self):
         """Begin autonomous navigation."""
         with self._lock:
-            if not self._waypoints:
-                logger.warning("Cannot start nav — no waypoints")
+            if not self._waypoints or self._waypoint_source != 'dashboard':
+                logger.warning("Cannot start nav — no dashboard waypoints loaded")
                 return False
             self._current_wp_index = 0
             self._completed_waypoints = []
@@ -1272,6 +1291,7 @@ class NavController:
                 self._send_stop()
                 self._heading_lock_active = False
                 self._heading_lock_bearing = None
+                self._waypoint_source = 'dashboard'
                 self._notification = {
                     'level': 'success',
                     'msg': 'All waypoints complete! Navigation finished.'
