@@ -74,6 +74,7 @@ class NavController:
     ACQUIRE_REVERSE_HYST = 10.0   # degrees — error required before turn reversal
     HEADING_FILTER_ALPHA = 0.35   # low-pass smoothing for compass heading
     ACQUIRE_BEARING_SAMPLES = 6   # number of live bearing samples to average
+    ACQUIRE_TIMEOUT_RETRIES = 2   # retries before pausing for manual review
     DRIVE_SPEED          = 150    # PWM forward
     SAFE_AVOID_DISTANCE_CM = 40   # reverse back to at least this distance before avoiding
     SAFE_REVERSE_TIMEOUT = 3.0    # seconds — never reverse indefinitely
@@ -145,6 +146,7 @@ class NavController:
         self._acquire_turn_since = 0.0
         self._bearing_samples: List[float] = []
         self._last_heading_error = 0.0
+        self._acquire_timeout_retries = 0
 
         # AI obstacle advice (received from AI Vision via main.py)
         # When obstacle is detected, NavController waits for AI to advise
@@ -181,11 +183,13 @@ class NavController:
         self.OBSTACLE_PASS_TIME = max(0.5, min(4.0, float(nav_cfg.get(
             'obstacle_pass_time', self.OBSTACLE_PASS_TIME
         ))))
+        self._invert_rotation_direction = bool(nav_cfg.get('invert_rotation_direction', False))
 
-        logger.info("NavController created (trim L=%+d R=%+d, speed=%d, radius=%.1fm, adaptive=%s, safe_avoid=%dcm)",
+        logger.info("NavController created (trim L=%+d R=%+d, speed=%d, radius=%.1fm, adaptive=%s, safe_avoid=%dcm, invert_rotation=%s)",
                      self._motor_trim_left, self._motor_trim_right,
                      self.DRIVE_SPEED, self.WAYPOINT_RADIUS,
-                     self._adaptive_speed, self.SAFE_AVOID_DISTANCE_CM)
+                     self._adaptive_speed, self.SAFE_AVOID_DISTANCE_CM,
+                     self._invert_rotation_direction)
 
     # ================================================================
     #  PUBLIC API
@@ -351,6 +355,7 @@ class NavController:
             self._heading_lock_bearing = outbound_bearing
             self._heading_lock_outbound_bearing = outbound_bearing
             self._heading_lock_home = home_wp
+            self._acquire_timeout_retries = 0
 
         self._running = True
         self._send_stop()
@@ -384,6 +389,7 @@ class NavController:
             self._avoid_direction = 'left'
             self._heading_lock_active = return_bearing is not None
             self._heading_lock_bearing = return_bearing
+            self._acquire_timeout_retries = 0
 
         self._running = True
         self._send_stop()
@@ -430,6 +436,7 @@ class NavController:
             self._heading_lock_bearing = None
             self._heading_lock_home = None
             self._heading_lock_outbound_bearing = None
+            self._acquire_timeout_retries = 0
         self._running = True
         self._send_stop()
         self._notification = {'level': 'info', 'msg': 'Navigation started — preparing...'}
@@ -447,6 +454,7 @@ class NavController:
         self._send_stop()
         self._heading_lock_active = False
         self._heading_lock_bearing = None
+        self._acquire_timeout_retries = 0
         self._enter_state(NavState.IDLE)
         logger.info("Navigation STOPPED")
 
@@ -461,6 +469,7 @@ class NavController:
         if self._state != NavState.PAUSED:
             return
         self._running = True
+        self._acquire_timeout_retries = 0
         self._send_stop()
         self._notification = {'level': 'info', 'msg': 'Navigation resumed — preparing...'}
         self._enter_state(NavState.PREPARING)
@@ -721,8 +730,24 @@ class NavController:
         # Timeout check
         elapsed = now - self._state_entry_time
         if elapsed > self.HEADING_ACQUIRE_TIMEOUT:
-            logger.warning("Heading acquire timeout — proceeding anyway")
-            self._enter_state(NavState.NAVIGATING)
+            self._send_stop()
+            self._acquire_timeout_retries += 1
+            if self._acquire_timeout_retries <= self.ACQUIRE_TIMEOUT_RETRIES:
+                self._notification = {
+                    'level': 'warning',
+                    'msg': f'Heading acquire timeout — retrying ({self._acquire_timeout_retries}/{self.ACQUIRE_TIMEOUT_RETRIES})',
+                }
+                logger.warning("Heading acquire timeout — retrying (%d/%d)",
+                               self._acquire_timeout_retries,
+                               self.ACQUIRE_TIMEOUT_RETRIES)
+                self._enter_state(NavState.PREPARING)
+            else:
+                self._notification = {
+                    'level': 'error',
+                    'msg': 'Heading acquire failed repeatedly — navigation paused for manual review',
+                }
+                logger.error("Heading acquire failed repeatedly — pausing navigation for manual review")
+                self.pause()
             return
 
         if abs_error <= self.HEADING_DEADBAND:
@@ -1010,11 +1035,17 @@ class NavController:
 
     def _send_rotate_left(self, speed: int):
         """Rotate left: left motor backward, right motor forward."""
-        self._send_motor_command(-speed, speed)
+        if self._invert_rotation_direction:
+            self._send_motor_command(speed, -speed)
+        else:
+            self._send_motor_command(-speed, speed)
 
     def _send_rotate_right(self, speed: int):
         """Rotate right: left motor forward, right motor backward."""
-        self._send_motor_command(speed, -speed)
+        if self._invert_rotation_direction:
+            self._send_motor_command(-speed, speed)
+        else:
+            self._send_motor_command(speed, -speed)
 
     def _send_stop(self):
         """Stop both motors."""
@@ -1219,6 +1250,8 @@ class NavController:
             self._acquire_deadband_since = None
             self._acquire_turn_direction = 0
             self._acquire_turn_since = 0.0
+        if new_state in (NavState.NAVIGATING, NavState.WAYPOINT_REACHED, NavState.COMPLETE):
+            self._acquire_timeout_retries = 0
         # When leaving obstacle handling, reset AI advice flags so the
         # next obstacle encounter starts with a clean slate.
         if new_state not in (NavState.OBSTACLE_DETECTED, NavState.OBSTACLE_AVOID):
