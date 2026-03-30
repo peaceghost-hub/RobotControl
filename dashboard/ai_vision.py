@@ -341,6 +341,7 @@ class MoondreamVision:
         self._stop_event = threading.Event()
 
         # ── Auto-drive (ADVISORY — never blocks primary nav) ──────────
+        self._control_enabled = True    # master switch for AI robot control
         self._auto_drive = False
         self._ai_paused = False        # quick-toggle: pause drive commands
         self._base_nav_mode = "none"
@@ -506,6 +507,10 @@ class MoondreamVision:
         return self._auto_drive
 
     @property
+    def control_enabled(self) -> bool:
+        return self._control_enabled
+
+    @property
     def last_nav(self) -> Optional[Dict[str, str]]:
         return self._last_nav
 
@@ -535,7 +540,32 @@ class MoondreamVision:
                 self._interval = self._user_interval
                 logger.info("Uncoupled: interval restored → %.1fs", self._interval)
 
+    def set_control_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if self._control_enabled == enabled:
+            self._broadcast_status()
+            return
+
+        self._control_enabled = enabled
+        logger.info("AI control master -> %s", "ON" if enabled else "OFF")
+
+        if not enabled:
+            self._auto_drive = False
+            self._ai_paused = False
+            self._obstacle_event.clear()
+            if self._fd_active:
+                self.stop_full_drive()
+                return
+
+        self._apply_coupled_interval()
+        self._broadcast_status()
+
     def set_auto_drive(self, enabled: bool) -> None:
+        if enabled and not self._control_enabled:
+            logger.info("Auto-drive request ignored — AI control master is OFF")
+            self._auto_drive = False
+            self._broadcast_status()
+            return
         self._auto_drive = enabled
         if enabled:
             # Switch display mode to navigate so the UI shows nav results,
@@ -596,6 +626,8 @@ class MoondreamVision:
         timer tick.  If ``frame_bytes`` is None, the analysis loop will grab
         the latest frame via ``_frame_provider`` as usual.
         """
+        if not self._control_enabled:
+            return
         if not self._enabled and not self._auto_drive:
             return
         with self._obstacle_lock:
@@ -786,7 +818,7 @@ class MoondreamVision:
 
     def _assist_nav_active(self) -> bool:
         """Auto-drive assist may only move when a base navigation owner is active."""
-        return self._auto_drive and self._base_nav_mode in ("manual", "waypoint")
+        return self._control_enabled and self._auto_drive and self._base_nav_mode in ("manual", "waypoint")
 
     def _send_drive_command(self, nav: Dict[str, str]) -> None:
         """Send obstacle avoidance advice to the Pi.
@@ -1457,6 +1489,8 @@ class MoondreamVision:
         """Start a Full Drive mission.  AI becomes the driver."""
         if not task or not task.strip():
             return {"ok": False, "error": "No task description provided"}
+        if not self._control_enabled:
+            return {"ok": False, "error": "AI control is disabled"}
         if self._status != "ready":
             return {"ok": False, "error": f"Model not ready (status={self._status})"}
         if self._fd_active:
@@ -1869,6 +1903,7 @@ class MoondreamVision:
             "last_result": self._last_result,
             "torch_available": _TORCH_AVAILABLE,
             "transformers_available": True,  # compat flag
+            "control_enabled": self._control_enabled,
             "auto_drive": self._auto_drive,
             "ai_paused": self._ai_paused,
             "base_nav_mode": self._base_nav_mode,

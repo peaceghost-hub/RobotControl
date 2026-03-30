@@ -1481,6 +1481,7 @@ def receive_robot_event():
         ai_triggered = False   # will a drive command follow?
         if (event['type'] == 'OBSTACLE_DETECTED'
                 and hasattr(ai_vision, 'obstacle_trigger')
+                and ai_vision.control_enabled
                 and (ai_vision._enabled or ai_vision._auto_drive)
                 and ai_vision._status == 'ready'):
             dist_cm = -1
@@ -1502,6 +1503,8 @@ def receive_robot_event():
             # NavController should only wait for AI advice when auto-drive
             # is ON and not paused — otherwise it should fallback immediately.
             ai_triggered = (
+                ai_vision.control_enabled
+                and
                 ai_vision._auto_drive
                 and not ai_vision._ai_paused
                 and ai_vision.base_nav_mode in ('manual', 'waypoint')
@@ -1631,6 +1634,20 @@ def ai_enable():
     enabled = bool(data.get('enabled', False))
     ai_vision.set_enabled(enabled)
     return jsonify({'status': 'ok', 'enabled': ai_vision.enabled})
+
+
+@app.route('/api/ai/control', methods=['POST'])
+def ai_control_toggle():
+    """Master enable/disable for AI robot-control participation."""
+    data = request.get_json(silent=True) or {}
+    enabled = bool(data.get('enabled', True))
+    ai_vision.set_control_enabled(enabled)
+    return jsonify({
+        'status': 'ok',
+        'control_enabled': ai_vision.control_enabled,
+        'auto_drive': ai_vision.auto_drive,
+        'full_drive': ai_vision.get_fd_status(),
+    })
 
 
 @app.route('/api/ai/mode', methods=['POST'])

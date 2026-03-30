@@ -3570,6 +3570,7 @@ function initZoomControls() {
     // ── DOM references ───────────────────────────────────────────────
     const loadBtn       = document.getElementById('ai-load-btn');
     const unloadBtn     = document.getElementById('ai-unload-btn');
+    const controlToggle = document.getElementById('ai-control-toggle');
     const enableToggle  = document.getElementById('ai-enable-toggle');
     const modeSelect    = document.getElementById('ai-mode-select');
     const detectRow     = document.getElementById('ai-detect-row');
@@ -3625,6 +3626,7 @@ function initZoomControls() {
     function updateBaseNavUI(mode) {
         currentBaseNav = mode || 'none';
         const active = currentBaseNav !== 'none';
+        const controlActive = !controlToggle || controlToggle.checked;
 
         // Auto-drive toggle is NEVER disabled — user can toggle freely.
         // Commands are gated server-side (no base nav = no commands sent).
@@ -3637,10 +3639,18 @@ function initZoomControls() {
         }
 
         // Visual cue on the drive row
-        if (driveRow) driveRow.setAttribute('data-nav-active', active ? 'true' : 'false');
+        if (driveRow) driveRow.setAttribute('data-nav-active', active && controlActive ? 'true' : 'false');
 
         // Show/hide hint
-        if (driveHint) driveHint.style.display = active ? 'none' : '';
+        if (driveHint) {
+            if (!controlActive) {
+                driveHint.style.display = '';
+                driveHint.textContent = 'ℹ️ AI control is disabled. Traditional obstacle avoidance is active until you switch AI Control back on.';
+            } else {
+                driveHint.style.display = active ? 'none' : '';
+                driveHint.textContent = 'ℹ️ Auto-drive assists your driving (manual arrows or waypoint nav). It never drives on its own.';
+            }
+        }
     }
 
     function updatePauseBtn(paused) {
@@ -3650,6 +3660,25 @@ function initZoomControls() {
         pauseBtn.style.display = (driveToggle && driveToggle.checked) ? '' : 'none';
         pauseBtn.textContent = paused ? '▶ Resume' : '⏸ Pause';
         pauseBtn.className = 'btn btn-small' + (paused ? ' btn-warning' : '');
+    }
+
+    function updateAiControlUi(enabled) {
+        const active = Boolean(enabled);
+        if (controlToggle) controlToggle.checked = active;
+        if (driveToggle) driveToggle.disabled = !active;
+        if (fdStart) fdStart.disabled = !active;
+        if (!active) {
+            if (driveToggle) driveToggle.checked = false;
+            updatePauseBtn(false);
+            if (driveHint) {
+                driveHint.style.display = '';
+                driveHint.textContent = 'ℹ️ AI control is disabled. Traditional obstacle avoidance is active until you switch AI Control back on.';
+            }
+        } else if (driveHint && currentBaseNav === 'none') {
+            driveHint.style.display = '';
+            driveHint.textContent = 'ℹ️ Auto-drive assists your driving (manual arrows or waypoint nav). It never drives on its own.';
+        }
+        updateBaseNavUI(currentBaseNav);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────
@@ -3763,6 +3792,16 @@ function initZoomControls() {
                     modeSelect.value = 'navigate';
                     syncModeRows();
                 }
+            }
+        });
+    });
+
+    if (controlToggle) controlToggle.addEventListener('change', () => {
+        apiPost('/api/ai/control', { enabled: controlToggle.checked }).then(r => {
+            if (r) {
+                if (typeof r.control_enabled === 'boolean') updateAiControlUi(r.control_enabled);
+                if (typeof r.auto_drive === 'boolean' && driveToggle) driveToggle.checked = r.auto_drive;
+                if (r.full_drive) updateFdUI(r.full_drive);
             }
         });
     });
@@ -3928,6 +3967,9 @@ function initZoomControls() {
 
         socket.on('ai_vision_status', (data) => {
             if (data.status) setModelBadge(data.status);
+            if (typeof data.control_enabled === 'boolean') {
+                updateAiControlUi(data.control_enabled);
+            }
             if (enableToggle && typeof data.enabled === 'boolean') {
                 enableToggle.checked = data.enabled;
             }
@@ -3955,6 +3997,9 @@ function initZoomControls() {
         socket.on('full_update', (data) => {
             if (data && data.ai_vision) {
                 setModelBadge(data.ai_vision.status);
+                if (typeof data.ai_vision.control_enabled === 'boolean') {
+                    updateAiControlUi(data.ai_vision.control_enabled);
+                }
                 if (enableToggle && typeof data.ai_vision.enabled === 'boolean') {
                     enableToggle.checked = data.ai_vision.enabled;
                 }
