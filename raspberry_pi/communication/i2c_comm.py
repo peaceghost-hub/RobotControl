@@ -44,6 +44,7 @@ class I2CComm:
     CMD_SEND_HEADING = ord('D')      # New: Send heading from Pi to Mega
     CMD_RETURN_TO_START = ord('B')   # New: Return to starting position
     CMD_MANUAL_OVERRIDE = ord('V')   # New: Manual control signal with joystick data
+    CMD_RAW_MOTOR = ord('J')         # New: Raw throttle/steer command (wireless-compatible)
     CMD_EMERGENCY_STOP = ord('E')    # New: Emergency stop
     CMD_WIRELESS_BROADCAST = ord('Z') # New: Broadcast position via wireless
     # CMD_SET_AI_OVERRIDE removed — AI override flag chain eliminated
@@ -284,6 +285,18 @@ class I2CComm:
         right = self._clamp_int8(right_motor)
         payload = struct.pack('<bbb', left, right, 1 if joystick_active else 0)
         resp = self._exchange(self.CMD_MANUAL_OVERRIDE, payload, expect=2)
+        return self._is_ack(resp)
+
+    def send_raw_motor(self, throttle: int, steer: int, joystick_active: bool = False) -> bool:
+        """Send wireless-style raw throttle/steer over I2C.
+
+        This mirrors the Mega's CC1101 raw motor path so joystick control
+        can behave like the wireless remote while still traveling Pi -> I2C.
+        """
+        throttle = max(-255, min(255, int(throttle)))
+        steer = max(-255, min(255, int(steer)))
+        payload = struct.pack('<hhB', throttle, steer, 1 if joystick_active else 0)
+        resp = self._exchange(self.CMD_RAW_MOTOR, payload, expect=2)
         return self._is_ack(resp)
 
     # ------------------------------------------------------------------

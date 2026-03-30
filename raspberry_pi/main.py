@@ -1009,11 +1009,11 @@ class RobotController:
                 # If NavController is actively driving, pause it so the user
                 # gets immediate control.  They can resume nav later.
                 direction = (payload or {}).get('direction', '').lower()
-                raw_left = (payload or {}).get('left_motor')
-                raw_right = (payload or {}).get('right_motor')
+                raw_throttle = (payload or {}).get('throttle')
+                raw_steer = (payload or {}).get('steer')
                 analog_motion = False
                 try:
-                    analog_motion = abs(int(raw_left or 0)) > 0 or abs(int(raw_right or 0)) > 0
+                    analog_motion = abs(int(raw_throttle or 0)) > 0 or abs(int(raw_steer or 0)) > 0
                 except (TypeError, ValueError):
                     analog_motion = False
                 if direction not in ('', 'none') or analog_motion:
@@ -1134,7 +1134,7 @@ class RobotController:
         mode = str((payload or {}).get('mode', '')).strip().lower()
         direction = (payload or {}).get('direction', '').lower()
 
-        if mode == 'analog' or 'left_motor' in (payload or {}) or 'right_motor' in (payload or {}):
+        if mode == 'analog' or 'throttle' in (payload or {}) or 'steer' in (payload or {}):
             return self._handle_manual_drive_analog(payload)
 
         try:
@@ -1190,29 +1190,37 @@ class RobotController:
             return False
 
     def _handle_manual_drive_analog(self, payload: dict) -> bool:
-        """Apply continuous raw left/right motor control from the dashboard joystick."""
-        if not self.robot_link or not hasattr(self.robot_link, 'send_manual_control'):
+        """Apply continuous raw throttle/steer control from the dashboard joystick."""
+        if not self.robot_link:
             logger.warning("Analog manual drive not supported by current comm link")
             return False
 
         try:
-            left_motor = int((payload or {}).get('left_motor', 0))
-            right_motor = int((payload or {}).get('right_motor', 0))
+            throttle = int((payload or {}).get('throttle', 0))
+            steer = int((payload or {}).get('steer', 0))
         except (TypeError, ValueError):
             logger.warning("Invalid analog manual payload: %r", payload)
             return False
 
-        left_motor = max(-127, min(127, left_motor))
-        right_motor = max(-127, min(127, right_motor))
+        throttle = max(-255, min(255, throttle))
+        steer = max(-255, min(255, steer))
 
         self._cancel_manual_assist(reason="analog manual command")
 
         with self._manual_drive_lock:
             self._manual_drive_active = False
             self._manual_drive_direction = 'stop'
-            self._manual_drive_speed = max(abs(left_motor), abs(right_motor), 0)
+            self._manual_drive_speed = max(abs(throttle), abs(steer), 0)
 
-        return bool(self.robot_link.send_manual_control(left_motor, right_motor, joystick_active=True))
+        if hasattr(self.robot_link, 'send_raw_motor') and self.robot_link.send_raw_motor(throttle, steer, joystick_active=True):
+            return True
+
+        # Fallback for older Mega firmware that does not yet support raw throttle/steer over I2C.
+        left_motor = max(-127, min(127, int(round((throttle + steer) * 127 / 255.0))))
+        right_motor = max(-127, min(127, int(round((throttle - steer) * 127 / 255.0))))
+        if hasattr(self.robot_link, 'send_manual_control'):
+            return bool(self.robot_link.send_manual_control(left_motor, right_motor, joystick_active=True))
+        return False
 
     def _get_ai_drive_speed(self, payload: dict) -> int:
         requested = (payload or {}).get('speed')

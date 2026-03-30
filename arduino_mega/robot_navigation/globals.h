@@ -79,6 +79,7 @@ const uint8_t CMD_SEND_HEADING    = 'D';  // Pi -> Mega heading forwarding
 const uint8_t CMD_WAYPOINT_COMPLETED = 'Y';  // Mega -> Pi: waypoint reached
 const uint8_t CMD_RETURN_TO_START = 'B';
 const uint8_t CMD_MANUAL_OVERRIDE = 'V';
+const uint8_t CMD_RAW_MOTOR = 'J';   // Pi -> Mega raw throttle/steer (wireless-compatible)
 const uint8_t CMD_EMERGENCY_STOP  = 'E';
 const uint8_t CMD_WIRELESS_BROADCAST = 'Z';
 // CMD_FOLLOW_LINE removed — no line follower hardware

@@ -123,5 +123,4 @@ class Config:
     JOYSTICK_TIMEOUT_MS = int(os.environ.get('JOYSTICK_TIMEOUT_MS', 450))
     JOYSTICK_DEADBAND = int(os.environ.get('JOYSTICK_DEADBAND', 18))
     JOYSTICK_FORWARD_INTERVAL_MS = int(os.environ.get('JOYSTICK_FORWARD_INTERVAL_MS', 120))
-    JOYSTICK_STEER_GAIN = float(os.environ.get('JOYSTICK_STEER_GAIN', 1.35))
-    JOYSTICK_MIN_OUTPUT = int(os.environ.get('JOYSTICK_MIN_OUTPUT', 38))
+    JOYSTICK_STEER_GAIN = float(os.environ.get('JOYSTICK_STEER_GAIN', 1.0))

@@ -879,6 +879,35 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
       }
       break;
 
+    case CMD_RAW_MOTOR:
+      if (length >= 5) {
+        int16_t throttle = 0;
+        int16_t steer = 0;
+        memcpy(&throttle, &payload[0], sizeof(int16_t));
+        memcpy(&steer, &payload[2], sizeof(int16_t));
+        bool active = payload[4] != 0;
+
+        if (active && navigationActive) {
+          navigationActive = false;
+          navigation.pause();
+        }
+
+        if (active) {
+          processRawMotorCommand(throttle, steer, 0);
+          manualOverride = true;
+          controlMode = MODE_MANUAL;
+        } else {
+          motors.stop();
+          manualOverride = false;
+          controlMode = MODE_AUTO;
+        }
+
+        prepareAck();
+      } else {
+        prepareError(ERR_PACKET_SIZE);
+      }
+      break;
+
     case CMD_EMERGENCY_STOP:
       motors.stop();
       navigationActive = false;

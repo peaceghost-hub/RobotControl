@@ -286,7 +286,7 @@ def _update_ai_base_nav_from_command(command_type, payload=None):
 
     if command_type == 'MANUAL_DRIVE':
         direction = str(payload.get('direction', '')).strip().lower()
-        if direction in ('stop', 'brake', '') and not payload.get('left_motor') and not payload.get('right_motor'):
+        if direction in ('stop', 'brake', '') and not payload.get('throttle') and not payload.get('steer'):
             ai_vision.set_base_nav('none')
         else:
             ai_vision.set_base_nav('manual')
@@ -472,22 +472,12 @@ def _get_joystick_input_scale(x: float, y: float) -> float:
     return 100.0
 
 
-def _scale_signed_axis_to_int8(value: float, scale: float) -> int:
-    """Map a signed joystick axis into the Mega's signed-int8 motor domain."""
+def _scale_signed_axis_to_int255(value: float, scale: float) -> int:
+    """Map a signed joystick axis into the Mega wireless raw-motor domain."""
     if scale <= 0:
         return 0
     normalized = max(-1.0, min(1.0, float(value) / float(scale)))
-    return int(round(normalized * 127.0))
-
-
-def _apply_min_output(value: int, threshold: int) -> int:
-    """Lift tiny non-zero motor commands above the motors' stall zone."""
-    numeric = int(value)
-    if numeric == 0:
-        return 0
-    if abs(numeric) >= threshold:
-        return numeric
-    return threshold if numeric > 0 else -threshold
+    return int(round(normalized * 255.0))
 
 
 def _build_joystick_drive_payload(payload: dict) -> dict:
@@ -502,8 +492,7 @@ def _build_joystick_drive_payload(payload: dict) -> dict:
         return result
 
     deadband = int(app.config.get('JOYSTICK_DEADBAND', 18))
-    min_output = max(0, min(120, int(app.config.get('JOYSTICK_MIN_OUTPUT', 38))))
-    steer_gain = float(app.config.get('JOYSTICK_STEER_GAIN', 1.35))
+    steer_gain = float(app.config.get('JOYSTICK_STEER_GAIN', 1.0))
 
     try:
         x = float(payload.get('x', 0) or 0)
@@ -519,32 +508,21 @@ def _build_joystick_drive_payload(payload: dict) -> dict:
         return {
             'direction': 'stop',
             'mode': 'analog',
-            'left_motor': 0,
-            'right_motor': 0,
+            'throttle': 0,
+            'steer': 0,
             'axes': {'x': x, 'y': y},
         }
 
     scale = _get_joystick_input_scale(x, y)
-    throttle = _scale_signed_axis_to_int8(y, scale)
-    # Keep analog joystick steering aligned with the dashboard button swap:
-    # the robot's physical left/right response is inverted at the motor layer.
-    steer = _scale_signed_axis_to_int8((-x) * steer_gain, scale)
-
-    left = max(-127, min(127, throttle + steer))
-    right = max(-127, min(127, throttle - steer))
-
-    # Weak DIY motors need a little help to break static friction.
-    left = _apply_min_output(left, min_output)
-    right = _apply_min_output(right, min_output)
-
-    motor_peak = max(abs(left), abs(right))
-    analog_speed = max(80, min(255, int(round(motor_peak * 255 / 127)))) if motor_peak > 0 else 0
+    throttle = max(-255, min(255, _scale_signed_axis_to_int255(y, scale)))
+    steer = max(-255, min(255, _scale_signed_axis_to_int255(x * steer_gain, scale)))
+    analog_speed = max(abs(throttle), abs(steer))
 
     return {
-        'direction': 'analog' if motor_peak > 0 else 'stop',
+        'direction': 'analog' if analog_speed > 0 else 'stop',
         'mode': 'analog',
-        'left_motor': int(left),
-        'right_motor': int(right),
+        'throttle': int(throttle),
+        'steer': int(steer),
         'speed': analog_speed,
         'axes': {'x': x, 'y': y},
     }
@@ -638,8 +616,8 @@ def _forward_joystick_payload(payload: dict, *, raw: Optional[dict] = None, arme
     speed = payload.get('speed')
     signature = (
         direction,
-        payload.get('left_motor'),
-        payload.get('right_motor'),
+        payload.get('throttle'),
+        payload.get('steer'),
         speed,
     )
     joystick_runtime['last_direction'] = direction
@@ -650,7 +628,7 @@ def _forward_joystick_payload(payload: dict, *, raw: Optional[dict] = None, arme
     command_label = payload.get('last_command')
     if not command_label:
         if payload.get('mode') == 'analog':
-            command_label = f"L{int(payload.get('left_motor', 0))} R{int(payload.get('right_motor', 0))}"
+            command_label = f"T{int(payload.get('throttle', 0))} S{int(payload.get('steer', 0))}"
         else:
             command_label = direction if speed is None else f'{direction}@{speed}'
 
@@ -725,8 +703,8 @@ def handle_joystick_message(message: dict) -> None:
 
     signature = (
         direction,
-        drive_payload.get('left_motor'),
-        drive_payload.get('right_motor'),
+        drive_payload.get('throttle'),
+        drive_payload.get('steer'),
         speed,
     )
     forward_interval_s = max(0.08, float(app.config.get('JOYSTICK_FORWARD_INTERVAL_MS', 120)) / 1000.0)
