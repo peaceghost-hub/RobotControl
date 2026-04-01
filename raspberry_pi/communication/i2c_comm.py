@@ -296,8 +296,11 @@ class I2CComm:
         throttle = max(-255, min(255, int(throttle)))
         steer = max(-255, min(255, int(steer)))
         payload = struct.pack('<hhB', throttle, steer, 1 if joystick_active else 0)
-        resp = self._exchange(self.CMD_RAW_MOTOR, payload, expect=2)
-        return self._is_ack(resp)
+        # Raw joystick control is latency-sensitive. A write-only send keeps
+        # the control stream responsive and avoids building up slow ACK waits
+        # on the Pi during rapid steering updates.
+        with self._lock:
+            return self._write(bytes([self.CMD_RAW_MOTOR]) + payload)
 
     # ------------------------------------------------------------------
     # Dashboard command helpers (used by raspberry_pi/main.py)

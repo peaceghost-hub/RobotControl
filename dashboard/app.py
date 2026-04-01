@@ -202,6 +202,9 @@ joystick_state = {
 
 joystick_runtime = {
     'last_packet_mono': 0.0,
+    'last_nonzero_packet_mono': 0.0,
+    'last_connect_mono': 0.0,
+    'last_stale_restart_mono': 0.0,
     'last_direction': 'stop',
     'last_speed': None,
     'last_signature': None,
@@ -305,13 +308,73 @@ def _maybe_pause_full_drive(command_type: str) -> None:
 def _queue_instant_command(command_type: str, payload: dict | None = None, device_id: str | None = None) -> int:
     """Append a low-latency command for the Pi to pick up."""
     global _instant_command_seq
+    payload = payload or {}
+    target_device = device_id or app.config.get('DEFAULT_DEVICE_ID', 'robot_01')
+
     with thread_lock:
+        # High-rate joystick analog control should behave like a live stream,
+        # not a backlog of stale motions. Keep only the newest analog MANUAL_DRIVE
+        # packet (and its paired MANUAL_OVERRIDE hold) for the target device.
+        if command_type == 'MANUAL_DRIVE' and (
+            payload.get('mode') == 'analog'
+            or 'throttle' in payload
+            or 'steer' in payload
+        ):
+            retained = deque()
+            while _instant_queue:
+                queued = _instant_queue.popleft()
+                queued_type = queued.get('command_type')
+                queued_payload = queued.get('payload') or {}
+                queued_device = queued.get('device_id')
+                is_same_device = queued_device == target_device
+                is_analog_drive = (
+                    queued_type == 'MANUAL_DRIVE'
+                    and (
+                        queued_payload.get('mode') == 'analog'
+                        or 'throttle' in queued_payload
+                        or 'steer' in queued_payload
+                    )
+                )
+                is_hold = (
+                    queued_type == 'MANUAL_OVERRIDE'
+                    and str(queued_payload.get('mode', '')).strip().lower() in ('hold', 'on', 'enable', 'enabled')
+                )
+                if is_same_device and (is_analog_drive or is_hold):
+                    continue
+                retained.append(queued)
+            _instant_queue.extend(retained)
+
+        # Releasing joystick/manual ownership should flush any stale analog
+        # motion that has not yet reached the Pi so STOP is authoritative.
+        if command_type == 'MANUAL_OVERRIDE' and str(payload.get('mode', '')).strip().lower() in (
+            'release', 'off', 'disable', 'disabled', 'auto'
+        ):
+            retained = deque()
+            while _instant_queue:
+                queued = _instant_queue.popleft()
+                queued_type = queued.get('command_type')
+                queued_payload = queued.get('payload') or {}
+                queued_device = queued.get('device_id')
+                is_same_device = queued_device == target_device
+                is_analog_drive = (
+                    queued_type == 'MANUAL_DRIVE'
+                    and (
+                        queued_payload.get('mode') == 'analog'
+                        or 'throttle' in queued_payload
+                        or 'steer' in queued_payload
+                    )
+                )
+                if is_same_device and is_analog_drive:
+                    continue
+                retained.append(queued)
+            _instant_queue.extend(retained)
+
         _instant_command_seq += 1
         seq = _instant_command_seq
         _instant_queue.append({
             'command_type': command_type,
-            'payload': payload or {},
-            'device_id': device_id or app.config.get('DEFAULT_DEVICE_ID', 'robot_01'),
+            'payload': payload,
+            'device_id': target_device,
             'seq': seq,
             'timestamp': datetime.utcnow().isoformat()
         })
@@ -551,7 +614,17 @@ def _release_joystick_override(reason: str) -> None:
         return
 
     device_id = app.config.get('DEFAULT_DEVICE_ID', 'robot_01')
-    _queue_instant_command('MANUAL_DRIVE', {'direction': 'stop', 'speed': 0}, device_id)
+    _queue_instant_command(
+        'MANUAL_DRIVE',
+        {
+            'direction': 'stop',
+            'mode': 'analog',
+            'throttle': 0,
+            'steer': 0,
+            'speed': 0,
+        },
+        device_id,
+    )
     _queue_instant_command('MANUAL_OVERRIDE', {'mode': 'release'}, device_id)
 
     joystick_runtime['override_engaged'] = False
@@ -570,6 +643,31 @@ def _release_joystick_override(reason: str) -> None:
     )
     _send_ai_status_update()
     logger.info("Joystick override released (%s)", reason)
+
+
+def _mark_joystick_disconnected(reason: str) -> None:
+    """Clear joystick ownership and mark the USB bridge as disconnected."""
+    joystick_runtime['override_engaged'] = False
+    joystick_runtime['last_direction'] = 'stop'
+    joystick_runtime['last_speed'] = None
+    joystick_runtime['last_signature'] = None
+    joystick_runtime['last_forward_mono'] = 0.0
+    joystick_runtime['last_packet_mono'] = 0.0
+    joystick_runtime['last_nonzero_packet_mono'] = 0.0
+    joystick_runtime['last_connect_mono'] = 0.0
+    joystick_runtime['last_reconnect_attempt'] = 0.0
+
+    _set_joystick_state(
+        connected=False,
+        armed=False,
+        active=False,
+        timed_out=False,
+        direction='stop',
+        speed=None,
+        last_command=reason,
+        raw=joystick_state.get('raw'),
+    )
+    _send_ai_status_update()
 
 
 def _forward_joystick_command(direction: str, speed: Optional[int], *, raw: Optional[dict] = None) -> None:
@@ -624,6 +722,8 @@ def _forward_joystick_payload(payload: dict, *, raw: Optional[dict] = None, arme
     joystick_runtime['last_speed'] = speed
     joystick_runtime['last_signature'] = signature
     joystick_runtime['last_forward_mono'] = time.monotonic()
+    if direction != 'stop':
+        joystick_runtime['last_nonzero_packet_mono'] = joystick_runtime['last_forward_mono']
 
     command_label = payload.get('last_command')
     if not command_label:
@@ -670,6 +770,7 @@ def handle_joystick_message(message: dict) -> None:
         timed_out=False,
         raw=message,
         last_update=datetime.utcnow().isoformat(),
+        emit_event=False,
     )
 
     if not enabled:
@@ -728,26 +829,59 @@ def handle_joystick_message(message: dict) -> None:
 
 def _joystick_watchdog_loop() -> None:
     """Stop and release joystick control when packets go stale."""
+    global joystick_bridge
     timeout_s = max(0.2, float(app.config.get('JOYSTICK_TIMEOUT_MS', 450)) / 1000.0)
+    connect_grace_s = max(0.3, float(app.config.get('JOYSTICK_CONNECT_GRACE_MS', 1200)) / 1000.0)
+    stale_s = max(connect_grace_s + 0.5, float(app.config.get('JOYSTICK_STALE_MS', 2500)) / 1000.0)
 
     while not joystick_watchdog_stop.wait(0.1):
         _attempt_joystick_reconnect()
 
+        now = time.monotonic()
+        ready = bool(joystick_bridge.ready) if joystick_bridge is not None else False
+        connect_age = now - joystick_runtime.get('last_connect_mono', 0.0)
+
         last_packet = joystick_runtime.get('last_packet_mono', 0.0)
         if last_packet <= 0:
-            if joystick_bridge is not None:
-                ready = bool(joystick_bridge.ready)
-                if ready != bool(joystick_state.get('connected')):
-                    _set_joystick_state(connected=ready, emit_event=True)
+            if ready != bool(joystick_state.get('connected')):
+                _set_joystick_state(connected=ready, timed_out=False, emit_event=True)
             continue
 
-        expired = (time.monotonic() - last_packet) > timeout_s
+        if ready and (now - last_packet) > stale_s:
+            if now - joystick_runtime.get('last_stale_restart_mono', 0.0) >= 2.0:
+                joystick_runtime['last_stale_restart_mono'] = now
+                logger.warning(
+                    "USB joystick bridge stale on %s (no packets for %.2fs); restarting",
+                    app.config.get('JOYSTICK_PORT', '/dev/ttyUSB0'),
+                    now - last_packet,
+                )
+                if joystick_runtime.get('override_engaged'):
+                    _release_joystick_override('stale bridge')
+                if joystick_bridge is not None:
+                    try:
+                        joystick_bridge.stop()
+                    except Exception:
+                        pass
+                    joystick_bridge = None
+                _mark_joystick_disconnected('bridge stale')
+                continue
+
+        if ready and connect_age < connect_grace_s:
+            if not joystick_state.get('connected'):
+                _set_joystick_state(connected=True, timed_out=False, emit_event=True)
+            continue
+
+        expired = (now - last_packet) > timeout_s
         if expired:
             if joystick_runtime.get('override_engaged'):
                 _release_joystick_override('timeout')
-            elif not joystick_state.get('timed_out'):
+            elif (
+                joystick_runtime.get('last_nonzero_packet_mono', 0.0) > 0
+                and not joystick_state.get('timed_out')
+                and joystick_state.get('active')
+            ):
                 _set_joystick_state(
-                    connected=bool(joystick_bridge.ready) if joystick_bridge else False,
+                    connected=ready,
                     armed=False,
                     active=False,
                     timed_out=True,
@@ -757,10 +891,12 @@ def _joystick_watchdog_loop() -> None:
                     raw=joystick_state.get('raw'),
                 )
 
-        if joystick_bridge is not None:
-            ready = bool(joystick_bridge.ready)
-            if ready != bool(joystick_state.get('connected')):
-                _set_joystick_state(connected=ready, emit_event=True)
+        if ready != bool(joystick_state.get('connected')):
+            _set_joystick_state(
+                connected=ready,
+                timed_out=bool(joystick_state.get('timed_out')) if ready else False,
+                emit_event=True,
+            )
 
 
 def process_backup_location(data: dict) -> dict:
@@ -962,12 +1098,15 @@ def _attempt_joystick_reconnect(force: bool = False) -> bool:
     bridge = JoystickBridge(
         port=app.config.get('JOYSTICK_PORT', '/dev/ttyUSB0'),
         baudrate=app.config.get('JOYSTICK_BAUDRATE', 115200),
+        read_timeout=max(0.05, float(app.config.get('JOYSTICK_READ_TIMEOUT_MS', 150)) / 1000.0),
         device_id=app.config.get('JOYSTICK_DEVICE_ID', 'esp8266_joystick'),
         on_message=handle_joystick_message,
     )
 
     if bridge.start():
         joystick_bridge = bridge
+        joystick_runtime['last_connect_mono'] = time.monotonic()
+        joystick_runtime['last_stale_restart_mono'] = 0.0
         _set_joystick_state(
             connected=True,
             timed_out=False,

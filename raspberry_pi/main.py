@@ -1537,6 +1537,9 @@ class RobotController:
             return
 
         try:
+            if hasattr(self.robot_link, 'send_raw_motor'):
+                self.robot_link.send_raw_motor(0, 0, joystick_active=False)
+                return
             if hasattr(self.robot_link, 'release_manual_override_only'):
                 self.robot_link.release_manual_override_only()
             elif hasattr(self.robot_link, 'send_manual_control'):

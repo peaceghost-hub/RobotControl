@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import threading
+import time
 from typing import Callable, Optional
 
 try:
@@ -26,11 +27,13 @@ class JoystickBridge:
         self,
         port: str,
         baudrate: int = 115200,
+        read_timeout: float = 0.15,
         device_id: Optional[str] = None,
         on_message: Optional[Callable[[dict], None]] = None,
     ) -> None:
         self.port = port
         self.baudrate = baudrate
+        self.read_timeout = max(0.05, float(read_timeout))
         self.device_id = device_id or "esp8266_joystick"
         self.on_message = on_message
 
@@ -56,7 +59,18 @@ class JoystickBridge:
             return True
 
         try:
-            self._serial = serial.Serial(self.port, self.baudrate, timeout=1)
+            self._serial = serial.Serial(self.port, self.baudrate, timeout=self.read_timeout)
+            try:
+                # Keep the USB serial bridge passive; some ESP8266 boards react
+                # badly when desktop apps toggle modem-control lines.
+                self._serial.setDTR(False)
+                self._serial.setRTS(False)
+            except Exception:
+                pass
+            try:
+                self._serial.reset_input_buffer()
+            except Exception:
+                pass
             self._running.set()
             self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
             self._reader_thread.start()
@@ -82,11 +96,26 @@ class JoystickBridge:
         self._serial = None
 
     def _read_loop(self) -> None:  # pragma: no cover - hardware dependent
+        transient_errors = 0
         try:
             while self._running.is_set() and self._serial:
-                raw = self._serial.readline()
+                try:
+                    raw = self._serial.readline()
+                except Exception as exc:
+                    if self._is_transient_read_error(exc):
+                        transient_errors += 1
+                        if transient_errors <= 3 or transient_errors % 10 == 0:
+                            logger.warning("Transient joystick serial read glitch on %s (%d): %s",
+                                           self.port, transient_errors, exc)
+                        time.sleep(0.1)
+                        continue
+                    raise
+
                 if not raw:
+                    transient_errors = 0
                     continue
+
+                transient_errors = 0
 
                 text = raw.decode("utf-8", errors="ignore").strip()
                 if not text:
@@ -127,6 +156,17 @@ class JoystickBridge:
                     pass
             self._serial = None
             logger.info("Joystick bridge reader stopped")
+
+    @staticmethod
+    def _is_transient_read_error(exc: Exception) -> bool:
+        """Return True for CH340/USB serial glitches that are worth retrying."""
+        text = str(exc).lower()
+        return (
+            'returned no data' in text
+            or 'device disconnected or multiple access on port' in text
+            or 'input/output error' in text
+            or 'resource temporarily unavailable' in text
+        )
 
     def _parse_legacy_frame(self, text: str) -> Optional[dict]:
         """Parse simple CSV joystick frames into a dict payload."""

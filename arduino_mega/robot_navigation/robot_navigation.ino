@@ -860,19 +860,27 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
           navigation.pause();
         }
 
-        // Safety: block forward into detected obstacle
-        if (active && frontObstacle() && leftMotor > 0 && rightMotor > 0) {
+        if (!active) {
           motors.stop();
-          leftMotor  = 0;
-          rightMotor = 0;
+          manualOverride = false;
+          controlMode = MODE_AUTO;
+          lastManualLeft = 0;
+          lastManualRight = 0;
         } else {
-          motors.setMotors((int)leftMotor, (int)rightMotor);
+          // Safety: block forward into detected obstacle
+          if (frontObstacle() && leftMotor > 0 && rightMotor > 0) {
+            motors.stop();
+            leftMotor  = 0;
+            rightMotor = 0;
+          } else {
+            motors.setMotors((int)leftMotor, (int)rightMotor);
+          }
+          manualOverride = true;
+          controlMode = MODE_MANUAL;
+          lastManualCommand = millis();
+          lastManualLeft  = leftMotor;
+          lastManualRight = rightMotor;
         }
-        manualOverride = true;
-        controlMode = MODE_MANUAL;
-        lastManualCommand = millis();
-        lastManualLeft  = leftMotor;
-        lastManualRight = rightMotor;
         prepareAck();
       } else {
         prepareError(ERR_PACKET_SIZE);
@@ -900,6 +908,8 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
           motors.stop();
           manualOverride = false;
           controlMode = MODE_AUTO;
+          lastManualLeft = 0;
+          lastManualRight = 0;
         }
 
         prepareAck();
