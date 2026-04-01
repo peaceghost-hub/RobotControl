@@ -186,6 +186,19 @@ class RobotController:
         self._manual_drive_direction = 'stop'
         self._manual_drive_speed = 180
         self._manual_drive_thread = None
+        self._analog_drive_lock = Lock()
+        self._analog_drive_throttle = 0
+        self._analog_drive_steer = 0
+        self._analog_drive_active = False
+        self._analog_drive_thread = None
+        self._analog_drive_last_input_mono = 0.0
+        self._analog_drive_last_send_mono = 0.0
+        joystick_cfg = CONFIG.get('joystick', {})
+        self._analog_drive_interval = max(0.03, float(joystick_cfg.get('stream_interval_s', 0.05)))
+        self._analog_bus_priority_hold = max(
+            self._analog_drive_interval * 2.0,
+            float(joystick_cfg.get('bus_priority_hold_s', 0.35))
+        )
         self._manual_assist_lock = Lock()
         self._manual_assist_active = False
         self._manual_assist_thread = None
@@ -397,6 +410,10 @@ class RobotController:
             instant_cmd_thread = Thread(target=self.instant_command_loop, daemon=True)
             instant_cmd_thread.start()
             self.threads.append(instant_cmd_thread)
+
+            analog_drive_thread = Thread(target=self._analog_drive_loop, daemon=True)
+            analog_drive_thread.start()
+            self.threads.append(analog_drive_thread)
 
             # Start Pi-side navigation status broadcast loop (always runs —
             # sends full nav status, compass-only, or heartbeat depending on
@@ -619,7 +636,7 @@ class RobotController:
                     if gps_data and gps_data.get('latitude') is not None and gps_data.get('longitude') is not None:
                         gps_source = 'SIM7600E'
                         # Forward to Mega as seed for Neo-6M
-                        if self.robot_link:
+                        if self.robot_link and not self._joystick_bus_priority_active():
                             try:
                                 self.robot_link.send_gps_data(gps_data)
                                 logger.debug("Forwarded SIM7600E GPS to Mega")
@@ -629,7 +646,12 @@ class RobotController:
                         gps_data = None  # ensure clean None for fallback
 
                 # ── Fallback: Neo-6M via Mega I2C ─────────────────────
-                if gps_data is None and self.robot_link and not self.wireless_backup_active:
+                if (
+                    gps_data is None
+                    and self.robot_link
+                    and not self.wireless_backup_active
+                    and not self._joystick_bus_priority_active()
+                ):
                     try:
                         mega_gps = self.robot_link.request_gps_data()
                         if mega_gps and mega_gps.get('valid') and mega_gps.get('latitude') and mega_gps.get('longitude'):
@@ -728,7 +750,8 @@ class RobotController:
                     'device_id': self.device_id
                 }
 
-                if self.robot_link:
+                joystick_priority = self._joystick_bus_priority_active()
+                if self.robot_link and not joystick_priority:
                     nav_status = self.robot_link.request_status()
                     if nav_status:
                         status_data['navigation'] = nav_status
@@ -792,6 +815,11 @@ class RobotController:
 
         while not shutdown_event.is_set():
             try:
+                if self._joystick_bus_priority_active():
+                    last_state = False
+                    shutdown_event.wait(max(poll_interval, 0.35))
+                    continue
+
                 obstacle = None
                 if self.robot_link:
                     try:
@@ -901,11 +929,12 @@ class RobotController:
         read_timeout    = min(api_timeout, 5)       # cap read at 5s
         poll_timeout    = (connect_timeout, read_timeout)
 
-        # Poll interval: fast on LAN, still responsive on cellular
-        poll_interval = CONFIG.get('instant_poll_interval', 0.15)  # 150ms default
+        # Poll interval: go faster while joystick analog control is active.
+        poll_interval = float(CONFIG.get('instant_poll_interval', 0.08))
+        fast_poll_interval = float(CONFIG.get('instant_poll_interval_fast', 0.05))
 
-        logger.info("Instant command loop polling: %s  timeout=%s  interval=%.2fs",
-                     url, poll_timeout, poll_interval)
+        logger.info("Instant command loop polling: %s  timeout=%s  interval=%.2fs fast=%.2fs",
+                     url, poll_timeout, poll_interval, fast_poll_interval)
 
         while not shutdown_event.is_set():
             try:
@@ -940,7 +969,8 @@ class RobotController:
                     logger.warning("Instant command poll error #%d: %s (url=%s)",
                                    consecutive_errors, exc, url)
 
-            shutdown_event.wait(poll_interval)
+            interval = fast_poll_interval if self._joystick_bus_priority_active() else poll_interval
+            shutdown_event.wait(interval)
 
     def _process_command(self, command: dict) -> None:
         command_id = command.get('id')
@@ -1157,6 +1187,7 @@ class RobotController:
             requested = 'stop'
 
         self._cancel_manual_assist(reason=f"manual {requested or 'command'}")
+        self._clear_analog_drive_target()
 
         with self._manual_drive_lock:
             if requested in ('stop', 'brake'):
@@ -1189,6 +1220,71 @@ class RobotController:
             logger.warning("Manual drive apply failed: %s", exc)
             return False
 
+    def _set_analog_drive_target(self, throttle: int, steer: int) -> None:
+        throttle = max(-255, min(255, int(throttle)))
+        steer = max(-255, min(255, int(steer)))
+        with self._analog_drive_lock:
+            self._analog_drive_throttle = throttle
+            self._analog_drive_steer = steer
+            self._analog_drive_active = abs(throttle) > 0 or abs(steer) > 0
+            self._analog_drive_last_input_mono = time.monotonic()
+
+    def _clear_analog_drive_target(self) -> None:
+        with self._analog_drive_lock:
+            self._analog_drive_throttle = 0
+            self._analog_drive_steer = 0
+            self._analog_drive_active = False
+            self._analog_drive_last_input_mono = time.monotonic()
+
+    def _joystick_bus_priority_active(self) -> bool:
+        with self._analog_drive_lock:
+            if self._analog_drive_active:
+                return True
+            last_input = self._analog_drive_last_input_mono
+        return last_input > 0 and (time.monotonic() - last_input) < self._analog_bus_priority_hold
+
+    def _send_analog_drive_once(self, throttle: int, steer: int, joystick_active: bool) -> bool:
+        if not self.robot_link:
+            return False
+
+        throttle = max(-255, min(255, int(throttle)))
+        steer = max(-255, min(255, int(steer)))
+
+        success = False
+        if hasattr(self.robot_link, 'send_raw_motor'):
+            success = bool(self.robot_link.send_raw_motor(throttle, steer, joystick_active=joystick_active))
+        else:
+            left_motor = max(-127, min(127, int(round((throttle + steer) * 127 / 255.0))))
+            right_motor = max(-127, min(127, int(round((throttle - steer) * 127 / 255.0))))
+            if hasattr(self.robot_link, 'send_manual_control'):
+                success = bool(self.robot_link.send_manual_control(left_motor, right_motor, joystick_active=joystick_active))
+
+        if success:
+            self._analog_drive_last_send_mono = time.monotonic()
+        return success
+
+    def _analog_drive_loop(self) -> None:
+        """Continuously stream the latest joystick target to the Mega."""
+        release_pending = False
+
+        while not shutdown_event.is_set():
+            with self._analog_drive_lock:
+                throttle = self._analog_drive_throttle
+                steer = self._analog_drive_steer
+                active = self._analog_drive_active
+
+            if active:
+                self._send_analog_drive_once(throttle, steer, joystick_active=True)
+                release_pending = True
+                shutdown_event.wait(self._analog_drive_interval)
+                continue
+
+            if release_pending:
+                self._send_analog_drive_once(0, 0, joystick_active=False)
+                release_pending = False
+
+            shutdown_event.wait(0.01)
+
     def _handle_manual_drive_analog(self, payload: dict) -> bool:
         """Apply continuous raw throttle/steer control from the dashboard joystick."""
         if not self.robot_link:
@@ -1212,15 +1308,8 @@ class RobotController:
             self._manual_drive_direction = 'stop'
             self._manual_drive_speed = max(abs(throttle), abs(steer), 0)
 
-        if hasattr(self.robot_link, 'send_raw_motor') and self.robot_link.send_raw_motor(throttle, steer, joystick_active=True):
-            return True
-
-        # Fallback for older Mega firmware that does not yet support raw throttle/steer over I2C.
-        left_motor = max(-127, min(127, int(round((throttle + steer) * 127 / 255.0))))
-        right_motor = max(-127, min(127, int(round((throttle - steer) * 127 / 255.0))))
-        if hasattr(self.robot_link, 'send_manual_control'):
-            return bool(self.robot_link.send_manual_control(left_motor, right_motor, joystick_active=True))
-        return False
+        self._set_analog_drive_target(throttle, steer)
+        return self._send_analog_drive_once(throttle, steer, joystick_active=(abs(throttle) > 0 or abs(steer) > 0))
 
     def _get_ai_drive_speed(self, payload: dict) -> int:
         requested = (payload or {}).get('speed')
@@ -1536,6 +1625,8 @@ class RobotController:
         if not self.robot_link:
             return
 
+        self._clear_analog_drive_target()
+
         try:
             if hasattr(self.robot_link, 'send_raw_motor'):
                 self.robot_link.send_raw_motor(0, 0, joystick_active=False)
@@ -1549,6 +1640,7 @@ class RobotController:
 
     def _stop_latched_manual_drive(self, release_override: bool = False) -> None:
         self._cancel_manual_assist(reason="manual latch released")
+        self._clear_analog_drive_target()
         with self._manual_drive_lock:
             self._manual_drive_active = False
             self._manual_drive_direction = 'stop'

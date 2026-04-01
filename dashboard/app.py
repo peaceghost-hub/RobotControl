@@ -625,7 +625,6 @@ def _release_joystick_override(reason: str) -> None:
         },
         device_id,
     )
-    _queue_instant_command('MANUAL_OVERRIDE', {'mode': 'release'}, device_id)
 
     joystick_runtime['override_engaged'] = False
     joystick_runtime['last_direction'] = 'stop'
@@ -704,9 +703,11 @@ def _forward_joystick_payload(payload: dict, *, raw: Optional[dict] = None, arme
     """Forward a mixed analog/discrete payload to the Pi manual drive lane."""
     device_id = app.config.get('DEFAULT_DEVICE_ID', 'robot_01')
 
-    if not joystick_runtime.get('override_engaged'):
+    analog_payload = payload.get('mode') == 'analog' or 'throttle' in payload or 'steer' in payload
+
+    if not joystick_runtime.get('override_engaged') and not analog_payload:
         _queue_instant_command('MANUAL_OVERRIDE', {'mode': 'hold'}, device_id)
-        joystick_runtime['override_engaged'] = True
+    joystick_runtime['override_engaged'] = True
 
     _queue_instant_command('MANUAL_DRIVE', payload, device_id)
 
