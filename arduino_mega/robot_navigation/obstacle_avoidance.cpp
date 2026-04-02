@@ -8,8 +8,8 @@
  *   US_WAIT_ECHO_LOW → poll echo pin until it goes LOW  (compute distance)
  *
  * Each call to update() costs < 10 µs (just a digitalRead + compare).
- * The legacy scan helpers remain for compatibility, although the sensor
- * is currently fixed-mounted on the robot body.
+ * The ultrasonic sensor is mounted on a servo so the scan helpers can
+ * inspect center / left / right without blocking the main loop.
  */
 
 #include "obstacle_avoidance.h"
@@ -37,14 +37,22 @@ void ObstacleAvoidance::begin() {
     digitalWrite(ULTRASONIC_TRIG, LOW);
     pinMode(ULTRASONIC_ECHO, INPUT);
 
-    // No servo — ultrasonic sensor is fixed on robot body.
-    // moveServoTo() checks servoAttached and is a no-op when false.
-    servoAttached = false;
+    servo.attach(SERVO_PIN);
+    servoAttached = true;
     currentServoAngle = SERVO_CENTER;
+    servo.write(SERVO_CENTER);
     lastServoMove = millis();
+    lastCheck = millis();
 
     Serial.println(F("# Obstacle avoidance (non-blocking) initialized"));
-    Serial.println(F("# - HC-SR04 ultrasonic (pins 30-31, fixed mount)"));
+    Serial.print(F("# - HC-SR04 ultrasonic (pins 30-31) on servo pin "));
+    Serial.println(SERVO_PIN);
+    Serial.print(F("# - Servo center="));
+    Serial.print(SERVO_CENTER);
+    Serial.print(F(" left="));
+    Serial.print(SERVO_LEFT);
+    Serial.print(F(" right="));
+    Serial.println(SERVO_RIGHT);
 }
 
 // ============ main update — call every loop iteration ============
@@ -60,7 +68,9 @@ void ObstacleAvoidance::updateUltrasonic() {
 
     switch (usPhase) {
       case US_IDLE:
-        if (nowMs - lastCheck >= CHECK_INTERVAL && scanStep == SCAN_NONE) {
+        if (nowMs - lastCheck >= CHECK_INTERVAL &&
+            scanStep == SCAN_NONE &&
+            (!servoAttached || (nowMs - lastServoMove >= SERVO_SETTLE))) {
           triggerPing();
         }
         break;
@@ -140,6 +150,10 @@ bool ObstacleAvoidance::isScanComplete() const {
     return scanReady;
 }
 
+bool ObstacleAvoidance::isScanInProgress() const {
+    return scanStep != SCAN_NONE;
+}
+
 PathScan ObstacleAvoidance::getScanResult() {
     scanReady = false;
     return pendingScan;
@@ -207,6 +221,16 @@ void ObstacleAvoidance::updateScan() {
 
       case SCAN_RETURN_CENTER:
         if (servoSettled) {
+          // Once the sensor is back facing forward, report the center sample
+          // again so downstream logic does not momentarily see a stale side read.
+          distance = pendingScan.centerDist;
+          if (distance > 0 && distance < OBSTACLE_THRESHOLD) {
+            obstacleDetected = true;
+            obstacleHoldUntil = now + 200;
+          } else {
+            obstacleDetected = false;
+            obstacleHoldUntil = 0;
+          }
           scanReady = true;
           scanStep = SCAN_NONE;
         }

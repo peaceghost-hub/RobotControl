@@ -412,7 +412,7 @@ class I2CComm:
 
     def request_obstacle_status(self) -> Optional[Dict[str, Any]]:
         """Request obstacle detection flag and distance from Mega."""
-        resp = self._exchange(self.CMD_REQUEST_OBSTACLE, expect=4)
+        resp = self._exchange(self.CMD_REQUEST_OBSTACLE, expect=5)
         if not resp:
             return None
         if resp[0] == self.RESP_OBSTACLE and len(resp) >= 4:
@@ -420,7 +420,14 @@ class I2CComm:
             distance = (resp[2] << 8) | resp[3]
             if distance == 0:
                 distance = -1  # Invalid/unknown
-            return {"obstacle": flag, "distance_cm": distance}
+            flags = resp[4] if len(resp) >= 5 else 0
+            return {
+                "obstacle": flag,
+                "distance_cm": distance,
+                "planning": bool(flags & 0x01),
+                "avoiding": bool(flags & 0x02),
+                "blocked": bool(flags & 0x04),
+            }
         self._log_unexpected(resp, "OBSTACLE")
         return None
 

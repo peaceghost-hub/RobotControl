@@ -829,6 +829,9 @@ class RobotController:
 
                 now = time.time()
                 state = bool(obstacle and obstacle.get('obstacle'))
+                mega_planning = bool(obstacle and obstacle.get('planning'))
+                mega_avoiding = bool(obstacle and obstacle.get('avoiding'))
+                mega_blocked = bool(obstacle and obstacle.get('blocked'))
 
                 # Emit on rising edge immediately, then periodically while active.
                 should_emit = False
@@ -850,6 +853,9 @@ class RobotController:
                         'type': 'OBSTACLE_DETECTED',
                         'distance_cm': dist_cm,
                         'direction': 'FRONT',
+                        'mega_planning': mega_planning,
+                        'mega_avoiding': mega_avoiding,
+                        'mega_blocked': mega_blocked,
                         'timestamp': datetime.utcnow().isoformat(),
                     }
                     try:
@@ -861,27 +867,8 @@ class RobotController:
                                 and self.nav_controller
                                 and self.nav_controller.is_active):
                             self.nav_controller.notify_ai_triggered()
-                        elif not (resp and resp.get('ai_triggered')):
-                            with self._manual_drive_lock:
-                                manual_forward_active = (
-                                    self._manual_drive_active
-                                    and self._manual_drive_direction == 'forward'
-                                )
-                            if manual_forward_active and not (self.nav_controller and self.nav_controller.is_active):
-                                started = self._start_manual_assist_avoidance()
-                                if started:
-                                    logger.info("Manual forward obstacle detected — Pi traditional avoidance takeover")
                     except Exception as exc:
                         logger.debug(f"Failed to send obstacle event: {exc}")
-                        with self._manual_drive_lock:
-                            manual_forward_active = (
-                                self._manual_drive_active
-                                and self._manual_drive_direction == 'forward'
-                            )
-                        if manual_forward_active and not (self.nav_controller and self.nav_controller.is_active):
-                            started = self._start_manual_assist_avoidance()
-                            if started:
-                                logger.info("Manual forward obstacle detected — Pi traditional avoidance takeover (dashboard unavailable)")
 
                 last_state = state
 

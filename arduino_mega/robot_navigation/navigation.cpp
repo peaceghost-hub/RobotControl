@@ -1,7 +1,7 @@
 /*
  * Navigation Implementation — v2
  *
- * 3-Phase steering with PD controller, simplified obstacle avoidance,
+ * 3-Phase steering with PD controller, servo-scan obstacle avoidance,
  * heading freshness watchdog, stall detection, consecutive-arrival,
  * adaptive speed, GPS speed gate.
  *
@@ -9,6 +9,7 @@
  */
 
 #include "navigation.h"
+#include <string.h>
 
 #ifndef DEG_TO_RAD
 #define DEG_TO_RAD (PI/180.0)
@@ -31,6 +32,8 @@ Navigation::Navigation() {
     consecutiveArrivals = 0;
     avoidAttempts = 0;
     avoidTurnDir = 1;
+    avoidTurnDegrees = AVOID_TURN_DEG_BLOCKED;
+    memset(&lastAvoidScan, 0, sizeof(lastAvoidScan));
     stallCheckLat = 0.0;
     stallCheckLon = 0.0;
     stallCheckTime = 0;
@@ -237,7 +240,7 @@ void Navigation::update() {
     }
 
     // ---- OBSTACLE CHECK — highest priority (except during avoidance) ----
-    if (navState != NAV_AVOID_STOP && navState != NAV_AVOID_TURN &&
+    if (navState != NAV_AVOID_STOP && navState != NAV_AVOID_SCAN && navState != NAV_AVOID_TURN &&
         navState != NAV_AVOID_DRIVE && navState != NAV_AVOID_RECHECK &&
         navState != NAV_STALLED) {
         if (obstacleAvoid->isObstacleDetected()) {
@@ -253,6 +256,7 @@ void Navigation::update() {
             }
             // Alternate turn direction each attempt
             avoidTurnDir = (avoidAttempts % 2 == 1) ? 1 : -1;
+            avoidTurnDegrees = avoidTurnDir * AVOID_TURN_DEG_BLOCKED;
             enterState(NAV_AVOID_STOP);
             return;
         }
@@ -264,6 +268,7 @@ void Navigation::update() {
         case NAV_DRIVE_TO_TARGET:   handleDriveToTarget();   break;
         case NAV_WAYPOINT_REACHED:  handleWaypointReached(); break;
         case NAV_AVOID_STOP:        handleAvoidStop();       break;
+        case NAV_AVOID_SCAN:        handleAvoidScan();       break;
         case NAV_AVOID_TURN:        handleAvoidTurn();       break;
         case NAV_AVOID_DRIVE:       handleAvoidDrive();      break;
         case NAV_AVOID_RECHECK:     handleAvoidRecheck();    break;
@@ -431,22 +436,78 @@ void Navigation::advanceWaypoint() {
 }
 
 // ================================================================
-//  Obstacle Avoidance — 4 states, alternating direction
+//  Obstacle Avoidance — servo scan + turn / drive / recheck
 //  Each handler runs < 100 µs.  NEVER blocks.
 // ================================================================
 
 void Navigation::handleAvoidStop() {
     // Wait for settle period
     if (millis() - stateEntryTime >= AVOID_STOP_DURATION) {
-        // Start turning away — direction alternates per attempt
-        int turnDeg = avoidTurnDir * 80;  // ~80° turn
-        motors->startTurnDegrees(turnDeg, AVOID_TURN_SPEED);
+        obstacleAvoid->startScan();
+        Serial.println(F("# AVOID: scanning center/left/right"));
+        enterState(NAV_AVOID_SCAN);
+    }
+}
 
+void Navigation::handleAvoidScan() {
+    if (obstacleAvoid->isScanComplete()) {
+        lastAvoidScan = obstacleAvoid->getScanResult();
+
+        const int centerDist = lastAvoidScan.centerDist;
+        const int leftDist = lastAvoidScan.leftDist;
+        const int rightDist = lastAvoidScan.rightDist;
+        const bool centerClear = (centerDist == -1 || centerDist > OBSTACLE_TRIGGER_CM);
+        const bool leftClear = lastAvoidScan.leftClear;
+        const bool rightClear = lastAvoidScan.rightClear;
+
+        Serial.print(F("# AVOID scan C="));
+        Serial.print(centerDist);
+        Serial.print(F(" L="));
+        Serial.print(leftDist);
+        Serial.print(F(" R="));
+        Serial.print(rightDist);
+        Serial.print(F(" clear(L,R,C)="));
+        Serial.print(leftClear ? F("1") : F("0"));
+        Serial.print(F(","));
+        Serial.print(rightClear ? F("1") : F("0"));
+        Serial.print(F(","));
+        Serial.println(centerClear ? F("1") : F("0"));
+
+        if (centerClear) {
+            Serial.println(F("# AVOID: center clear — resuming navigation"));
+            if (avoidAttempts > 0) avoidAttempts--;
+            enterState(NAV_DRIVE_TO_TARGET);
+            return;
+        }
+
+        if (leftClear && rightClear) {
+            const int leftScore = (leftDist == -1) ? 999 : leftDist;
+            const int rightScore = (rightDist == -1) ? 999 : rightDist;
+            avoidTurnDir = (rightScore > leftScore) ? 1 : -1;
+            avoidTurnDegrees = avoidTurnDir * AVOID_TURN_DEG_CLEAR;
+        } else if (leftClear) {
+            avoidTurnDir = -1;
+            avoidTurnDegrees = avoidTurnDir * AVOID_TURN_DEG_CLEAR;
+        } else if (rightClear) {
+            avoidTurnDir = 1;
+            avoidTurnDegrees = avoidTurnDir * AVOID_TURN_DEG_CLEAR;
+        } else {
+            avoidTurnDegrees = avoidTurnDir * AVOID_TURN_DEG_BLOCKED;
+        }
+
+        motors->startTurnDegrees(avoidTurnDegrees, AVOID_TURN_SPEED);
         Serial.print(F("# AVOID: turning "));
-        Serial.print(turnDeg > 0 ? F("RIGHT ") : F("LEFT "));
-        Serial.print(abs(turnDeg));
+        Serial.print(avoidTurnDegrees > 0 ? F("RIGHT ") : F("LEFT "));
+        Serial.print(abs(avoidTurnDegrees));
         Serial.println(F("°"));
+        enterState(NAV_AVOID_TURN);
+        return;
+    }
 
+    if (millis() - stateEntryTime >= AVOID_SCAN_TIMEOUT) {
+        Serial.println(F("# AVOID: scan timeout — fallback turn"));
+        avoidTurnDegrees = avoidTurnDir * AVOID_TURN_DEG_BLOCKED;
+        motors->startTurnDegrees(avoidTurnDegrees, AVOID_TURN_SPEED);
         enterState(NAV_AVOID_TURN);
     }
 }
@@ -486,6 +547,7 @@ void Navigation::handleAvoidRecheck() {
             // Try again with opposite direction
             avoidAttempts++;
             avoidTurnDir = -avoidTurnDir;
+            avoidTurnDegrees = avoidTurnDir * AVOID_TURN_DEG_BLOCKED;
             motors->stop();
             enterState(NAV_AVOID_STOP);
         }

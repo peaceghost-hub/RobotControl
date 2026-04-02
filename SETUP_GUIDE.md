@@ -303,6 +303,18 @@ HC-SR04 TRIG → Arduino Pin 30
 HC-SR04 ECHO → Arduino Pin 31
 ```
 
+#### Ultrasonic Scan Servo:
+```
+Servo GND → Arduino GND
+Servo VCC → Arduino 5V
+Servo PWM → Arduino Pin 7
+
+Calibrated positions:
+  Left   → 57°
+  Center → 110°
+  Right  → 163°
+```
+
 #### Motor Driver (L298N):
 ```
 L298N IN1 → Arduino Pin 22 (Left Motor)

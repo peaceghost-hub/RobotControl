@@ -105,6 +105,39 @@ ControlMode controlMode = MODE_AUTO;
 // Heading from Pi
 float piHeading = 0.0;
 
+// ===================== Reactive servo-scan avoidance =====================
+enum ReactiveAvoidState : uint8_t {
+  REACTIVE_AVOID_IDLE = 0,
+  REACTIVE_AVOID_BLOCKED_SCAN,
+  REACTIVE_AVOID_ARC,
+  REACTIVE_AVOID_PASS
+};
+
+static const int REACTIVE_PLAN_DISTANCE_CM = OBSTACLE_THRESHOLD;  // plan from 50 cm
+static const int REACTIVE_COMMIT_DISTANCE_CM = 30;                // commit local avoid at 30 cm
+static const int REACTIVE_SAFE_CLEARANCE_CM = 40;                 // recover toward 40 cm front clearance
+static const int REACTIVE_SIDE_MIN_CM = 25;                       // minimum side space to attempt a pass
+static const unsigned long REACTIVE_SCAN_MAX_AGE_MS = 1500;
+static const unsigned long REACTIVE_BLOCKED_RESCAN_MS = 250;
+static const unsigned long REACTIVE_BLOCKED_TIMEOUT_MS = 2500;
+static const unsigned long REACTIVE_ARC_DURATION_MS = 850;
+static const unsigned long REACTIVE_PASS_DURATION_MS = 700;
+static const unsigned long REACTIVE_RECOVERY_GRACE_MS = 350;
+static const int REACTIVE_ARC_OUTER_SPEED = 150;
+static const int REACTIVE_ARC_INNER_SPEED = 75;
+static const int REACTIVE_PASS_SPEED = 120;
+
+ReactiveAvoidState reactiveAvoidState = REACTIVE_AVOID_IDLE;
+PathScan reactiveLastScan;
+bool reactiveScanValid = false;
+bool reactivePlanning = false;
+unsigned long reactiveScanStamp = 0;
+unsigned long reactivePlanningSince = 0;
+unsigned long reactiveStateStart = 0;
+unsigned long reactiveRecoveryUntil = 0;
+int8_t reactiveAvoidDir = 0;  // -1 = left, +1 = right
+int reactiveLastObstacleDistance = -1;
+
 // ===================== Non-blocking buzzer =====================
 static uint8_t  buzzerPulsesLeft = 0;
 static uint16_t buzzerOnMs       = 0;
@@ -134,6 +167,10 @@ void sendWirelessGps();
 void sendWirelessStatus();
 void sendWirelessReady();
 void sendWirelessObstacleAlert(int distance);
+void cancelReactiveAvoidance(bool stopMotors = false);
+void updateReactiveAvoidance(unsigned long now);
+bool reactiveAvoidanceOwnsMotors();
+bool reactiveAvoidanceIsBlocked();
 
 void beepPatternNB(uint8_t pulses, uint16_t onMs, uint16_t offMs);
 void updateBuzzer();
@@ -148,6 +185,239 @@ void i2cReinitSlave();
 static inline bool frontObstacle() {
   const int d = obstacleAvoid.getDistance();
   return (d > 0 && d < OBSTACLE_THRESHOLD);
+}
+
+static inline bool forwardIntentFromShadow() {
+  return lastManualLeft > 0 && lastManualRight > 0;
+}
+
+bool reactiveAvoidanceOwnsMotors() {
+  return reactiveAvoidState == REACTIVE_AVOID_BLOCKED_SCAN ||
+         reactiveAvoidState == REACTIVE_AVOID_ARC ||
+         reactiveAvoidState == REACTIVE_AVOID_PASS;
+}
+
+bool reactiveAvoidanceIsBlocked() {
+  return reactiveAvoidState == REACTIVE_AVOID_BLOCKED_SCAN;
+}
+
+static inline void cacheReactiveScan(unsigned long now) {
+  reactiveLastScan = obstacleAvoid.getScanResult();
+  reactiveScanValid = true;
+  reactivePlanning = false;
+  reactiveScanStamp = now;
+}
+
+static inline bool reactiveScanFresh(unsigned long now) {
+  return reactiveScanValid && ((now - reactiveScanStamp) <= REACTIVE_SCAN_MAX_AGE_MS);
+}
+
+static inline int scoreDistance(int dist) {
+  return (dist <= 0) ? 999 : dist;
+}
+
+static inline bool sidePassable(int dist) {
+  return (dist <= 0) || (dist >= REACTIVE_SIDE_MIN_CM);
+}
+
+static int8_t chooseReactiveAvoidDirection(const PathScan& scan) {
+  const bool leftPassable = sidePassable(scan.leftDist);
+  const bool rightPassable = sidePassable(scan.rightDist);
+
+  if (leftPassable && rightPassable) {
+    return (scoreDistance(scan.rightDist) > scoreDistance(scan.leftDist)) ? 1 : -1;
+  }
+  if (leftPassable) return -1;
+  if (rightPassable) return 1;
+  return 0;
+}
+
+static void startReactivePlanning(unsigned long now) {
+  if (reactiveAvoidanceOwnsMotors()) return;
+  if (!obstacleAvoid.isScanInProgress()) {
+    obstacleAvoid.startScan();
+    reactivePlanning = true;
+    reactivePlanningSince = now;
+  }
+}
+
+static void startReactiveAvoidArc(int8_t dir, unsigned long now) {
+  reactiveAvoidDir = dir;
+  reactiveAvoidState = REACTIVE_AVOID_ARC;
+  reactiveStateStart = now;
+  reactivePlanning = false;
+
+  if (dir < 0) {
+    motors.setMotors(REACTIVE_ARC_INNER_SPEED, REACTIVE_ARC_OUTER_SPEED);
+    DEBUG_SERIAL.println(F("# REACTIVE AVOID: arc LEFT"));
+  } else {
+    motors.setMotors(REACTIVE_ARC_OUTER_SPEED, REACTIVE_ARC_INNER_SPEED);
+    DEBUG_SERIAL.println(F("# REACTIVE AVOID: arc RIGHT"));
+  }
+}
+
+void cancelReactiveAvoidance(bool stopMotors) {
+  reactiveAvoidState = REACTIVE_AVOID_IDLE;
+  reactiveAvoidDir = 0;
+  reactivePlanning = false;
+  reactivePlanningSince = 0;
+  reactiveStateStart = 0;
+  reactiveRecoveryUntil = millis() + REACTIVE_RECOVERY_GRACE_MS;
+  if (stopMotors) {
+    motors.stop();
+  }
+}
+
+void updateReactiveAvoidance(unsigned long now) {
+  if (obstacleAvoid.isScanComplete()) {
+    cacheReactiveScan(now);
+  }
+
+  const int liveDistance = obstacleAvoid.getDistance();
+  if (!obstacleAvoid.isScanInProgress()) {
+    reactiveLastObstacleDistance = liveDistance;
+  } else if (reactiveScanFresh(now)) {
+    reactiveLastObstacleDistance = reactiveLastScan.centerDist;
+  } else if (reactiveLastObstacleDistance <= 0) {
+    reactiveLastObstacleDistance = liveDistance;
+  }
+
+  if (navigationActive || robotState == STATE_FAILSAFE) {
+    if (reactiveAvoidanceOwnsMotors() || reactivePlanning) {
+      cancelReactiveAvoidance(false);
+    }
+    return;
+  }
+
+  const bool movingForward = motors.isMovingForward();
+  const bool forwardIntent = movingForward || forwardIntentFromShadow();
+  const bool withinPlanZone = reactiveLastObstacleDistance > 0 &&
+                              reactiveLastObstacleDistance <= REACTIVE_PLAN_DISTANCE_CM;
+
+  if (reactiveAvoidanceOwnsMotors()) {
+    lastManualCommand = now;  // keep manual watchdog from interrupting local avoid
+
+    switch (reactiveAvoidState) {
+      case REACTIVE_AVOID_BLOCKED_SCAN: {
+        const bool frontClear = reactiveLastObstacleDistance <= 0 ||
+                                reactiveLastObstacleDistance >= REACTIVE_SAFE_CLEARANCE_CM;
+        if (frontClear) {
+          DEBUG_SERIAL.println(F("# REACTIVE AVOID: front clear while blocked"));
+          cancelReactiveAvoidance(true);
+          return;
+        }
+
+        if (reactiveScanFresh(now)) {
+          const int8_t dir = chooseReactiveAvoidDirection(reactiveLastScan);
+          if (dir != 0) {
+            startReactiveAvoidArc(dir, now);
+            return;
+          }
+        }
+
+        if (!obstacleAvoid.isScanInProgress() &&
+            (now - reactiveStateStart >= REACTIVE_BLOCKED_RESCAN_MS)) {
+          obstacleAvoid.startScan();
+          reactivePlanning = true;
+          reactivePlanningSince = now;
+          reactiveStateStart = now;
+        }
+
+        motors.stop();
+
+        if (now - reactivePlanningSince > REACTIVE_BLOCKED_TIMEOUT_MS) {
+          DEBUG_SERIAL.println(F("# REACTIVE AVOID: blocked timeout, holding stop"));
+          reactivePlanningSince = now;
+        }
+        return;
+      }
+
+      case REACTIVE_AVOID_ARC:
+        if (now - reactiveStateStart < REACTIVE_ARC_DURATION_MS) {
+          if (reactiveAvoidDir < 0) {
+            motors.setMotors(REACTIVE_ARC_INNER_SPEED, REACTIVE_ARC_OUTER_SPEED);
+          } else {
+            motors.setMotors(REACTIVE_ARC_OUTER_SPEED, REACTIVE_ARC_INNER_SPEED);
+          }
+          return;
+        }
+        reactiveAvoidState = REACTIVE_AVOID_PASS;
+        reactiveStateStart = now;
+        motors.setMotors(REACTIVE_PASS_SPEED, REACTIVE_PASS_SPEED);
+        DEBUG_SERIAL.println(F("# REACTIVE AVOID: pass forward"));
+        return;
+
+      case REACTIVE_AVOID_PASS: {
+        const bool frontSafe = reactiveLastObstacleDistance <= 0 ||
+                               reactiveLastObstacleDistance >= REACTIVE_SAFE_CLEARANCE_CM;
+        if (frontSafe && (now - reactiveStateStart >= REACTIVE_PASS_DURATION_MS / 2)) {
+          DEBUG_SERIAL.println(F("# REACTIVE AVOID: clearance restored"));
+          cancelReactiveAvoidance(false);
+          return;
+        }
+
+        if (now - reactiveStateStart < REACTIVE_PASS_DURATION_MS) {
+          motors.setMotors(REACTIVE_PASS_SPEED, REACTIVE_PASS_SPEED);
+          return;
+        }
+
+        if (reactiveLastObstacleDistance > 0 &&
+            reactiveLastObstacleDistance < REACTIVE_SAFE_CLEARANCE_CM) {
+          reactiveAvoidState = REACTIVE_AVOID_BLOCKED_SCAN;
+          reactiveStateStart = now;
+          reactivePlanningSince = now;
+          motors.stop();
+          DEBUG_SERIAL.println(F("# REACTIVE AVOID: pass incomplete, rescanning"));
+          return;
+        }
+
+        cancelReactiveAvoidance(false);
+        return;
+      }
+
+      case REACTIVE_AVOID_IDLE:
+      default:
+        break;
+    }
+
+    return;
+  }
+
+  if (now < reactiveRecoveryUntil) {
+    return;
+  }
+
+  if (!forwardIntent || !withinPlanZone) {
+    reactivePlanning = false;
+    return;
+  }
+
+  startReactivePlanning(now);
+
+  if (!(reactiveLastObstacleDistance > 0 &&
+        reactiveLastObstacleDistance <= REACTIVE_COMMIT_DISTANCE_CM)) {
+    return;
+  }
+
+  if (reactiveScanFresh(now)) {
+    const int8_t dir = chooseReactiveAvoidDirection(reactiveLastScan);
+    if (dir != 0) {
+      startReactiveAvoidArc(dir, now);
+      return;
+    }
+  }
+
+  // Commit threshold reached but no safe side selected yet — hold and rescan
+  // rather than driving blindly forward.
+  reactiveAvoidState = REACTIVE_AVOID_BLOCKED_SCAN;
+  reactiveStateStart = now;
+  reactivePlanningSince = now;
+  motors.stop();
+  if (!obstacleAvoid.isScanInProgress()) {
+    obstacleAvoid.startScan();
+    reactivePlanning = true;
+  }
+  DEBUG_SERIAL.println(F("# REACTIVE AVOID: commit reached, waiting for scan"));
 }
 
 // ======================== LEGACY WRAPPERS ========================
@@ -362,20 +632,11 @@ void loop() {
   // ====================================================================
   gps.update();                     // UART — non-blocking
   obstacleAvoid.update();           // non-blocking ultrasonic
+  updateReactiveAvoidance(now);     // local servo-scan obstacle avoidance overlay
   // Compass heading is received from Pi via CMD_SEND_HEADING → piHeading
 
-  // SAFETY: Emergency obstacle stop — runs ALWAYS, regardless of state.
-  // If navigation is active, navigation.update() handles avoidance.
-  // For non-nav forward motion (manual drive, AI drive, etc.) we stop.
-  // Reverse and side turns are ALLOWED so the user/AI can maneuver.
-  // The Pi/AI is responsible for all avoidance decisions — Mega only
-  // executes motor commands and provides this safety forward-block.
-  if (obstacleAvoid.isObstacleDetected() && !navigationActive) {
-      if (motors.isMovingForward()) {
-          motors.stop();
-          DEBUG_SERIAL.println(F("# SAFETY: obstacle stop (non-nav)"));
-      }
-  }
+  // Local avoidance overlay now owns forward obstacle reaction for non-nav
+  // motion.  Mega navigation keeps using its own navigation.cpp state machine.
 
   // ====================================================================
   //  6. Non-blocking buzzer tick
@@ -436,13 +697,9 @@ void loop() {
       break;
 
     case STATE_WIRELESS:
-      // ESP8266 remote owns motors.
-      // Obstacle safety: if last command was forward and obstacle ahead, stop.
-      if (frontObstacle() && lastManualLeft > 0 && lastManualRight > 0) {
-        motors.stop();
-        lastManualLeft = 0;
-        lastManualRight = 0;
-      }
+      // ESP8266 remote owns intent.  Local reactive avoidance may still
+      // temporarily override the motors for safety while preserving that
+      // forward intent in the command shadows.
       // Link-loss is handled by Mode Manager above — no duplicate check here.
       break;
 
@@ -475,6 +732,14 @@ void loop() {
     DEBUG_SERIAL.print(controlMode == MODE_AUTO ? F("A") : F("M"));
     DEBUG_SERIAL.print(F(" nav="));
     DEBUG_SERIAL.print(navigationActive ? F("RUN") : F("IDLE"));
+    DEBUG_SERIAL.print(F(" avoid="));
+    switch (reactiveAvoidState) {
+      case REACTIVE_AVOID_BLOCKED_SCAN: DEBUG_SERIAL.print(F("BLOCK")); break;
+      case REACTIVE_AVOID_ARC:          DEBUG_SERIAL.print(F("ARC"));   break;
+      case REACTIVE_AVOID_PASS:         DEBUG_SERIAL.print(F("PASS"));  break;
+      case REACTIVE_AVOID_IDLE:
+      default:                          DEBUG_SERIAL.print(F("IDLE"));  break;
+    }
     DEBUG_SERIAL.print(F(" wp="));
     DEBUG_SERIAL.print(navigation.getWaypointCount());
     DEBUG_SERIAL.print(F(" cc="));
@@ -503,6 +768,7 @@ void transitionToState(RobotState newState) {
   if (newState == robotState) return;
 
   // Leave old state
+  cancelReactiveAvoidance(false);
   motors.stop();
   lastManualLeft  = 0;
   lastManualRight = 0;
@@ -618,12 +884,13 @@ void processRawMotorCommand(int16_t throttle, int16_t steer, uint8_t flags) {
   if (abs(left)  < 15) left  = 0;
   if (abs(right) < 15) right = 0;
 
-  // Obstacle guard: block forward into obstacle
-  if (frontObstacle() && left > 0 && right > 0) {
-    left  = 0;
-    right = 0;
-    motors.stop();
-  } else {
+  // Operator/upper-layer override away from forward should immediately
+  // cancel any local avoidance overlay and hand the motors back.
+  if ((reactiveAvoidanceOwnsMotors() || reactivePlanning) && !(left > 0 && right > 0)) {
+    cancelReactiveAvoidance(false);
+  }
+
+  if (!reactiveAvoidanceOwnsMotors()) {
     motors.setMotors(left, right);
   }
 
@@ -646,11 +913,27 @@ void processWirelessCommand(uint8_t cmd, uint8_t speed) {
   lastManualCommand = millis();
 
   switch (cmd) {
-    case WIRELESS_CMD_MOTOR_FORWARD:  motors.forward(speed);  break;
-    case WIRELESS_CMD_MOTOR_BACKWARD: motors.backward(speed); break;
-    case WIRELESS_CMD_MOTOR_LEFT:     motors.turnLeft(speed);  break;
-    case WIRELESS_CMD_MOTOR_RIGHT:    motors.turnRight(speed); break;
-    case WIRELESS_CMD_MOTOR_STOP:     motors.stop();           break;
+    case WIRELESS_CMD_MOTOR_FORWARD:
+      if (!reactiveAvoidanceOwnsMotors()) {
+        motors.forward(speed);
+      }
+      break;
+    case WIRELESS_CMD_MOTOR_BACKWARD:
+      cancelReactiveAvoidance(false);
+      motors.backward(speed);
+      break;
+    case WIRELESS_CMD_MOTOR_LEFT:
+      cancelReactiveAvoidance(false);
+      motors.turnLeft(speed);
+      break;
+    case WIRELESS_CMD_MOTOR_RIGHT:
+      cancelReactiveAvoidance(false);
+      motors.turnRight(speed);
+      break;
+    case WIRELESS_CMD_MOTOR_STOP:
+      cancelReactiveAvoidance(false);
+      motors.stop();
+      break;
     case WIRELESS_CMD_MODE_AUTO:
       transitionToState(STATE_I2C);
       break;
@@ -722,6 +1005,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
 
     case CMD_NAV_START:
       if (navigation.getWaypointCount() > 0) {
+        cancelReactiveAvoidance(false);
         navigationActive = true;
         navigation.start();
         manualOverride = false;
@@ -733,6 +1017,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
       break;
 
     case CMD_NAV_PAUSE:
+      cancelReactiveAvoidance(true);
       navigation.pause();
       navigationActive = false;
       motors.stop();
@@ -741,6 +1026,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
 
     case CMD_NAV_RESUME:
       if (navigation.getWaypointCount() > 0 && !navigation.isComplete()) {
+        cancelReactiveAvoidance(false);
         navigation.resume();
         navigationActive = true;
         manualOverride = false;
@@ -752,6 +1038,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
       break;
 
     case CMD_WAYPOINT_CLEAR:
+      cancelReactiveAvoidance(true);
       navigation.clearWaypoints();
       resetPendingWaypoints();
       navigationActive = false;
@@ -780,6 +1067,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
       break;
 
     case CMD_NAV_STOP:
+      cancelReactiveAvoidance(true);
       navigation.stop();
       navigationActive = false;
       manualOverride = false;
@@ -839,6 +1127,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
 
     case CMD_RETURN_TO_START:
       if (navigationActive || gps.isValid()) {
+        cancelReactiveAvoidance(false);
         navigation.returnToStart();
         navigationActive = true;
         manualOverride = false;
@@ -861,18 +1150,18 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
         }
 
         if (!active) {
+          cancelReactiveAvoidance(true);
           motors.stop();
           manualOverride = false;
           controlMode = MODE_AUTO;
           lastManualLeft = 0;
           lastManualRight = 0;
         } else {
-          // Safety: block forward into detected obstacle
-          if (frontObstacle() && leftMotor > 0 && rightMotor > 0) {
-            motors.stop();
-            leftMotor  = 0;
-            rightMotor = 0;
-          } else {
+          if ((reactiveAvoidanceOwnsMotors() || reactivePlanning) &&
+              !(leftMotor > 0 && rightMotor > 0)) {
+            cancelReactiveAvoidance(false);
+          }
+          if (!reactiveAvoidanceOwnsMotors()) {
             motors.setMotors((int)leftMotor, (int)rightMotor);
           }
           manualOverride = true;
@@ -905,6 +1194,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
           manualOverride = true;
           controlMode = MODE_MANUAL;
         } else {
+          cancelReactiveAvoidance(true);
           motors.stop();
           manualOverride = false;
           controlMode = MODE_AUTO;
@@ -919,6 +1209,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
       break;
 
     case CMD_EMERGENCY_STOP:
+      cancelReactiveAvoidance(true);
       motors.stop();
       navigationActive = false;
       manualOverride = false;
@@ -938,12 +1229,17 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
     case CMD_REQUEST_OBSTACLE: {
       int dist = obstacleAvoid.getDistance();
       bool obs = (dist > 0 && dist < OBSTACLE_THRESHOLD);
+      uint8_t flags = 0;
+      if (reactivePlanning || obstacleAvoid.isScanInProgress()) flags |= 0x01;
+      if (reactiveAvoidanceOwnsMotors() && !reactiveAvoidanceIsBlocked()) flags |= 0x02;
+      if (reactiveAvoidanceIsBlocked()) flags |= 0x04;
       responseBuffer[0] = RESP_OBSTACLE;
       responseBuffer[1] = obs ? 1 : 0;
       if (dist < 0) dist = 0;
       responseBuffer[2] = (dist >> 8) & 0xFF;
       responseBuffer[3] = dist & 0xFF;
-      responseLength = 4;
+      responseBuffer[4] = flags;
+      responseLength = 5;
       break;
     }
 

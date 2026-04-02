@@ -867,16 +867,17 @@ class NavController:
 
         # Check obstacle (poll Mega)
         obstacle = self._read_obstacle()
-        if obstacle and obstacle.get('obstacle'):
+        mega_avoiding = bool(obstacle and obstacle.get('avoiding'))
+        mega_blocked = bool(obstacle and obstacle.get('blocked'))
+        if mega_avoiding or mega_blocked:
             self._send_stop()
             # Clear previous AI advice results so we wait for fresh advice
-            # for THIS obstacle.  But do NOT reset _ai_analysis_triggered —
-            # obstacle_loop may have already called notify_ai_triggered()
-            # for this same obstacle (race between the two polling loops).
+            # for THIS obstacle.  The dashboard may still analyse/display
+            # obstacle events, but the Mega now owns the physical avoid motion.
             self._ai_advice_event.clear()
             self._ai_advice_direction = None
             self._ai_advice_safety = None
-            self._enter_obstacle_detected(skip_clearance=False)
+            self._enter_obstacle_detected(skip_clearance=True)
             return
 
         # Check course drift — if heading drifted too far, re-acquire
@@ -894,137 +895,45 @@ class NavController:
         self._send_forward(self._get_cruise_speed())
 
     def _handle_obstacle_detected(self):
-        """Stop and wait for AI Vision advice on obstacle avoidance.
+        """Hold position while the Mega performs local servo-based avoidance."""
+        obstacle = self._read_obstacle()
+        mega_avoiding = bool(obstacle and obstacle.get('avoiding'))
+        mega_blocked = bool(obstacle and obstacle.get('blocked'))
+        dist_cm = self._extract_obstacle_distance(obstacle)
 
-        Flow:
-        1. Brief safety pause (OBSTACLE_CHECK_PAUSE = 0.3s)
-        2. If AI advice arrives → execute it
-        3. If AI was triggered but no advice within AI_ADVICE_TIMEOUT → fallback
-        4. If AI was NOT triggered → immediate traditional avoidance
-        """
-        if self._obstacle_phase == 'safety':
-            if self._run_safety_clearance():
-                return
-            self._obstacle_phase = 'decision'
-            self._obstacle_phase_start = time.time()
-            self._send_stop()
+        self._send_stop()
+
+        if mega_avoiding:
+            current_msg = self._notification.get('msg') if isinstance(self._notification, dict) else None
+            if not (isinstance(current_msg, str) and current_msg.startswith('Mega avoiding obstacle locally')):
+                self._notification = {
+                    'level': 'warning',
+                    'msg': f'Mega avoiding obstacle locally ({dist_cm} cm)',
+                }
             return
 
-        elapsed = time.time() - self._obstacle_phase_start
-
-        # Brief safety pause before any action
-        if elapsed < self.OBSTACLE_CHECK_PAUSE:
-            self._send_stop()
+        if mega_blocked:
+            current_msg = self._notification.get('msg') if isinstance(self._notification, dict) else None
+            if not (isinstance(current_msg, str) and current_msg.startswith('Mega waiting for a safe path')):
+                self._notification = {
+                    'level': 'warning',
+                    'msg': f'Mega waiting for a safe path ({dist_cm} cm)',
+                }
             return
 
-        # Check if AI advice has arrived
-        if self._ai_advice_event.is_set():
-            direction = self._ai_advice_direction or 'STOP'
-            safety = self._ai_advice_safety or 'DANGER'
-            logger.info("Executing AI advice: %s (safety=%s)", direction, safety)
-
-            if direction == 'FORWARD' and safety in ('SAFE', 'CAUTION'):
-                # AI says path is clear — re-acquire heading and continue
-                logger.info("AI: path clear — re-acquiring heading")
-                self._enter_state(NavState.ACQUIRING_HEADING)
-                return
-
-            if direction in ('LEFT', 'RIGHT') and safety != 'DANGER':
-                # AI says turn to avoid — execute as obstacle avoidance
-                self._avoid_attempts += 1
-                self._avoid_direction = direction.lower()
-                self._obstacle_phase = 'turn'
-                self._obstacle_phase_start = time.time()
-                self._enter_state(NavState.OBSTACLE_AVOID)
-                return
-
-            # AI says STOP or DANGER — fall through to traditional avoidance
-            logger.info("AI: STOP/DANGER — traditional avoidance")
-            self._enter_traditional_avoidance()
-            return
-
-        # AI analysis was triggered — wait up to AI_ADVICE_TIMEOUT
-        if self._ai_analysis_triggered:
-            if elapsed < self.AI_ADVICE_TIMEOUT:
-                self._send_stop()  # keep motors stopped while waiting
-                return  # still waiting for AI
-            # Timeout — AI didn't respond in time
-            logger.warning("AI advice timeout (%.1fs) — traditional avoidance",
-                           self.AI_ADVICE_TIMEOUT)
-            self._enter_traditional_avoidance()
-            return
-
-        # AI was NOT triggered (model not loaded/enabled) — immediate fallback
-        self._enter_traditional_avoidance()
+        logger.info("Mega avoidance clear — preparing before re-acquire")
+        self._notification = {'level': 'info', 'msg': 'Obstacle cleared — re-acquiring heading'}
+        self._enter_state(NavState.PREPARING)
 
     def _enter_traditional_avoidance(self):
-        """Enter traditional turn-away obstacle avoidance."""
-        self._avoid_attempts += 1
-        self._avoid_direction = 'left' if self._avoid_attempts % 2 == 1 else 'right'
-        self._obstacle_phase = 'turn'
-        self._obstacle_phase_start = time.time()
-        self._enter_state(NavState.OBSTACLE_AVOID)
+        """Compatibility shim: physical obstacle motion now belongs to the Mega."""
+        logger.info("Pi obstacle motion disabled — waiting for Mega local avoidance")
+        self._send_stop()
+        self._enter_state(NavState.OBSTACLE_DETECTED)
 
     def _handle_obstacle_avoid(self):
-        """Multi-phase: safety reverse → turn away → drive past → recheck."""
-        elapsed = time.time() - self._obstacle_phase_start
-
-        if self._obstacle_phase == 'safety':
-            if self._run_safety_clearance():
-                return
-            self._obstacle_phase = 'turn'
-            self._obstacle_phase_start = time.time()
-            return
-
-        if self._obstacle_phase == 'turn':
-            # Rotate away from obstacle
-            if elapsed < self.OBSTACLE_TURN_TIME:
-                if self._avoid_direction == 'left':
-                    self._send_rotate_left(self._get_turn_speed(fast=True))
-                else:
-                    self._send_rotate_right(self._get_turn_speed(fast=True))
-            else:
-                # Turn complete — start moving past the obstacle
-                self._send_stop()
-                self._obstacle_phase = 'forward'
-                self._obstacle_phase_start = time.time()
-
-        elif self._obstacle_phase == 'forward':
-            obstacle = self._read_obstacle()
-            dist_cm = self._extract_obstacle_distance(obstacle)
-            if 0 < dist_cm < self.SAFE_AVOID_DISTANCE_CM:
-                logger.info("Avoid-forward interrupted at %d cm — backing to safe distance", dist_cm)
-                self._send_stop()
-                self._obstacle_phase = 'safety'
-                self._obstacle_phase_start = time.time()
-                return
-
-            if elapsed < self.OBSTACLE_PASS_TIME:
-                self._send_forward(self._get_avoid_forward_speed())
-            else:
-                self._send_stop()
-                self._obstacle_phase = 'recheck'
-                self._obstacle_phase_start = time.time()
-
-        elif self._obstacle_phase == 'recheck':
-            if elapsed >= self.OBSTACLE_CHECK_PAUSE:
-                obstacle = self._read_obstacle()
-                dist_cm = self._extract_obstacle_distance(obstacle)
-                if obstacle and obstacle.get('obstacle'):
-                    if 0 < dist_cm < self.SAFE_AVOID_DISTANCE_CM:
-                        self._obstacle_phase = 'safety'
-                    else:
-                        self._obstacle_phase = 'turn'
-                    self._obstacle_phase_start = time.time()
-                    if self._avoid_attempts > 5:
-                        logger.warning("Too many obstacle attempts — skipping waypoint")
-                        self._advance_waypoint()
-                else:
-                    # Clear — pause before re-acquiring heading
-                    logger.info("Obstacle cleared — preparing before re-acquire")
-                    self._send_stop()
-                    self._notification = {'level': 'info', 'msg': 'Obstacle cleared — preparing...'}
-                    self._enter_state(NavState.PREPARING)
+        """Compatibility shim while older states drain into Mega-owned avoidance."""
+        self._handle_obstacle_detected()
 
     def _handle_waypoint_reached(self):
         """Hold for WAYPOINT_HOLD_TIME, show notification, then advance."""

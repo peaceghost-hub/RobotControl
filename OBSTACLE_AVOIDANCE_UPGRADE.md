@@ -7,15 +7,16 @@ The Arduino Mega navigation system has been upgraded with intelligent servo-base
 
 ### 1. Servo-Mounted Ultrasonic Sensor
 **Hardware Setup:**
-- Servo motor on pin 11
+- Servo motor on pin 7
 - HC-SR04 ultrasonic sensor mounted on servo
-- Servo positions: CENTER=90°, LEFT=160°, RIGHT=20°
+- Servo calibration: CENTER=110°, RANGE=53°
+- Active sweep positions: LEFT=57°, CENTER=110°, RIGHT=163°
 
 **How it works:**
 - When obstacle detected, servo scans in 3 directions:
-  1. Center (straight ahead)
-  2. Left (160°)
-  3. Right (20°)
+  1. Center (straight ahead, 110°)
+  2. Left (57°)
+  3. Right (163°)
 - Each direction measured with 300ms servo stabilization delay
 - Returns `PathScan` struct with distances and clear path indicators
 
@@ -203,7 +204,7 @@ Followed by 3 warning beeps, but system continues running.
 ## Troubleshooting
 
 ### Servo Not Moving
-- Check servo connection to pin 11
+- Check servo connection to pin 7
 - Verify 5V power supply (servo draws significant current)
 - Check Serial Monitor for "WARNING: Servo init failed"
 

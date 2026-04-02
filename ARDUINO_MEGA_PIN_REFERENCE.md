@@ -13,9 +13,9 @@
 | 4 | Available | - | Can be used for future sensors |
 | 5 | Available | - | Can be used for future sensors |
 | 6 | Available | - | Can be used for future sensors |
-| 7 | Available | - | Can be used for future sensors |
-| 8 | TRIG | HC-SR04 Ultrasonic | Trigger output (10µs pulse) |
-| 9 | ECHO | HC-SR04 Ultrasonic | Echo input (measures pulse width) |
+| 7 | SERVO | Ultrasonic Scan Servo | PWM control for left/center/right scan |
+| 8 | Available | - | Can be used for future sensors |
+| 9 | Available | - | Can be used for future sensors |
 | 10 | BUZZER | Audio Output | Passive buzzer (PWM compatible) |
 | 11 | SERVO | SG90 Servo Motor | PWM control (1000-2000µs) |
 | 12 | Available | - | Can be used for future sensors |
@@ -65,13 +65,13 @@
 HC-SR04 Ultrasonic (Servo-Mounted):
   ├─ VCC  → +5V
   ├─ GND  → GND
-  ├─ TRIG → Pin 8 (digital output)
-  └─ ECHO → Pin 9 (digital input)
+  ├─ TRIG → Pin 30 (digital output)
+  └─ ECHO → Pin 31 (digital input)
 
 SG90 Servo Motor:
   ├─ VCC  → +5V
   ├─ GND  → GND
-  └─ PWM  → Pin 11 (PWM output)
+  └─ PWM  → Pin 7 (PWM output)
 
 KY-032 IR Obstacle Sensor:
   ├─ VCC  → +5V
@@ -257,16 +257,14 @@ Total: 1-2A recommended power supply
 ```
 Servo Pulse Width vs. Angle:
 
-  20°  (RIGHT)  ← 1000 µs
-  45°          ← 1250 µs
-  90°  (CENTER) ← 1500 µs
-  135°         ← 1750 µs
-  160° (LEFT)  ← 2000 µs
+  57°  (LEFT SWEEP LIMIT)
+  110° (CENTER / FORWARD)
+  163° (RIGHT SWEEP LIMIT)
 
 Code Usage:
-  servo.write(20);   // Look right
-  servo.write(90);   // Look center
-  servo.write(160);  // Look left
+  servo.write(57);    // Look left
+  servo.write(110);   // Look center
+  servo.write(163);   // Look right
 ```
 
 ---
@@ -277,16 +275,16 @@ Code Usage:
 
 ```cpp
 // Ultrasonic sensor
-#define ULTRASONIC_TRIG 8
-#define ULTRASONIC_ECHO 9
-#define OBSTACLE_THRESHOLD 30  // cm
+#define ULTRASONIC_TRIG 30
+#define ULTRASONIC_ECHO 31
+#define OBSTACLE_THRESHOLD 50  // cm
 
 // Servo motor
-#define SERVO_PIN 11
-#define SERVO_CENTER 90
-#define SERVO_LEFT 160
-#define SERVO_RIGHT 20
-#define SERVO_DELAY 300  // ms for servo to stabilize
+#define SERVO_PIN 7
+#define SERVO_CENTER 110
+#define SERVO_RANGE 53
+#define SERVO_LEFT (SERVO_CENTER - SERVO_RANGE)
+#define SERVO_RIGHT (SERVO_CENTER + SERVO_RANGE)
 
 // Infrared sensor (NEW)
 #define KY032_DO_PIN 2      // Digital output
@@ -313,7 +311,7 @@ Code Usage:
 
 ### Servo Moving Erratically
 1. Check servo power supply (should be 5V/1A minimum)
-2. Verify PWM signal on pin 11 (scope to confirm 1-2ms pulses)
+2. Verify PWM signal on pin 7 (scope to confirm 1-2ms pulses)
 3. Check for voltage sag when servo moves (add capacitor to power)
 
 ### Sensor Not Detecting
@@ -356,4 +354,3 @@ Code Usage:
 - **HMC5883L Compass**: 3-axis magnetometer
 
 Your complete Arduino Mega pin configuration is now documented! 🎯
-

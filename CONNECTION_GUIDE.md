@@ -197,10 +197,10 @@ const char* DEVICE_ID = "esp32_01";
 ```
 DIGITAL PINS:
   Pin 2   - KY-032 DO (Digital Output) ← NEW: Infrared obstacle detection
-  Pin 8   - HC-SR04 TRIG (Ultrasonic trigger)
-  Pin 9   - HC-SR04 ECHO (Ultrasonic echo)
+  Pin 7   - SERVO (Ultrasonic scan servo control, PWM)
   Pin 10  - BUZZER (Passive buzzer)
-  Pin 11  - SERVO (Servo motor control, PWM)
+  Pin 30  - HC-SR04 TRIG (Ultrasonic trigger)
+  Pin 31  - HC-SR04 ECHO (Ultrasonic echo)
   Pin 14  - Serial3 TX (Bluetooth module)
   Pin 15  - Serial3 RX (Bluetooth module)
   Pin 16  - Serial2 TX (ZigBee module)
@@ -281,23 +281,23 @@ Connection Summary:
 ```
 Servo Motor:
 ┌──────────────┐
-│ Brown Red Orange │
+  │ Brown Red Orange │
 │ GND   VCC   PWM  │
 └──────────────┘
   │    │    │
-  │    │    └──→ Pin 11 (PWM, 1000-2000µs pulse width)
+  │    │    └──→ Pin 7 (PWM, 1000-2000µs pulse width)
   │    └───────→ +5V (through power supply if >2A)
   └────────────→ GND
 
 Connection Summary:
   GND   → GND (Arduino Mega)
   VCC   → +5V (Arduino Mega or dedicated power)
-  PWM   → Pin 11 (PWM output)
+  PWM   → Pin 7 (PWM output)
 
-Servo Angles (milliseconds pulse width):
-  20°  (Left)   ← 1000µs
-  90°  (Center) ← 1500µs
-  160° (Right)  ← 2000µs
+Servo Calibration:
+  57°  (Left sweep limit)
+  110° (Front-facing center)
+  163° (Right sweep limit)
 ```
 
 #### Wireless Module Selection
@@ -421,7 +421,7 @@ The system now uses two complementary obstacle sensors:
 ```cpp
 // In Arduino Serial Monitor, you should see:
 // # Obstacle avoidance with servo + dual sensors initialized
-// # - HC-SR04 ultrasonic (pins 8-9, servo-scanned)
+// # - HC-SR04 ultrasonic (pins 30-31, servo-scanned)
 // # - KY-032 infrared (pin 2 digital, A0 analog)
 
 // Test obstacle detection:

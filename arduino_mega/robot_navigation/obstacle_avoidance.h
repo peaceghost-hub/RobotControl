@@ -1,14 +1,16 @@
 /*
  * Obstacle Avoidance Header — NON-BLOCKING
- * HC-SR04 Ultrasonic Sensor (fixed mount)
+ * HC-SR04 Ultrasonic Sensor (servo-mounted)
  *
  * Blueprint rules:
  *   - No pulseIn(), no delay() — everything runs in < 20 µs per call.
  *   - Ultrasonic uses a two-phase state machine:
  *       Phase 0: fire trigger pulse, record micros().
  *       Phase 1: poll echo pin; compute distance when echo ends.
- *   - scanPath() is broken into a multi-step state machine driven by
- *     repeated calls to update().
+ *   - Navigation uses a multi-step non-blocking scan state machine
+ *     driven by repeated calls to update().
+ *   - A legacy blocking scanPath() compatibility shim is still present
+ *     but is no longer used by the main navigation loop.
  */
 
 #ifndef OBSTACLE_AVOIDANCE_H
@@ -20,12 +22,13 @@
 // ==================== SENSOR PINS ====================
 #define ULTRASONIC_TRIG 30
 #define ULTRASONIC_ECHO 31
-#define SERVO_PIN 11
+#define SERVO_PIN 7
 
-// Servo positions
-#define SERVO_CENTER 90
-#define SERVO_LEFT   160
-#define SERVO_RIGHT  20
+// Servo calibration (user-calibrated front-facing center and sweep range)
+#define SERVO_CENTER 110
+#define SERVO_RANGE  53
+#define SERVO_LEFT   (SERVO_CENTER - SERVO_RANGE)
+#define SERVO_RIGHT  (SERVO_CENTER + SERVO_RANGE)
 
 // Detection thresholds
 #define OBSTACLE_THRESHOLD 50   // cm — detect obstacles within 50 cm
@@ -81,6 +84,7 @@ public:
     // Non-blocking scan API
     void startScan();              // kick off a full L/C/R scan
     bool isScanComplete() const;   // true when pendingScan is valid
+    bool isScanInProgress() const; // true while servo scan state machine is active
     PathScan getScanResult();      // returns last completed scan
 
     // Legacy blocking scan (kept for navigation.cpp compatibility)

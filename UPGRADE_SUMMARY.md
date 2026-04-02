@@ -251,7 +251,7 @@ If you experience brownouts or resets:
 ### Getting Help
 If you encounter issues:
 1. Check Serial Monitor for error messages
-2. Verify hardware connections (especially servo on pin 11)
+2. Verify hardware connections (especially servo on pin 7)
 3. Confirm libraries installed
 4. Try Arduino IDE compilation (not just VS Code IntelliSense)
 

@@ -3,11 +3,11 @@
  * GPS Waypoint Navigation — 3-Phase Steering + PD Controller
  *
  * Architecture v2:
- *   - Single NavState state machine (10 states) replaces old bool + AvoidStep
+ *   - Single NavState state machine replaces old bool + AvoidStep
  *   - Phase 1: Large error (>25°) — wide arc (outer fast, inner slow)
  *   - Phase 2: PD proportional steering (Kp=2, Kd=0.5)
  *   - Phase 3: Deadband < 5° — drive straight
- *   - Simplified 4-state obstacle avoidance (alternating L/R)
+ *   - Servo scan-based obstacle avoidance (center / left / right)
  *   - Heading freshness watchdog (500 ms)
  *   - Stall detection (30 s / 3 m)
  *   - Consecutive-arrival confirmation (3 readings)
@@ -48,6 +48,9 @@
 // Obstacle avoidance
 #define OBSTACLE_TRIGGER_CM     50    // cm — trigger avoidance (50 cm)
 #define AVOID_STOP_DURATION    300    // ms — settle after stop
+#define AVOID_SCAN_TIMEOUT    2000    // ms — servo scan must finish by then
+#define AVOID_TURN_DEG_CLEAR    55    // degrees — clear side selected from scan
+#define AVOID_TURN_DEG_BLOCKED  80    // degrees — fallback when both sides blocked
 #define AVOID_TURN_DURATION    800    // ms — time spent turning away
 #define AVOID_TURN_SPEED       140    // PWM during avoidance turn
 #define AVOID_DRIVE_DURATION  1500    // ms — time spent driving past
@@ -94,6 +97,7 @@ public:
         NAV_DRIVE_TO_TARGET,   // Phase 2+3: PD steering toward waypoint
         NAV_WAYPOINT_REACHED,  // Brief stop, advance to next
         NAV_AVOID_STOP,        // Obstacle: stop + settle
+        NAV_AVOID_SCAN,        // Obstacle: scan center / left / right
         NAV_AVOID_TURN,        // Obstacle: turn away
         NAV_AVOID_DRIVE,       // Obstacle: drive past
         NAV_AVOID_RECHECK,     // Obstacle: check if clear
@@ -162,6 +166,8 @@ private:
     // Obstacle avoidance
     uint8_t avoidAttempts;             // per-waypoint attempt counter
     int8_t  avoidTurnDir;              // +1 right, -1 left — alternates
+    int16_t avoidTurnDegrees;          // signed turn chosen by obstacle scan
+    PathScan lastAvoidScan;            // latest center / left / right scan
 
     // Stall detection
     double stallCheckLat;
@@ -202,6 +208,7 @@ private:
     void handleDriveToTarget();
     void handleWaypointReached();
     void handleAvoidStop();
+    void handleAvoidScan();
     void handleAvoidTurn();
     void handleAvoidDrive();
     void handleAvoidRecheck();
