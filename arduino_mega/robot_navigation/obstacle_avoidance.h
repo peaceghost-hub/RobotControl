@@ -31,7 +31,7 @@
 #define SERVO_RIGHT  (SERVO_CENTER + SERVO_RANGE)
 
 // Detection thresholds
-#define OBSTACLE_THRESHOLD 50   // cm — detect obstacles within 50 cm
+#define OBSTACLE_THRESHOLD 90   // cm — detect obstacles within 90 cm
 
 struct PathScan {
     int centerDist;

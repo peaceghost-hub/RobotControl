@@ -46,7 +46,7 @@
 #define STEERING_MAX_CORRECTION 80    // max differential PWM
 
 // Obstacle avoidance
-#define OBSTACLE_TRIGGER_CM     50    // cm — trigger avoidance (50 cm)
+#define OBSTACLE_TRIGGER_CM     60    // cm — treat front path as blocked within 60 cm
 #define AVOID_STOP_DURATION    300    // ms — settle after stop
 #define AVOID_SCAN_TIMEOUT    2000    // ms — servo scan must finish by then
 #define AVOID_TURN_DEG_CLEAR    55    // degrees — clear side selected from scan
