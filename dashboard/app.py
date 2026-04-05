@@ -759,7 +759,10 @@ def handle_joystick_message(message: dict) -> None:
     if has_explicit_enable:
         enabled = str(enable_raw).strip().lower() not in {'0', 'false', 'off', 'no', ''}
     else:
-        enabled = direction != 'stop'
+        enabled = direction != 'stop' or joystick_runtime.get('override_engaged')
+
+    if enabled:
+        drive_payload['hold_active'] = True
 
     joystick_runtime['last_packet_mono'] = time.monotonic()
 

@@ -424,16 +424,21 @@ For the CC1101 wireless handheld transmitter in
 | ADS1115 Channel | Connected Control | Purpose |
 |---|---|---|
 | `A0` | Primary joystick `VRX` | Direction steering |
-| `A1` | Secondary joystick `VRX` | Speed stick magnitude |
+| `A1` | Secondary joystick `VRX` | Ignored for motion (reserved) |
 | `A2` | Primary joystick `VRY` | Direction forward/reverse |
-| `A3` | Secondary joystick `VRY` | Speed stick magnitude |
+| `A3` | Secondary joystick `VRY` | Accelerator input (north/positive only) |
 
 #### Remote Control Behavior
 
-- The primary joystick chooses direction.
-- The secondary joystick chooses speed magnitude.
+- The primary joystick sets the direction vector while held, including angled directions.
+- The secondary joystick drives only from `VRY` on `A3` (north/positive movement only).
+- Secondary `VRX` on `A1` is ignored for motion.
+- Releasing the primary joystick clears the direction lock immediately.
 - The `D8` switch keeps the existing reverse-toggle behavior.
 - The ESP8266 still transmits the same raw `throttle/steer` packet that the Mega already understands.
+- In raw manual joystick mode, obstacle detection triggers scanning first.
+- Raw manual auto-avoid only starts after the acknowledgement tap sequence:
+  `forward -> release -> forward -> release -> forward -> release -> forward`
 
 ### 7. Dual-Sensor Obstacle Detection
 

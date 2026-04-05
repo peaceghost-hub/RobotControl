@@ -42,16 +42,25 @@ This directory contains the CC1101 SPI wireless communication implementation for
 | ADS1115 Channel | Connected Control | Role in Firmware |
 |---|---|---|
 | `A0` | Primary joystick `VRX` | Direction steer axis |
-| `A1` | Secondary joystick `VRX` | Speed stick magnitude input |
+| `A1` | Secondary joystick `VRX` | Ignored for motion (reserved) |
 | `A2` | Primary joystick `VRY` | Direction forward/reverse axis |
-| `A3` | Secondary joystick `VRY` | Speed stick magnitude input |
+| `A3` | Secondary joystick `VRY` | Accelerator input (north/positive only) |
 
 #### Dual-Joystick Behavior
 
-- Primary joystick sets the direction vector.
-- Secondary joystick sets speed magnitude.
+- Primary joystick sets the direction vector while held (supports angled directions too).
+- Secondary joystick drives only from `VRY` on `A3`, positive-north movement only.
+- Secondary `VRX` on `A1` is ignored for motion.
+- Releasing the primary joystick clears the direction lock immediately.
 - The `D8` switch preserves the existing reverse-toggle behavior.
 - The transmitted packet format is unchanged: `throttle`, `steer`, `flags`, `crc`.
+
+#### Manual Obstacle Behavior
+
+- During raw manual joystick driving, the Mega scans when an obstacle is detected.
+- It does not auto-avoid immediately in raw manual mode.
+- Local avoidance only starts after the operator performs the acknowledgement tap sequence:
+  `forward -> release -> forward -> release -> forward -> release -> forward`
 
 ## Software Requirements
 

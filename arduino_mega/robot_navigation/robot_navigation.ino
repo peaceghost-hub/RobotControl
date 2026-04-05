@@ -122,6 +122,9 @@ static const int REACTIVE_SIDE_MIN_CM = 25;                       // minimum sid
 static const unsigned long REACTIVE_SCAN_MAX_AGE_MS = 1500;
 static const unsigned long REACTIVE_BLOCKED_RESCAN_MS = 250;
 static const unsigned long REACTIVE_BLOCKED_TIMEOUT_MS = 2500;
+static const unsigned long REACTIVE_ACK_TIMEOUT_MS = 1200;
+static const uint8_t REACTIVE_ACK_EDGES_REQUIRED = 7;             // F,R,F,R,F,R,F
+static const int REACTIVE_ACK_ACTIVE_THRESHOLD = 30;
 static const unsigned long REACTIVE_ARC_DURATION_MS = 1000;
 static const unsigned long REACTIVE_PASS_DURATION_MS = 800;
 static const unsigned long REACTIVE_RECOVERY_GRACE_MS = 350;
@@ -140,6 +143,11 @@ unsigned long reactiveRecoveryUntil = 0;
 int8_t reactiveAvoidDir = 0;  // -1 = left, +1 = right
 int reactiveLastObstacleDistance = -1;
 bool reactiveAutoAvoidEnabled = false;
+bool reactiveManualScanEnabled = false;
+bool reactiveManualAckGranted = false;
+bool reactiveManualAckLastActive = false;
+uint8_t reactiveManualAckStage = 0;
+unsigned long reactiveManualAckLastEdge = 0;
 
 // ===================== Non-blocking buzzer =====================
 static uint8_t  buzzerPulsesLeft = 0;
@@ -174,6 +182,9 @@ void cancelReactiveAvoidance(bool stopMotors = false);
 void updateReactiveAvoidance(unsigned long now);
 bool reactiveAvoidanceOwnsMotors();
 bool reactiveAvoidanceIsBlocked();
+void resetReactiveManualAck();
+void setReactiveManualScanEnabled(bool enabled);
+void updateReactiveManualAckSequence(bool active, unsigned long now);
 
 void beepPatternNB(uint8_t pulses, uint16_t onMs, uint16_t offMs);
 void updateBuzzer();
@@ -203,6 +214,55 @@ bool reactiveAvoidanceOwnsMotors() {
 bool reactiveAvoidanceIsBlocked() {
   return reactiveAvoidState == REACTIVE_AVOID_BLOCKED_SCAN ||
          reactiveAvoidState == REACTIVE_AVOID_WAIT_MANUAL;
+}
+
+void resetReactiveManualAck() {
+  reactiveManualAckGranted = false;
+  reactiveManualAckLastActive = false;
+  reactiveManualAckStage = 0;
+  reactiveManualAckLastEdge = 0;
+}
+
+void setReactiveManualScanEnabled(bool enabled) {
+  reactiveManualScanEnabled = enabled;
+  if (!enabled) {
+    resetReactiveManualAck();
+  }
+}
+
+void updateReactiveManualAckSequence(bool active, unsigned long now) {
+  if (!reactiveManualScanEnabled) {
+    resetReactiveManualAck();
+    return;
+  }
+  if (reactiveManualAckGranted) {
+    reactiveManualAckLastActive = active;
+    return;
+  }
+  if (active == reactiveManualAckLastActive) {
+    return;
+  }
+
+  if (reactiveManualAckLastEdge > 0 &&
+      (now - reactiveManualAckLastEdge) > REACTIVE_ACK_TIMEOUT_MS) {
+    reactiveManualAckStage = 0;
+  }
+
+  reactiveManualAckLastActive = active;
+  reactiveManualAckLastEdge = now;
+
+  const bool expectedActive = (reactiveManualAckStage % 2) == 0;
+  if (active == expectedActive) {
+    reactiveManualAckStage++;
+  } else {
+    reactiveManualAckStage = active ? 1 : 0;
+  }
+
+  if (reactiveManualAckStage >= REACTIVE_ACK_EDGES_REQUIRED) {
+    reactiveManualAckGranted = true;
+    reactiveManualAckStage = 0;
+    DEBUG_SERIAL.println(F("# REACTIVE AVOID: manual acknowledgement accepted"));
+  }
 }
 
 static inline void cacheReactiveScan(unsigned long now) {
@@ -269,6 +329,7 @@ void cancelReactiveAvoidance(bool stopMotors) {
   reactivePlanningSince = 0;
   reactiveStateStart = 0;
   reactiveRecoveryUntil = millis() + REACTIVE_RECOVERY_GRACE_MS;
+  resetReactiveManualAck();
   if (stopMotors) {
     motors.stop();
   }
@@ -301,10 +362,11 @@ void updateReactiveAvoidance(unsigned long now) {
     if (reactiveAvoidanceOwnsMotors() || reactivePlanning) {
       cancelReactiveAvoidance(false);
     }
+    setReactiveManualScanEnabled(false);
     return;
   }
 
-  if (!reactiveAutoAvoidEnabled) {
+  if (!reactiveAutoAvoidEnabled && !reactiveManualScanEnabled) {
     if (reactiveAvoidanceOwnsMotors() || reactivePlanning) {
       cancelReactiveAvoidance(false);
     }
@@ -315,6 +377,7 @@ void updateReactiveAvoidance(unsigned long now) {
   const bool forwardIntent = movingForward || forwardIntentFromShadow();
   const bool withinPlanZone = reactiveLastObstacleDistance > 0 &&
                               reactiveLastObstacleDistance <= REACTIVE_PLAN_DISTANCE_CM;
+  const bool manualScanOnly = reactiveManualScanEnabled && !reactiveAutoAvoidEnabled;
 
   if (reactiveAvoidanceOwnsMotors()) {
     lastManualCommand = now;  // keep manual watchdog from interrupting local avoid
@@ -425,6 +488,48 @@ void updateReactiveAvoidance(unsigned long now) {
   }
 
   if (now < reactiveRecoveryUntil) {
+    return;
+  }
+
+  if (manualScanOnly) {
+    if (!forwardIntent || !withinPlanZone) {
+      reactivePlanning = false;
+      if (!withinPlanZone) {
+        resetReactiveManualAck();
+      }
+      return;
+    }
+
+    startReactivePlanning(now);
+
+    if (!reactiveManualAckGranted) {
+      return;
+    }
+
+    if (!(reactiveLastObstacleDistance > 0 &&
+          reactiveLastObstacleDistance <= REACTIVE_COMMIT_DISTANCE_CM)) {
+      return;
+    }
+
+    if (reactiveScanFresh(now)) {
+      const int8_t dir = chooseReactiveAvoidDirection(reactiveLastScan);
+      if (dir != 0) {
+        startReactiveAvoidArc(dir, now);
+        return;
+      }
+    }
+
+    // Once the operator has explicitly acknowledged avoidance, the Mega
+    // may stop and rescan if it still does not have a confident side.
+    reactiveAvoidState = REACTIVE_AVOID_BLOCKED_SCAN;
+    reactiveStateStart = now;
+    reactivePlanningSince = now;
+    motors.stop();
+    if (!obstacleAvoid.isScanInProgress()) {
+      obstacleAvoid.startScan();
+      reactivePlanning = true;
+    }
+    DEBUG_SERIAL.println(F("# REACTIVE AVOID: manual ack received, waiting for scan"));
     return;
   }
 
@@ -729,6 +834,7 @@ void loop() {
       if (manualOverride && (now - lastManualCommand > MANUAL_TIMEOUT)) {
         manualOverride = false;
         reactiveAutoAvoidEnabled = false;
+        setReactiveManualScanEnabled(false);
         motors.stop();
         controlMode = MODE_AUTO;
         if (navigation.getWaypointCount() > 0 && !navigation.isComplete()) {
@@ -740,9 +846,9 @@ void loop() {
       break;
 
     case STATE_WIRELESS:
-      // ESP8266 remote owns both intent and obstacle response.
-      // Local reactive auto-avoid is intentionally disabled for raw
-      // joystick / wireless control to avoid false grass-trigger takeovers.
+      // ESP8266 remote owns manual intent. Front obstacles still trigger
+      // servo scanning, but raw-manual avoidance now requires an explicit
+      // acknowledgement tap sequence before the Mega takes over.
       // Link-loss is handled by Mode Manager above — no duplicate check here.
       break;
 
@@ -814,6 +920,7 @@ void transitionToState(RobotState newState) {
   // Leave old state
   cancelReactiveAvoidance(false);
   reactiveAutoAvoidEnabled = false;
+  setReactiveManualScanEnabled(false);
   motors.stop();
   lastManualLeft  = 0;
   lastManualRight = 0;
@@ -919,10 +1026,22 @@ void pollCC1101() {
 
 // ======================== RAW MOTOR (ESP8266) ========================
 void processRawMotorCommand(int16_t throttle, int16_t steer, uint8_t flags) {
-  lastManualCommand = millis();
+  const unsigned long now = millis();
+  lastManualCommand = now;
   reactiveAutoAvoidEnabled = false;
-  if (reactiveAvoidanceOwnsMotors() || reactivePlanning) {
+  setReactiveManualScanEnabled(true);
+
+  const bool commandActive =
+      abs(throttle) > REACTIVE_ACK_ACTIVE_THRESHOLD ||
+      abs(steer) > REACTIVE_ACK_ACTIVE_THRESHOLD;
+  updateReactiveManualAckSequence(commandActive, now);
+
+  if (reactiveAvoidState == REACTIVE_AVOID_WAIT_MANUAL && commandActive) {
     cancelReactiveAvoidance(false);
+  }
+
+  if (reactiveAvoidanceOwnsMotors()) {
+    return;
   }
 
   // Arcade drive mixing
@@ -953,6 +1072,7 @@ void processRawMotorCommand(int16_t throttle, int16_t steer, uint8_t flags) {
 void processWirelessCommand(uint8_t cmd, uint8_t speed) {
   lastManualCommand = millis();
   reactiveAutoAvoidEnabled = false;
+  setReactiveManualScanEnabled(false);
   if (reactiveAvoidanceOwnsMotors() || reactivePlanning) {
     cancelReactiveAvoidance(false);
   }
@@ -1050,6 +1170,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
       if (navigation.getWaypointCount() > 0) {
         cancelReactiveAvoidance(false);
         reactiveAutoAvoidEnabled = false;
+        setReactiveManualScanEnabled(false);
         navigationActive = true;
         navigation.start();
         manualOverride = false;
@@ -1063,6 +1184,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
     case CMD_NAV_PAUSE:
       cancelReactiveAvoidance(true);
       reactiveAutoAvoidEnabled = false;
+      setReactiveManualScanEnabled(false);
       navigation.pause();
       navigationActive = false;
       motors.stop();
@@ -1073,6 +1195,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
       if (navigation.getWaypointCount() > 0 && !navigation.isComplete()) {
         cancelReactiveAvoidance(false);
         reactiveAutoAvoidEnabled = false;
+        setReactiveManualScanEnabled(false);
         navigation.resume();
         navigationActive = true;
         manualOverride = false;
@@ -1086,6 +1209,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
     case CMD_WAYPOINT_CLEAR:
       cancelReactiveAvoidance(true);
       reactiveAutoAvoidEnabled = false;
+      setReactiveManualScanEnabled(false);
       navigation.clearWaypoints();
       resetPendingWaypoints();
       navigationActive = false;
@@ -1116,6 +1240,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
     case CMD_NAV_STOP:
       cancelReactiveAvoidance(true);
       reactiveAutoAvoidEnabled = false;
+      setReactiveManualScanEnabled(false);
       navigation.stop();
       navigationActive = false;
       manualOverride = false;
@@ -1177,6 +1302,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
       if (navigationActive || gps.isValid()) {
         cancelReactiveAvoidance(false);
         reactiveAutoAvoidEnabled = false;
+        setReactiveManualScanEnabled(false);
         navigation.returnToStart();
         navigationActive = true;
         manualOverride = false;
@@ -1201,6 +1327,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
         if (!active) {
           cancelReactiveAvoidance(true);
           reactiveAutoAvoidEnabled = false;
+          setReactiveManualScanEnabled(false);
           motors.stop();
           manualOverride = false;
           controlMode = MODE_AUTO;
@@ -1208,6 +1335,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
           lastManualRight = 0;
         } else {
           reactiveAutoAvoidEnabled = true;
+          setReactiveManualScanEnabled(false);
           if ((reactiveAvoidanceOwnsMotors() || reactivePlanning) &&
               !(leftMotor > 0 && rightMotor > 0)) {
             cancelReactiveAvoidance(false);
@@ -1242,12 +1370,14 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
 
         if (active) {
           reactiveAutoAvoidEnabled = false;
+          setReactiveManualScanEnabled(true);
           processRawMotorCommand(throttle, steer, 0);
           manualOverride = true;
           controlMode = MODE_MANUAL;
         } else {
           cancelReactiveAvoidance(true);
           reactiveAutoAvoidEnabled = false;
+          setReactiveManualScanEnabled(false);
           motors.stop();
           manualOverride = false;
           controlMode = MODE_AUTO;
@@ -1264,6 +1394,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
     case CMD_EMERGENCY_STOP:
       cancelReactiveAvoidance(true);
       reactiveAutoAvoidEnabled = false;
+      setReactiveManualScanEnabled(false);
       motors.stop();
       navigationActive = false;
       manualOverride = false;

@@ -6,6 +6,16 @@
  *   - Secondary stick (speed):   ADS1115 A1 = VRX, A3 = VRY
  *   - Secondary stick switch:    D8 (reverse toggle)
  *
+ * Primary stick sets the locked direction vector while held.
+ * It supports front/back/left/right and angled combinations.
+ *
+ * Secondary stick is accelerator-only:
+ *   - A3 / speed VRY, positive-north movement only
+ *   - A1 / speed VRX is ignored for motion
+ *
+ * Releasing the direction stick clears the lock immediately, so the speed
+ * stick alone can never keep the robot moving.
+ *
  * The radio packet format stays the same:
  *   throttle + steer + flags + crc
  *
@@ -52,6 +62,19 @@ int16_t speedYCenter = 16384;
 
 const int32_t deadband = 600; // Shared joystick deadzone
 
+int16_t lockedDirX = 0;
+int16_t lockedDirY = 0;
+bool directionLocked = false;
+bool speedDriveActive = false;
+
+// Direction lock hysteresis in mapped [-255..255] units.
+const int16_t DIR_LOCK_ENGAGE = 45;
+const int16_t DIR_LOCK_RELEASE = 20;
+
+// Accelerator hysteresis on the secondary stick VRY (north/positive only).
+const int16_t SPEED_DRIVE_ENGAGE = 35;
+const int16_t SPEED_DRIVE_RELEASE = 18;
+
 uint8_t computeCrc(const Packet& p) {
   const uint8_t* b = (const uint8_t*)&p;
   uint8_t sum = 0;
@@ -86,13 +109,35 @@ int16_t mapAdsToSigned255(int32_t raw, int32_t center) {
   }
 }
 
-int16_t computeSpeedMagnitude(int16_t speedX, int16_t speedY) {
-  return max(abs(speedX), abs(speedY));
+int16_t normalizeAxisByMagnitude(int16_t axis, int16_t magnitude) {
+  if (magnitude <= 0) return 0;
+  long scaled = ((long)axis * 255L) / (long)magnitude;
+  return (int16_t)constrain(scaled, -255L, 255L);
+}
+
+void updateDirectionLock(int16_t dirX, int16_t dirY) {
+  int16_t magnitude = max(abs(dirX), abs(dirY));
+  if (magnitude >= DIR_LOCK_ENGAGE) {
+    lockedDirX = normalizeAxisByMagnitude(dirX, magnitude);
+    lockedDirY = normalizeAxisByMagnitude(dirY, magnitude);
+    directionLocked = true;
+    return;
+  }
+
+  if (magnitude <= DIR_LOCK_RELEASE) {
+    lockedDirX = 0;
+    lockedDirY = 0;
+    directionLocked = false;
+  }
 }
 
 int16_t scaleAxisByMagnitude(int16_t axis, int16_t magnitude) {
   long scaled = ((long)axis * (long)magnitude) / 255L;
   return (int16_t)constrain(scaled, -255L, 255L);
+}
+
+const char* directionLockLabel(bool locked) {
+  return locked ? "set" : "none";
 }
 
 void setup() {
@@ -181,24 +226,29 @@ void loop() {
 
   int16_t dirX = mapAdsToSigned255(dirXRaw, dirXCenter);
   int16_t dirY = mapAdsToSigned255(dirYRaw, dirYCenter);
-  int16_t speedX = mapAdsToSigned255(speedXRaw, speedXCenter);
   int16_t speedY = mapAdsToSigned255(speedYRaw, speedYCenter);
 
   // If your direction stick is mounted differently, invert here:
   // dirX = -dirX;
   // dirY = -dirY;
 
-  // Secondary stick controls speed magnitude only. Any deflection of that
-  // stick increases speed, while the primary stick supplies the direction
-  // vector (forward/reverse + steer).
-  int16_t speedMagnitude = computeSpeedMagnitude(speedX, speedY);
-  int16_t directionMagnitude = max(abs(dirX), abs(dirY));
+  // Primary joystick sets the direction vector while held.
+  updateDirectionLock(dirX, dirY);
+
+  // Secondary joystick drives only when moved north/positive on VRY.
+  // A1/VRX is intentionally ignored for motion.
+  if (speedY >= SPEED_DRIVE_ENGAGE) {
+    speedDriveActive = true;
+  } else if (speedY <= SPEED_DRIVE_RELEASE) {
+    speedDriveActive = false;
+  }
+  int16_t speedMagnitude = speedDriveActive ? (speedY > 0 ? speedY : 0) : 0;
 
   int16_t throttle = 0;
   int16_t steer = 0;
-  if (speedMagnitude > 0 && directionMagnitude > 0) {
-    throttle = scaleAxisByMagnitude(dirY, speedMagnitude);
-    steer = scaleAxisByMagnitude(dirX, speedMagnitude);
+  if (directionLocked && speedMagnitude > 0) {
+    throttle = scaleAxisByMagnitude(lockedDirY, speedMagnitude);
+    steer = scaleAxisByMagnitude(lockedDirX, speedMagnitude);
   }
 
   // Preserve the original reverse-toggle behavior on the joystick switch.
@@ -206,6 +256,7 @@ void loop() {
   // directly, but it remains useful for quick inversion if desired.
   if (reverseToggle) {
     throttle = -throttle;
+    steer = -steer;
   }
 
   if (abs(throttle) < 10) throttle = 0;
@@ -235,7 +286,11 @@ void loop() {
   Serial.print(" DirY: "); Serial.print(dirYRaw);
   Serial.print(" SpdX: "); Serial.print(speedXRaw);
   Serial.print(" SpdY: "); Serial.print(speedYRaw);
-  Serial.print(" Mag: "); Serial.print(speedMagnitude);
+  Serial.print(" Accel: "); Serial.print(speedMagnitude);
+  Serial.print(" Lock: "); Serial.print(directionLockLabel(directionLocked));
+  Serial.print(" DirVec: "); Serial.print(lockedDirX);
+  Serial.print("/");
+  Serial.print(lockedDirY);
   Serial.print(" Rev: "); Serial.print(reverseToggle ? 1 : 0);
   Serial.print(" Btn: "); Serial.println(btn ? 1 : 0);
 
