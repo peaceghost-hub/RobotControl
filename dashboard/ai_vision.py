@@ -348,10 +348,10 @@ class MoondreamVision:
         self._last_nav: Optional[Dict[str, str]] = None
         self._drive_count = 0
 
-        # ── Obstacle-triggered analysis (event-driven when auto-drive ON) ──
-        # When auto_drive is enabled the analysis loop does NOT poll on a
-        # timer.  Instead it waits on this Event, which is set by
-        # ``obstacle_trigger()`` when the Pi reports OBSTACLE_DETECTED.
+        # ── Legacy obstacle-trigger compatibility ─────────────────────
+        # Physical obstacle response now belongs to the Mega's local
+        # servo-scan avoidance. Keep these fields only so older code can
+        # call ``obstacle_trigger()`` harmlessly during the transition.
         self._obstacle_event = threading.Event()
         self._obstacle_frame: Optional[bytes] = None
         self._obstacle_distance: int = -1
@@ -552,7 +552,6 @@ class MoondreamVision:
         if not enabled:
             self._auto_drive = False
             self._ai_paused = False
-            self._obstacle_event.clear()
             if self._fd_active:
                 self.stop_full_drive()
                 return
@@ -575,13 +574,12 @@ class MoondreamVision:
                 self._mode = "navigate"
             # Clear pause when toggling on
             self._ai_paused = False
-            # Ensure the analysis thread is running for obstacle avoidance.
-            # This is independent of "Auto Analyse" (_enabled) — the thread
-            # is needed solely to service obstacle events when auto_drive is ON.
+            # Keep the analysis thread available for manual assist / Full
+            # Drive support. Obstacle-triggered AI reactions are retired.
             if self._status == "ready":
                 self._start_analysis_thread()
                 if not self._enabled:
-                    logger.info("Auto-drive: analysis thread started for obstacle handling")
+                    logger.info("Auto-drive armed — waiting for Auto Analyse or Full Drive")
             elif self._status in ("not_loaded", "error"):
                 self._desired_enabled = True
                 self.load_model()
@@ -619,22 +617,16 @@ class MoondreamVision:
         self._broadcast_status()
 
     def obstacle_trigger(self, frame_bytes: Optional[bytes] = None, distance_cm: int = -1) -> None:
-        """Called by app.py when OBSTACLE_DETECTED arrives and AI is loaded.
+        """Compatibility no-op.
 
-        Stashes the frame + distance and signals the analysis thread to run
-        an immediate navigate-mode analysis instead of waiting for the next
-        timer tick.  If ``frame_bytes`` is None, the analysis loop will grab
-        the latest frame via ``_frame_provider`` as usual.
+        Obstacle-triggered AI handling was retired after reactive obstacle
+        motion moved to the Mega. Timer-based analysis and Full Drive remain.
         """
-        if not self._control_enabled:
-            return
-        if not self._enabled and not self._auto_drive:
-            return
-        with self._obstacle_lock:
-            self._obstacle_frame = frame_bytes
-            self._obstacle_distance = distance_cm
-        self._obstacle_event.set()
-        logger.info("Obstacle trigger: dist=%dcm — AI analysis queued", distance_cm)
+        _ = frame_bytes
+        logger.debug(
+            "Ignoring obstacle-triggered AI request at %d cm — Mega owns local obstacle response",
+            distance_cm,
+        )
 
     # ══════════════════════════════════════════════════════════════════
     #  NAVIGATION DECISION PARSER & DRIVE COMMAND
@@ -817,16 +809,16 @@ class MoondreamVision:
         ])
 
     def _assist_nav_active(self) -> bool:
-        """Auto-drive assist may only move when a base navigation owner is active."""
-        return self._control_enabled and self._auto_drive and self._base_nav_mode in ("manual", "waypoint")
+        """Base-nav AI assist is retired; local obstacle response stays on the Mega."""
+        return False
 
     def _send_drive_command(self, nav: Dict[str, str]) -> None:
-        """Send obstacle avoidance advice to the Pi.
+        """Send AI navigation advice to the Pi.
 
-        Only sends when auto-drive is ON and not paused.
+        Only sends when a compatible drive mode is active and not paused.
         The Pi decides what to do with it:
-        - NavController active → feeds to NavController
-        - Manual driving → executes directly as motor command
+        - Base-nav assist is retired
+        - Full Drive uses its own dedicated command path
         """
         if not self._drive_command_fn:
             return
@@ -858,13 +850,14 @@ class MoondreamVision:
     def _send_coupled_drive_command(self, nav: Dict[str, str]) -> None:
         """Send a timer-based (coupled) drive command to the Pi.
 
-        Called from the timer path of _analysis_loop ONLY when Auto
-        Analyse is ON together with Auto Drive or Full Drive.
+        Called from the timer path of _analysis_loop when Auto Analyse is
+        ON together with a compatible drive mode. With base-nav assist
+        retired, this is effectively a Full Drive coupling path.
 
         Gating:
         - drive_command_fn must be wired.
         - Auto Analyse must be enabled (_enabled).
-        - At least one drive mode active (_auto_drive OR _fd_active).
+        - At least one supported drive mode active (currently _fd_active).
         - NOT paused (_ai_paused).
         - During Full Drive: suppress SAFE+FORWARD (let FD loop lead on
           clear terrain; only intervene on CAUTION/DANGER).
@@ -1001,9 +994,7 @@ class MoondreamVision:
                 self._stop_event.set()
                 logger.info("AI Vision OFF")
             else:
-                # auto_drive is ON — thread must stay alive for obstacle avoidance.
-                # Timer analysis is disabled but obstacle handling continues.
-                logger.info("AI Vision timer analysis OFF — obstacle avoidance still active")
+                logger.info("AI Vision timer analysis OFF — Auto Drive remains armed")
 
         self._apply_coupled_interval()
         self._broadcast_status()
@@ -1047,80 +1038,27 @@ class MoondreamVision:
                 self._stop_event.wait(0.5)
                 continue
             if not self._enabled and not self._auto_drive:
-                # Neither timer analysis nor obstacle avoidance is active.
+                # Nothing is currently asking the timer loop to stay alive.
                 self._stop_event.wait(0.5)
                 continue
 
-            # ── Wait for next trigger: obstacle event OR timer interval ──
-            # Obstacle events take priority (instant, event-driven).
-            # If no obstacle fires within _interval, run regular analysis.
-            triggered = self._obstacle_event.wait(timeout=self._interval)
-            if self._stop_event.is_set():
+            # Obstacle-triggered analysis was retired when local obstacle
+            # motion moved to the Mega. The background loop is timer-based
+            # now; it either performs regular analysis or idles.
+            if self._stop_event.wait(self._interval):
                 break
 
-            if triggered:
-                self._obstacle_event.clear()
-
-                # ── OBSTACLE-TRIGGERED ANALYSIS (navigate mode) ───────
-                # Grab the stashed obstacle frame (or fall back to live frame)
-                with self._obstacle_lock:
-                    frame_bytes = self._obstacle_frame
-                    obs_dist = self._obstacle_distance
-                    self._obstacle_frame = None
-                if frame_bytes is None:
-                    frame_bytes = (
-                        self._frame_provider() if self._frame_provider else None
-                    )
-                if frame_bytes is None:
-                    continue
-
-                # Broadcast "analysing" to the UI
-                if self._emit_fn:
-                    self._emit_fn("ai_vision_update", {
-                        "mode": "navigate",
-                        "response": f"Obstacle at {obs_dist}cm — AI analysing… ({self._active_backend})",
-                        "inference_time": None,
-                        "count": self._analysis_count,
-                        "backend": self._active_backend,
-                        "obstacle_triggered": True,
-                    })
-
-                # Force navigate mode for obstacle analysis so we get
-                # a directional decision (FORWARD/LEFT/RIGHT/STOP).
-                saved_mode = self._mode
-                self._mode = "navigate"
-                result = self._run_analysis(frame_bytes)
-                self._mode = saved_mode  # restore original mode
-
-                if result:
-                    result["obstacle_triggered"] = True
-                    result["obstacle_distance_cm"] = obs_dist
-
-                    # Send drive command ONLY from obstacle-triggered path.
-                    # Timer-based analysis never sends drive commands.
-                    nav = result.get("nav_decision")
-                    if nav:
-                        self._send_drive_command(nav)
-                        result["drive_sent"] = True
-                        result["drive_count"] = self._drive_count
-
-                    with self._lock:
-                        self._last_result = result
-                        self._analysis_count += 1
-                    if self._emit_fn:
-                        self._emit_fn("ai_vision_update", result)
-                continue  # loop back — don't fall through to timer path
-
             # ── TIMER-BASED PATH (regular analysis) ─────────────────
-            # Skip when Auto Analyse is OFF; in obstacle-only mode
-            # (_auto_drive=True, _enabled=False) we never do timer analysis.
+            # Skip when Auto Analyse is OFF; Auto Drive may stay armed
+            # without forcing timer analysis by itself.
             if not self._enabled:
                 continue
 
             # ── Coupling: Auto Analyse + (Auto Drive | Full Drive) ────
             # When coupled, the timer path ALSO sends drive commands to
-            # the Pi, providing continuous terrain / obstacle / direction
-            # advice rather than only reacting to obstacle-detected events.
+            # the Pi for supported drive modes. With base-nav assist retired,
+            # this is effectively Full Drive only. Obstacle-triggered
+            # avoidance is no longer part of this path.
             coupled = self._enabled and (self._assist_nav_active() or self._fd_active)
 
             try:
@@ -1389,8 +1327,8 @@ class MoondreamVision:
                 result["response"] = self._format_nav_decision(nav)
                 result["nav_decision"] = nav
                 self._last_nav = nav
-                # NOTE: drive command is sent by the analysis loop caller,
-                # NOT here — only obstacle-triggered analyses send commands.
+                # NOTE: drive commands are sent by the analysis-loop caller,
+                # not from _run_analysis() itself.
 
             elif self._mode == "custom" and self._custom_prompt:
                 answer = self._query(

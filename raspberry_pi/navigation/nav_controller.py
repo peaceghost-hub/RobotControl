@@ -17,6 +17,9 @@ State machine:
               ↑                    |
         OBSTACLE_AVOID  ←  OBSTACLE_DETECTED → PREPARING → ...
 
+The Pi still owns waypoint intent and heading re-acquire, but the Mega now
+owns the physical reactive obstacle motion via the servo-mounted ultrasonic.
+
 GOLDEN RULE: NO FREEZING.  Every step is non-blocking.
 """
 
@@ -85,7 +88,7 @@ class NavController:
     NAV_GRACE_PERIOD     = 2.0    # seconds — skip drift check at start of NAVIGATING
     HEADING_ACQUIRE_TIMEOUT = 30.0  # seconds — give up if can't acquire
     HEADING_HOLD_TIME    = 10.0   # seconds — countdown before forward drive
-    AI_ADVICE_TIMEOUT    = 10.0   # seconds — wait for AI obstacle advice before fallback
+    AI_ADVICE_TIMEOUT    = 10.0   # seconds — legacy compatibility (unused)
     PREPARE_TIME         = 3.0    # seconds — pause before acquiring heading
     WAYPOINT_HOLD_TIME   = 3.0    # seconds — pause after waypoint reached
     NAV_LOOP_HZ         = 10     # control loop frequency
@@ -149,10 +152,8 @@ class NavController:
         self._last_heading_error = 0.0
         self._acquire_timeout_retries = 0
 
-        # AI obstacle advice (received from AI Vision via main.py)
-        # When obstacle is detected, NavController waits for AI to advise
-        # on avoidance direction.  If no advice within AI_ADVICE_TIMEOUT,
-        # falls back to traditional turn-away avoidance.
+        # Legacy AI obstacle hooks are kept as compatibility no-ops while
+        # obstacle motion ownership has moved to the Mega.
         self._ai_advice_event = threading.Event()
         self._ai_advice_direction = None   # 'FORWARD'|'LEFT'|'RIGHT'|'STOP'
         self._ai_advice_safety = None      # 'SAFE'|'CAUTION'|'DANGER'
@@ -539,40 +540,29 @@ class NavController:
         pass
 
     def receive_ai_advice(self, direction: str, safety: str, reason: str = ''):
-        """Called by main.py when AI Vision provides obstacle avoidance advice.
-
-        This unblocks _handle_obstacle_detected() which is waiting for
-        AI advice before falling back to traditional avoidance."""
-        self._ai_advice_direction = direction.upper() if direction else 'STOP'
-        self._ai_advice_safety = safety.upper() if safety else 'DANGER'
-        self._ai_advice_event.set()
-        logger.info("AI advice received: %s (safety=%s) — %s",
-                    self._ai_advice_direction, self._ai_advice_safety, reason)
+        """Compatibility no-op: Mega now owns local obstacle response."""
+        logger.debug(
+            "Ignoring legacy AI advice %s/%s while Mega owns obstacle response — %s",
+            direction,
+            safety,
+            reason,
+        )
+        return False
 
     def notify_ai_triggered(self):
-        """Called by main.py when AI analysis has been triggered for
-        the current obstacle.  NavController will wait up to
-        AI_ADVICE_TIMEOUT for the result."""
-        self._ai_analysis_triggered = True
+        """Compatibility no-op: obstacle-triggered AI waits were retired."""
+        logger.debug("Ignoring legacy notify_ai_triggered call")
+        return False
 
     def handle_ai_proactive_stop(self, direction: str, safety: str, reason: str = ''):
-        """Called by main.py when AI Vision detects DANGER / requests STOP
-        while NavController is in NAVIGATING state (no ultrasonic obstacle yet).
-
-        This allows the AI camera to proactively halt the robot before
-        the ultrasonic sensor detects the obstacle — e.g. drop-offs, glass
-        walls, or objects the ultrasonic cone misses.
-        """
-        logger.warning("AI proactive stop during NAVIGATING — %s %s: %s",
-                        direction, safety, reason)
-        self._send_stop()
-        # Pre-load AI advice so _handle_obstacle_detected sees it immediately
-        self._ai_advice_direction = direction.upper() if direction else 'STOP'
-        self._ai_advice_safety = safety.upper() if safety else 'DANGER'
-        self._ai_analysis_triggered = True
-        self._ai_advice_event.set()
-        # Transition into obstacle-detected so the normal handler takes over
-        self._enter_obstacle_detected(skip_clearance=True)
+        """Compatibility no-op: AI no longer performs obstacle intervention."""
+        logger.info(
+            "Ignoring AI proactive stop request %s/%s while Mega owns obstacle response — %s",
+            direction,
+            safety,
+            reason,
+        )
+        return False
 
     def _emit_event(self, event_type: str, payload: dict = None):
         """Fire an event to the dashboard via the registered callback."""
@@ -871,12 +861,6 @@ class NavController:
         mega_blocked = bool(obstacle and obstacle.get('blocked'))
         if mega_avoiding or mega_blocked:
             self._send_stop()
-            # Clear previous AI advice results so we wait for fresh advice
-            # for THIS obstacle.  The dashboard may still analyse/display
-            # obstacle events, but the Mega now owns the physical avoid motion.
-            self._ai_advice_event.clear()
-            self._ai_advice_direction = None
-            self._ai_advice_safety = None
             self._enter_obstacle_detected(skip_clearance=True)
             return
 
@@ -1180,8 +1164,8 @@ class NavController:
             self._acquire_turn_since = 0.0
         if new_state in (NavState.NAVIGATING, NavState.WAYPOINT_REACHED, NavState.COMPLETE):
             self._acquire_timeout_retries = 0
-        # When leaving obstacle handling, reset AI advice flags so the
-        # next obstacle encounter starts with a clean slate.
+        # Legacy AI flags are still cleared so stale compatibility state
+        # never leaks across transitions.
         if new_state not in (NavState.OBSTACLE_DETECTED, NavState.OBSTACLE_AVOID):
             self._ai_analysis_triggered = False
 

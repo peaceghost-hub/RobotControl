@@ -2096,43 +2096,11 @@ def receive_robot_event():
         except Exception:
             logger.debug("Failed to emit robot_event")
 
-        # ── Obstacle-triggered AI analysis ────────────────────────────
-        # AI analyses obstacles whenever the model is loaded+enabled (for
-        # display).  But only flag ai_triggered=True when auto-drive is
-        # ON and not paused — that tells the Pi’s NavController to wait
-        # for AI advice before falling back to traditional avoidance.
-        ai_analysed = False    # did we start an analysis at all?
-        ai_triggered = False   # will a drive command follow?
-        if (event['type'] == 'OBSTACLE_DETECTED'
-                and hasattr(ai_vision, 'obstacle_trigger')
-                and ai_vision.control_enabled
-                and (ai_vision._enabled or ai_vision._auto_drive)
-                and ai_vision._status == 'ready'):
-            dist_cm = -1
-            try:
-                dist_cm = int(event['payload'].get('distance_cm', -1))
-            except (TypeError, ValueError):
-                pass
-            frame = _get_latest_frame_bytes()
-            # Fire-and-forget in a daemon thread so the HTTP response
-            # returns immediately (AI analysis takes ~2-3 s on cloud).
-            import threading as _threading
-            _threading.Thread(
-                target=ai_vision.obstacle_trigger,
-                args=(frame, dist_cm),
-                daemon=True,
-                name='obstacle-ai-trigger',
-            ).start()
-            ai_analysed = True
-            # NavController should only wait for AI advice when auto-drive
-            # is ON and not paused — otherwise it should fallback immediately.
-            ai_triggered = (
-                ai_vision.control_enabled
-                and
-                ai_vision._auto_drive
-                and not ai_vision._ai_paused
-                and ai_vision.base_nav_mode in ('manual', 'waypoint')
-            )
+        # Obstacle events are still logged and displayed for the operator,
+        # but physical obstacle response now belongs to the Mega's local
+        # servo-scan avoidance state machine.  The Pi should not wait for
+        # AI obstacle advice anymore.
+        ai_triggered = False
 
         return jsonify({
             'status': 'success',

@@ -401,7 +401,41 @@ Update `globals.h` to select your wireless protocol:
    Tools → Serial Monitor (115200 baud)
    ```
 
-### 6. Dual-Sensor Obstacle Detection
+### 6. ESP8266 CC1101 Remote (Dual Joystick)
+
+For the CC1101 wireless handheld transmitter in
+`esp8266_remote/cc1101_remote/cc1101_remote.ino`, use this wiring:
+
+| ESP8266 Pin | Connects To | Notes |
+|---|---|---|
+| `D1` | CC1101 `GDO0` | Radio status line |
+| `D2` | CC1101 `CSN` | SPI chip select |
+| `D3` | ADS1115 `SDA` | I2C data |
+| `D4` | ADS1115 `SCL` | I2C clock |
+| `D5` | CC1101 `SCK` | SPI clock |
+| `D6` | CC1101 `MISO` | SPI MISO |
+| `D7` | CC1101 `MOSI` | SPI MOSI |
+| `D8` | Secondary joystick `SW` | Reverse toggle input; wire switch to GND |
+| `3V3` | CC1101 `VCC`, ADS1115 `VDD`, joystick `VCC` | CC1101 is 3.3V only |
+| `GND` | CC1101 `GND`, ADS1115 `GND`, joystick `GND` | Shared ground |
+
+#### ADS1115 Channel Map
+
+| ADS1115 Channel | Connected Control | Purpose |
+|---|---|---|
+| `A0` | Primary joystick `VRX` | Direction steering |
+| `A1` | Secondary joystick `VRX` | Speed stick magnitude |
+| `A2` | Primary joystick `VRY` | Direction forward/reverse |
+| `A3` | Secondary joystick `VRY` | Speed stick magnitude |
+
+#### Remote Control Behavior
+
+- The primary joystick chooses direction.
+- The secondary joystick chooses speed magnitude.
+- The `D8` switch keeps the existing reverse-toggle behavior.
+- The ESP8266 still transmits the same raw `throttle/steer` packet that the Mega already understands.
+
+### 7. Dual-Sensor Obstacle Detection
 
 The system now uses two complementary obstacle sensors:
 
@@ -416,7 +450,7 @@ The system now uses two complementary obstacle sensors:
 - **Combined**: Robot reacts immediately to KY-032 alert, then scans with HC-SR04 to find clear path
 - **Fault Tolerance**: If KY-032 fails, system continues with HC-SR04 only
 
-### 7. Testing Dual-Sensor System
+### 8. Testing Dual-Sensor System
 
 ```cpp
 // In Arduino Serial Monitor, you should see:

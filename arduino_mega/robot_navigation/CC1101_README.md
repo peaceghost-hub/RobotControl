@@ -18,7 +18,40 @@ This directory contains the CC1101 SPI wireless communication implementation for
 
 ### ESP8266 (Transmitter/Remote)
 - NodeMCU / Wemos D1 Mini + CC1101
+- ADS1115 ADC
+- 2 analog joysticks
 - See `esp8266_remote/` directory for wiring and firmware.
+
+#### ESP8266 Transmitter Wiring
+
+| ESP8266 Pin | Connects To | Notes |
+|---|---|---|
+| `D1` | CC1101 `GDO0` | Interrupt/status line |
+| `D2` | CC1101 `CSN` | SPI chip select |
+| `D3` | ADS1115 `SDA` | I2C data |
+| `D4` | ADS1115 `SCL` | I2C clock |
+| `D5` | CC1101 `SCK` | SPI clock |
+| `D6` | CC1101 `MISO` | SPI MISO |
+| `D7` | CC1101 `MOSI` | SPI MOSI |
+| `D8` | Speed joystick `SW` | Reverse toggle input; wire switch to GND |
+| `3V3` | CC1101 `VCC`, ADS1115 `VDD`, joystick `VCC` | Keep CC1101 on 3.3V only |
+| `GND` | CC1101 `GND`, ADS1115 `GND`, joystick `GND` | Shared ground |
+
+#### ADS1115 Channel Assignment
+
+| ADS1115 Channel | Connected Control | Role in Firmware |
+|---|---|---|
+| `A0` | Primary joystick `VRX` | Direction steer axis |
+| `A1` | Secondary joystick `VRX` | Speed stick magnitude input |
+| `A2` | Primary joystick `VRY` | Direction forward/reverse axis |
+| `A3` | Secondary joystick `VRY` | Speed stick magnitude input |
+
+#### Dual-Joystick Behavior
+
+- Primary joystick sets the direction vector.
+- Secondary joystick sets speed magnitude.
+- The `D8` switch preserves the existing reverse-toggle behavior.
+- The transmitted packet format is unchanged: `throttle`, `steer`, `flags`, `crc`.
 
 ## Software Requirements
 

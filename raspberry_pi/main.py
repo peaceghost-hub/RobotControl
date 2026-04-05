@@ -859,14 +859,8 @@ class RobotController:
                         'timestamp': datetime.utcnow().isoformat(),
                     }
                     try:
-                        resp = self.api_client.send_event(payload)
+                        self.api_client.send_event(payload)
                         last_emit = now
-                        # Only tell NavController to wait for AI if
-                        # the dashboard actually triggered AI analysis
-                        if (resp and resp.get('ai_triggered')
-                                and self.nav_controller
-                                and self.nav_controller.is_active):
-                            self.nav_controller.notify_ai_triggered()
                     except Exception as exc:
                         logger.debug(f"Failed to send obstacle event: {exc}")
 
@@ -1076,7 +1070,7 @@ class RobotController:
                 duration = int((payload or {}).get('duration', 3))
                 success = self.robot_link.sound_buzzer(duration) if hasattr(self.robot_link, 'sound_buzzer') else False
             elif command_type == 'AI_OVERRIDE':
-                # DEPRECATED — AI obstacle avoidance is now automatic.
+                # DEPRECATED — local obstacle response now belongs to the Mega.
                 # Kept for backward compatibility; no-op.
                 logger.info("AI_OVERRIDE command received (deprecated, ignored)")
                 success = True
@@ -1091,28 +1085,18 @@ class RobotController:
                 logger.info("AI_DRIVE: %s  safety=%s  reason=%s  source=%s",
                             ai_dir, ai_safety, ai_reason, ai_source)
 
-                # If NavController is active, handle based on current nav state
-                if (self.nav_controller
-                        and self.nav_controller.is_active
-                        and hasattr(self.nav_controller, 'receive_ai_advice')):
-
+                # When waypoint navigation is active, the Mega owns local
+                # obstacle response and the Pi NavController owns heading /
+                # waypoint intent.  AI_DRIVE remains useful for manual assist
+                # and Full Drive, but it should not steer active waypoint nav.
+                if self.nav_controller and self.nav_controller.is_active:
                     nav_state = getattr(self.nav_controller, '_state', None)
                     nav_state_name = nav_state.name if nav_state else ''
-
-                    if nav_state_name == 'OBSTACLE_DETECTED':
-                        # NavController is waiting for advice — deliver it
-                        self.nav_controller.receive_ai_advice(ai_dir, ai_safety, ai_reason)
-                    elif (ai_dir == 'STOP' or ai_safety == 'DANGER') and nav_state_name == 'NAVIGATING':
-                        # AI sees danger during normal navigation — proactive stop
-                        # Uses dedicated method that safely transitions NavController
-                        self.nav_controller.handle_ai_proactive_stop(ai_dir, ai_safety, ai_reason)
-                    elif ai_dir in ('LEFT', 'RIGHT') and ai_safety == 'CAUTION':
-                        # AI sees partial obstruction — feed as advice for next obstacle check
-                        self.nav_controller.receive_ai_advice(ai_dir, ai_safety, ai_reason)
-                    else:
-                        # FORWARD+SAFE/CAUTION — path clear, no action needed during normal nav
-                        logger.debug("AI_DRIVE FORWARD+%s during %s — no action needed",
-                                     ai_safety, nav_state_name)
+                    logger.info(
+                        "AI_DRIVE ignored while NavController owns motion (%s, source=%s)",
+                        nav_state_name,
+                        ai_source or 'unknown',
+                    )
                     success = True
                 else:
                     # Direct AI driving — execute using the current autonomous speed
