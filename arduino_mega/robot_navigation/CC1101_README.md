@@ -33,7 +33,8 @@ This directory contains the CC1101 SPI wireless communication implementation for
 | `D5` | CC1101 `SCK` | SPI clock |
 | `D6` | CC1101 `MISO` | SPI MISO |
 | `D7` | CC1101 `MOSI` | SPI MOSI |
-| `D8` | Speed joystick `SW` | Reverse toggle input; wire switch to GND |
+| `D0` | Joystick 1 `SW` | Left-wheel reverse toggle input |
+| `D8` | Joystick 2 `SW` | Right-wheel reverse toggle input |
 | `3V3` | CC1101 `VCC`, ADS1115 `VDD`, joystick `VCC` | Keep CC1101 on 3.3V only |
 | `GND` | CC1101 `GND`, ADS1115 `GND`, joystick `GND` | Shared ground |
 
@@ -41,26 +42,26 @@ This directory contains the CC1101 SPI wireless communication implementation for
 
 | ADS1115 Channel | Connected Control | Role in Firmware |
 |---|---|---|
-| `A0` | Primary joystick `VRX` | Direction steer axis |
-| `A1` | Secondary joystick `VRX` | Ignored for motion (reserved) |
-| `A2` | Primary joystick `VRY` | Direction forward/reverse axis |
-| `A3` | Secondary joystick `VRY` | Accelerator input (north/positive only) |
+| `A0` | Joystick 1 `VRX` | Reserved / unused for drive |
+| `A1` | Joystick 1 `VRY` | Joystick 1 throttle axis |
+| `A2` | Joystick 2 `VRX` | Reserved / unused for drive |
+| `A3` | Joystick 2 `VRY` | Joystick 2 throttle axis |
 
 #### Dual-Joystick Behavior
 
-- Primary joystick sets the direction vector while held (supports angled directions too).
-- Secondary joystick drives only from `VRY` on `A3`, positive-north movement only.
-- Secondary `VRX` on `A1` is ignored for motion.
-- Releasing the primary joystick clears the direction lock immediately.
-- The `D8` switch preserves the existing reverse-toggle behavior.
-- The transmitted packet format is unchanged: `throttle`, `steer`, `flags`, `crc`.
+- Joystick 1 directly controls the RIGHT wheel.
+- Joystick 2 directly controls the LEFT wheel.
+- Each joystick uses only its `VRY` axis for tank drive.
+- The left wheel keeps the tested inversion in transmitter firmware.
+- The Mega applies the same final wheel-direction inversion as the tested standalone receiver.
+- `D0` toggles left-wheel reverse trim; `D8` toggles right-wheel reverse trim.
+- The transmitted packet layout is `leftSpeed`, `rightSpeed`, `flags`, `crc`.
 
 #### Manual Obstacle Behavior
 
 - During raw manual joystick driving, the Mega scans when an obstacle is detected.
 - It does not auto-avoid immediately in raw manual mode.
-- Local avoidance only starts after the operator performs the acknowledgement tap sequence:
-  `forward -> release -> forward -> release -> forward -> release -> forward`
+- Local avoidance only starts after the operator releases both wheel controls while scanning is active.
 
 ## Software Requirements
 
@@ -101,8 +102,8 @@ struct WirelessMessage {
 The ESP8266 sends a compact 6-byte packet for low-latency control:
 ```cpp
 struct RawMotorPacket {
-  int16_t throttle;
-  int16_t steer;
+  int16_t leftSpeed;
+  int16_t rightSpeed;
   uint8_t flags;
   uint8_t crc;
 };

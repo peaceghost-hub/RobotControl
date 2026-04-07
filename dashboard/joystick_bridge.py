@@ -16,6 +16,7 @@ except ImportError:  # pragma: no cover - optional dependency in dev envs
 
 logger = logging.getLogger(__name__)
 THR_STR_RE = re.compile(r"Thr:\s*(-?\d+)\s+Str:\s*(-?\d+)", re.IGNORECASE)
+LEFT_RIGHT_RE = re.compile(r"Left:\s*(-?\d+)\s*\|\s*Right:\s*(-?\d+)", re.IGNORECASE)
 
 
 class JoystickBridge:
@@ -176,6 +177,14 @@ class JoystickBridge:
                 "type": "joystick",
                 "y": float(debug_match.group(1)),
                 "x": float(debug_match.group(2)),
+            }
+
+        tank_match = LEFT_RIGHT_RE.search(text)
+        if tank_match:
+            return {
+                "type": "joystick",
+                "left_speed": float(tank_match.group(1)),
+                "right_speed": float(tank_match.group(2)),
             }
 
         parts = [segment.strip() for segment in text.split(",")]

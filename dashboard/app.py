@@ -289,7 +289,13 @@ def _update_ai_base_nav_from_command(command_type, payload=None):
 
     if command_type == 'MANUAL_DRIVE':
         direction = str(payload.get('direction', '')).strip().lower()
-        if direction in ('stop', 'brake', '') and not payload.get('throttle') and not payload.get('steer'):
+        if (
+            direction in ('stop', 'brake', '')
+            and not payload.get('throttle')
+            and not payload.get('steer')
+            and not payload.get('left_speed')
+            and not payload.get('right_speed')
+        ):
             ai_vision.set_base_nav('none')
         else:
             ai_vision.set_base_nav('manual')
@@ -315,11 +321,7 @@ def _queue_instant_command(command_type: str, payload: dict | None = None, devic
         # High-rate joystick analog control should behave like a live stream,
         # not a backlog of stale motions. Keep only the newest analog MANUAL_DRIVE
         # packet (and its paired MANUAL_OVERRIDE hold) for the target device.
-        if command_type == 'MANUAL_DRIVE' and (
-            payload.get('mode') == 'analog'
-            or 'throttle' in payload
-            or 'steer' in payload
-        ):
+        if command_type == 'MANUAL_DRIVE' and _is_analog_joystick_payload(payload):
             retained = deque()
             while _instant_queue:
                 queued = _instant_queue.popleft()
@@ -327,14 +329,7 @@ def _queue_instant_command(command_type: str, payload: dict | None = None, devic
                 queued_payload = queued.get('payload') or {}
                 queued_device = queued.get('device_id')
                 is_same_device = queued_device == target_device
-                is_analog_drive = (
-                    queued_type == 'MANUAL_DRIVE'
-                    and (
-                        queued_payload.get('mode') == 'analog'
-                        or 'throttle' in queued_payload
-                        or 'steer' in queued_payload
-                    )
-                )
+                is_analog_drive = queued_type == 'MANUAL_DRIVE' and _is_analog_joystick_payload(queued_payload)
                 is_hold = (
                     queued_type == 'MANUAL_OVERRIDE'
                     and str(queued_payload.get('mode', '')).strip().lower() in ('hold', 'on', 'enable', 'enabled')
@@ -356,14 +351,7 @@ def _queue_instant_command(command_type: str, payload: dict | None = None, devic
                 queued_payload = queued.get('payload') or {}
                 queued_device = queued.get('device_id')
                 is_same_device = queued_device == target_device
-                is_analog_drive = (
-                    queued_type == 'MANUAL_DRIVE'
-                    and (
-                        queued_payload.get('mode') == 'analog'
-                        or 'throttle' in queued_payload
-                        or 'steer' in queued_payload
-                    )
-                )
+                is_analog_drive = queued_type == 'MANUAL_DRIVE' and _is_analog_joystick_payload(queued_payload)
                 if is_same_device and is_analog_drive:
                     continue
                 retained.append(queued)
@@ -543,6 +531,17 @@ def _scale_signed_axis_to_int255(value: float, scale: float) -> int:
     return int(round(normalized * 255.0))
 
 
+def _is_analog_joystick_payload(payload: dict | None) -> bool:
+    payload = payload or {}
+    return (
+        payload.get('mode') == 'analog'
+        or 'throttle' in payload
+        or 'steer' in payload
+        or 'left_speed' in payload
+        or 'right_speed' in payload
+    )
+
+
 def _build_joystick_drive_payload(payload: dict) -> dict:
     """Convert joystick input into a MANUAL_DRIVE payload."""
     direction = str(payload.get('direction', '')).strip().lower()
@@ -553,6 +552,32 @@ def _build_joystick_drive_payload(payload: dict) -> dict:
         if speed is not None:
             result['speed'] = speed
         return result
+
+    if 'left_speed' in payload or 'right_speed' in payload:
+        try:
+            left_speed = int(round(float(payload.get('left_speed', 0) or 0)))
+        except (TypeError, ValueError):
+            left_speed = 0
+        try:
+            right_speed = int(round(float(payload.get('right_speed', 0) or 0)))
+        except (TypeError, ValueError):
+            right_speed = 0
+
+        left_speed = max(-255, min(255, left_speed))
+        right_speed = max(-255, min(255, right_speed))
+        if abs(left_speed) < 15:
+            left_speed = 0
+        if abs(right_speed) < 15:
+            right_speed = 0
+
+        analog_speed = max(abs(left_speed), abs(right_speed))
+        return {
+            'direction': 'tank' if analog_speed > 0 else 'stop',
+            'mode': 'analog',
+            'left_speed': left_speed,
+            'right_speed': right_speed,
+            'speed': analog_speed,
+        }
 
     deadband = int(app.config.get('JOYSTICK_DEADBAND', 18))
     steer_gain = float(app.config.get('JOYSTICK_STEER_GAIN', 1.0))
@@ -619,8 +644,8 @@ def _release_joystick_override(reason: str) -> None:
         {
             'direction': 'stop',
             'mode': 'analog',
-            'throttle': 0,
-            'steer': 0,
+            'left_speed': 0,
+            'right_speed': 0,
             'speed': 0,
         },
         device_id,
@@ -703,7 +728,7 @@ def _forward_joystick_payload(payload: dict, *, raw: Optional[dict] = None, arme
     """Forward a mixed analog/discrete payload to the Pi manual drive lane."""
     device_id = app.config.get('DEFAULT_DEVICE_ID', 'robot_01')
 
-    analog_payload = payload.get('mode') == 'analog' or 'throttle' in payload or 'steer' in payload
+    analog_payload = _is_analog_joystick_payload(payload)
 
     if not joystick_runtime.get('override_engaged') and not analog_payload:
         _queue_instant_command('MANUAL_OVERRIDE', {'mode': 'hold'}, device_id)
@@ -717,6 +742,8 @@ def _forward_joystick_payload(payload: dict, *, raw: Optional[dict] = None, arme
         direction,
         payload.get('throttle'),
         payload.get('steer'),
+        payload.get('left_speed'),
+        payload.get('right_speed'),
         speed,
     )
     joystick_runtime['last_direction'] = direction
@@ -729,7 +756,10 @@ def _forward_joystick_payload(payload: dict, *, raw: Optional[dict] = None, arme
     command_label = payload.get('last_command')
     if not command_label:
         if payload.get('mode') == 'analog':
-            command_label = f"T{int(payload.get('throttle', 0))} S{int(payload.get('steer', 0))}"
+            if 'left_speed' in payload or 'right_speed' in payload:
+                command_label = f"L{int(payload.get('left_speed', 0))} R{int(payload.get('right_speed', 0))}"
+            else:
+                command_label = f"T{int(payload.get('throttle', 0))} S{int(payload.get('steer', 0))}"
         else:
             command_label = direction if speed is None else f'{direction}@{speed}'
 
@@ -810,6 +840,8 @@ def handle_joystick_message(message: dict) -> None:
         direction,
         drive_payload.get('throttle'),
         drive_payload.get('steer'),
+        drive_payload.get('left_speed'),
+        drive_payload.get('right_speed'),
         speed,
     )
     forward_interval_s = max(0.08, float(app.config.get('JOYSTICK_FORWARD_INTERVAL_MS', 120)) / 1000.0)

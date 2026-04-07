@@ -188,7 +188,7 @@ bool CC1101Driver::receive(WirelessMessage& msg) {
   // on the software checksum (computeCrc).  Hardware CRC_OK may fail
   // due to register config differences between ccmode=0 and ccmode=1.
 
-  // --- 6. Decode as RawMotorPacket (6 bytes, matches standalone exactly) ---
+  // --- 6. Decode as RawMotorPacket (6 bytes, direct wheel values) ---
   if (pktLen == sizeof(RawMotorPacket)) {
     RawMotorPacket* pkt = (RawMotorPacket*)rxBuffer;
     uint8_t sum = 0;

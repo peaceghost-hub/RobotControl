@@ -1,25 +1,13 @@
 /*
- * ESP8266 (NodeMCU) + ADS1115 + CC1101 — Dual-Joystick Transmitter
+ * ESP8266 (NodeMCU) + ADS1115 + CC1101 — Dual Joystick (Tank Drive) TX
  *
- * Stick layout:
- *   - Primary stick (direction): ADS1115 A0 = VRX, A2 = VRY
- *   - Secondary stick (speed):   ADS1115 A1 = VRX, A3 = VRY
- *   - Secondary stick switch:    D8 (reverse toggle)
+ * This transmitter dedicates one joystick to each wheel:
+ *   - Joystick 1 drives the RIGHT wheel
+ *   - Joystick 2 drives the LEFT wheel
  *
- * Primary stick sets the locked direction vector while held.
- * It supports front/back/left/right and angled combinations.
- *
- * Secondary stick is accelerator-only:
- *   - A3 / speed VRY, positive-north movement only
- *   - A1 / speed VRX is ignored for motion
- *
- * Releasing the direction stick clears the lock immediately, so the speed
- * stick alone can never keep the robot moving.
- *
- * The radio packet format stays the same:
- *   throttle + steer + flags + crc
- *
- * This keeps the Mega raw-motor path and the USB serial bridge compatible.
+ * The wireless packet remains 6 bytes wide so the existing CC1101 / I2C
+ * transport stays compatible, but the two int16 fields now represent direct
+ * wheel speeds instead of throttle/steer.
  */
 
 #include <Wire.h>
@@ -34,46 +22,29 @@ const uint8_t PIN_MISO = D6;
 const uint8_t PIN_MOSI = D7; 
 const uint8_t PIN_CSN  = D2; 
 const uint8_t PIN_GDO0 = D1; 
-const uint8_t PIN_SPEED_BTN = D8;
-
-const uint8_t CH_DIR_X   = 0;  // Primary joystick VRX
-const uint8_t CH_SPEED_X = 1;  // Secondary joystick VRX
-const uint8_t CH_DIR_Y   = 2;  // Primary joystick VRY
-const uint8_t CH_SPEED_Y = 3;  // Secondary joystick VRY
+const uint8_t PIN_JOY1_BTN = D0;
+const uint8_t PIN_JOY2_BTN = D8;
 
 const uint8_t CALIBRATION_SAMPLES = 20;
 const uint8_t LOOP_SAMPLES = 3;
 
 float frequency = 433.00;
-bool reverseToggle = false;
+bool reverseLeft = false;
+bool reverseRight = false;
 
 struct Packet {
-  int16_t throttle; 
-  int16_t steer;    
+  int16_t leftSpeed;
+  int16_t rightSpeed;
   uint8_t flags;    
   uint8_t crc;
 } pkt;
 
-// DEFAULT Centers (Will be overwritten by setup calibration)
-int16_t dirXCenter = 16384;
-int16_t dirYCenter = 16384;
-int16_t speedXCenter = 16384;
-int16_t speedYCenter = 16384;
-
-const int32_t deadband = 600; // Shared joystick deadzone
-
-int16_t lockedDirX = 0;
-int16_t lockedDirY = 0;
-bool directionLocked = false;
-bool speedDriveActive = false;
-
-// Direction lock hysteresis in mapped [-255..255] units.
-const int16_t DIR_LOCK_ENGAGE = 45;
-const int16_t DIR_LOCK_RELEASE = 20;
-
-// Accelerator hysteresis on the secondary stick VRY (north/positive only).
-const int16_t SPEED_DRIVE_ENGAGE = 35;
-const int16_t SPEED_DRIVE_RELEASE = 18;
+// Calibration centers
+int16_t x1Center = 16384;
+int16_t y1Center = 16384;
+int16_t x2Center = 16384;
+int16_t y2Center = 16384;
+const int32_t deadband = 600;
 
 uint8_t computeCrc(const Packet& p) {
   const uint8_t* b = (const uint8_t*)&p;
@@ -109,44 +80,14 @@ int16_t mapAdsToSigned255(int32_t raw, int32_t center) {
   }
 }
 
-int16_t normalizeAxisByMagnitude(int16_t axis, int16_t magnitude) {
-  if (magnitude <= 0) return 0;
-  long scaled = ((long)axis * 255L) / (long)magnitude;
-  return (int16_t)constrain(scaled, -255L, 255L);
-}
-
-void updateDirectionLock(int16_t dirX, int16_t dirY) {
-  int16_t magnitude = max(abs(dirX), abs(dirY));
-  if (magnitude >= DIR_LOCK_ENGAGE) {
-    lockedDirX = normalizeAxisByMagnitude(dirX, magnitude);
-    lockedDirY = normalizeAxisByMagnitude(dirY, magnitude);
-    directionLocked = true;
-    return;
-  }
-
-  if (magnitude <= DIR_LOCK_RELEASE) {
-    lockedDirX = 0;
-    lockedDirY = 0;
-    directionLocked = false;
-  }
-}
-
-int16_t scaleAxisByMagnitude(int16_t axis, int16_t magnitude) {
-  long scaled = ((long)axis * (long)magnitude) / 255L;
-  return (int16_t)constrain(scaled, -255L, 255L);
-}
-
-const char* directionLockLabel(bool locked) {
-  return locked ? "set" : "none";
-}
-
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  Serial.println("\nESP8266 Dual-Joystick TX - Auto Calibrating...");
+  Serial.println("\nESP8266 Tank Drive TX - Auto Calibrating...");
   
-  pinMode(PIN_SPEED_BTN, INPUT_PULLUP);
+  pinMode(PIN_JOY1_BTN, INPUT_PULLUP);
+  pinMode(PIN_JOY2_BTN, INPUT);
 
   Wire.begin(D3, D4); 
   if (!ads.begin(0x48)) {
@@ -156,23 +97,14 @@ void setup() {
   ads.setGain(GAIN_ONE); 
   ads.setDataRate(RATE_ADS1115_250SPS);
 
-  // --- AUTO CALIBRATION ---
-  // Ensure user is NOT touching either joystick now
-  Serial.println("DO NOT TOUCH EITHER JOYSTICK");
+  Serial.println("DO NOT TOUCH JOYSTICKS");
   delay(500);
-  dirXCenter   = readAveragedAds(CH_DIR_X, CALIBRATION_SAMPLES);
-  speedXCenter = readAveragedAds(CH_SPEED_X, CALIBRATION_SAMPLES);
-  dirYCenter   = readAveragedAds(CH_DIR_Y, CALIBRATION_SAMPLES);
-  speedYCenter = readAveragedAds(CH_SPEED_Y, CALIBRATION_SAMPLES);
+  x1Center = readAveragedAds(0, CALIBRATION_SAMPLES);
+  y1Center = readAveragedAds(1, CALIBRATION_SAMPLES);
+  x2Center = readAveragedAds(2, CALIBRATION_SAMPLES);
+  y2Center = readAveragedAds(3, CALIBRATION_SAMPLES);
   
-  Serial.print("Calibrated Centers -> DirX: ");
-  Serial.print(dirXCenter);
-  Serial.print(" DirY: ");
-  Serial.print(dirYCenter);
-  Serial.print(" SpdX: ");
-  Serial.print(speedXCenter);
-  Serial.print(" SpdY: ");
-  Serial.println(speedYCenter);
+  Serial.println("Calibration Complete.");
   Serial.println("--------------------------------");
 
   // CC1101 Setup
@@ -211,60 +143,42 @@ void setup() {
 }
 
 void loop() {
-  int32_t dirXRaw   = readAveragedAds(CH_DIR_X, LOOP_SAMPLES);
-  int32_t speedXRaw = readAveragedAds(CH_SPEED_X, LOOP_SAMPLES);
-  int32_t dirYRaw   = readAveragedAds(CH_DIR_Y, LOOP_SAMPLES);
-  int32_t speedYRaw = readAveragedAds(CH_SPEED_Y, LOOP_SAMPLES);
+  int32_t y1Raw = readAveragedAds(1, LOOP_SAMPLES + 1);
+  int32_t y2Raw = readAveragedAds(3, LOOP_SAMPLES + 1);
 
-  // Button logic
-  static bool lastBtn = HIGH;
-  bool btn = (digitalRead(PIN_SPEED_BTN) == LOW);
-  if (btn != lastBtn) {
-    lastBtn = btn;
-    if (btn) reverseToggle = !reverseToggle;
+  static bool lastBtn1 = HIGH;
+  bool btn1 = (digitalRead(PIN_JOY1_BTN) == LOW);
+  if (btn1 != lastBtn1) {
+    lastBtn1 = btn1;
+    if (btn1) reverseLeft = !reverseLeft;
   }
 
-  int16_t dirX = mapAdsToSigned255(dirXRaw, dirXCenter);
-  int16_t dirY = mapAdsToSigned255(dirYRaw, dirYCenter);
-  int16_t speedY = mapAdsToSigned255(speedYRaw, speedYCenter);
-
-  // If your direction stick is mounted differently, invert here:
-  // dirX = -dirX;
-  // dirY = -dirY;
-
-  // Primary joystick sets the direction vector while held.
-  updateDirectionLock(dirX, dirY);
-
-  // Secondary joystick drives only when moved north/positive on VRY.
-  // A1/VRX is intentionally ignored for motion.
-  if (speedY >= SPEED_DRIVE_ENGAGE) {
-    speedDriveActive = true;
-  } else if (speedY <= SPEED_DRIVE_RELEASE) {
-    speedDriveActive = false;
-  }
-  int16_t speedMagnitude = speedDriveActive ? (speedY > 0 ? speedY : 0) : 0;
-
-  int16_t throttle = 0;
-  int16_t steer = 0;
-  if (directionLocked && speedMagnitude > 0) {
-    throttle = scaleAxisByMagnitude(lockedDirY, speedMagnitude);
-    steer = scaleAxisByMagnitude(lockedDirX, speedMagnitude);
+  static bool lastBtn2 = LOW;
+  bool btn2 = (digitalRead(PIN_JOY2_BTN) == HIGH);
+  if (btn2 != lastBtn2) {
+    lastBtn2 = btn2;
+    if (btn2) reverseRight = !reverseRight;
   }
 
-  // Preserve the original reverse-toggle behavior on the joystick switch.
-  // This is optional now that the direction stick can command reverse
-  // directly, but it remains useful for quick inversion if desired.
-  if (reverseToggle) {
-    throttle = -throttle;
-    steer = -steer;
-  }
+  int16_t leftThrottle = mapAdsToSigned255(y1Raw, y1Center);
+  int16_t rightThrottle = mapAdsToSigned255(y2Raw, y2Center);
 
-  if (abs(throttle) < 10) throttle = 0;
-  if (abs(steer) < 10) steer = 0;
+  // Swap joysticks: joystick 1 drives the right wheel, joystick 2 drives the left wheel.
+  int16_t temp = leftThrottle;
+  leftThrottle = rightThrottle;
+  rightThrottle = temp;
 
-  pkt.throttle = throttle;
-  pkt.steer    = steer;
-  pkt.flags    = (reverseToggle ? 0x01 : 0x00) | (btn ? 0x02 : 0x00);
+  // Preserve the tested wheel orientation mapping.
+  leftThrottle = -leftThrottle;
+
+  if (reverseLeft) leftThrottle = -leftThrottle;
+  if (reverseRight) rightThrottle = -rightThrottle;
+
+  pkt.leftSpeed = leftThrottle;
+  pkt.rightSpeed = rightThrottle;
+  pkt.flags = 0;
+  if (reverseLeft) pkt.flags |= 0x01;
+  if (reverseRight) pkt.flags |= 0x02;
   pkt.crc      = computeCrc(pkt);
 
   // --- MANUAL BLIND SEND (NO CRASH) ---
@@ -279,20 +193,8 @@ void loop() {
   ELECHOUSE_cc1101.SpiStrobe(0x3B); // FLUSH TX
   // ------------------------------------
 
-  // Debug (USB serial bridge still keys off the Thr/Str prefix)
-  Serial.print("Thr: "); Serial.print(throttle);
-  Serial.print(" Str: "); Serial.print(steer);
-  Serial.print(" DirX: "); Serial.print(dirXRaw);
-  Serial.print(" DirY: "); Serial.print(dirYRaw);
-  Serial.print(" SpdX: "); Serial.print(speedXRaw);
-  Serial.print(" SpdY: "); Serial.print(speedYRaw);
-  Serial.print(" Accel: "); Serial.print(speedMagnitude);
-  Serial.print(" Lock: "); Serial.print(directionLockLabel(directionLocked));
-  Serial.print(" DirVec: "); Serial.print(lockedDirX);
-  Serial.print("/");
-  Serial.print(lockedDirY);
-  Serial.print(" Rev: "); Serial.print(reverseToggle ? 1 : 0);
-  Serial.print(" Btn: "); Serial.println(btn ? 1 : 0);
+  Serial.print("Left: "); Serial.print(pkt.leftSpeed);
+  Serial.print(" | Right: "); Serial.println(pkt.rightSpeed);
 
   delay(20);
 }

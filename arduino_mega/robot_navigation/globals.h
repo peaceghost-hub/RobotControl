@@ -79,7 +79,7 @@ const uint8_t CMD_SEND_HEADING    = 'D';  // Pi -> Mega heading forwarding
 const uint8_t CMD_WAYPOINT_COMPLETED = 'Y';  // Mega -> Pi: waypoint reached
 const uint8_t CMD_RETURN_TO_START = 'B';
 const uint8_t CMD_MANUAL_OVERRIDE = 'V';
-const uint8_t CMD_RAW_MOTOR = 'J';   // Pi -> Mega raw throttle/steer (wireless-compatible)
+const uint8_t CMD_RAW_MOTOR = 'J';   // Pi -> Mega raw left/right wheel speeds (wireless-compatible)
 const uint8_t CMD_EMERGENCY_STOP  = 'E';
 const uint8_t CMD_WIRELESS_BROADCAST = 'Z';
 // CMD_FOLLOW_LINE removed — no line follower hardware
@@ -173,7 +173,7 @@ void storePendingWaypoint(const WaypointPacket& packet);
 void commitPendingWaypoints();
 void transitionToState(RobotState newState);
 void pollCC1101();
-void processRawMotorCommand(int16_t throttle, int16_t steer, uint8_t flags);
+void processRawMotorCommand(int16_t leftSpeed, int16_t rightSpeed, uint8_t flags);
 void processWirelessCommand(uint8_t cmd, uint8_t speed);
 void processWirelessMessage(const String& message);
 void sendWirelessGps();

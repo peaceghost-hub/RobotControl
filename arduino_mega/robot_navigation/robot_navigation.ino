@@ -122,8 +122,6 @@ static const int REACTIVE_SIDE_MIN_CM = 25;                       // minimum sid
 static const unsigned long REACTIVE_SCAN_MAX_AGE_MS = 1500;
 static const unsigned long REACTIVE_BLOCKED_RESCAN_MS = 250;
 static const unsigned long REACTIVE_BLOCKED_TIMEOUT_MS = 2500;
-static const unsigned long REACTIVE_ACK_TIMEOUT_MS = 1200;
-static const uint8_t REACTIVE_ACK_EDGES_REQUIRED = 7;             // F,R,F,R,F,R,F
 static const int REACTIVE_ACK_ACTIVE_THRESHOLD = 30;
 static const unsigned long REACTIVE_ARC_DURATION_MS = 1000;
 static const unsigned long REACTIVE_PASS_DURATION_MS = 800;
@@ -170,7 +168,7 @@ void commitPendingWaypoints();
 
 void transitionToState(RobotState newState);
 void pollCC1101();
-void processRawMotorCommand(int16_t throttle, int16_t steer, uint8_t flags);
+void processRawMotorCommand(int16_t leftSpeed, int16_t rightSpeed, uint8_t flags);
 void processWirelessCommand(uint8_t cmd, uint8_t speed);
 void processWirelessMessage(const String& msg);
 
@@ -239,29 +237,14 @@ void updateReactiveManualAckSequence(bool active, unsigned long now) {
     reactiveManualAckLastActive = active;
     return;
   }
-  if (active == reactiveManualAckLastActive) {
-    return;
-  }
-
-  if (reactiveManualAckLastEdge > 0 &&
-      (now - reactiveManualAckLastEdge) > REACTIVE_ACK_TIMEOUT_MS) {
-    reactiveManualAckStage = 0;
-  }
-
+  const bool releaseEdge = reactiveManualAckLastActive && !active;
   reactiveManualAckLastActive = active;
-  reactiveManualAckLastEdge = now;
 
-  const bool expectedActive = (reactiveManualAckStage % 2) == 0;
-  if (active == expectedActive) {
-    reactiveManualAckStage++;
-  } else {
-    reactiveManualAckStage = active ? 1 : 0;
-  }
-
-  if (reactiveManualAckStage >= REACTIVE_ACK_EDGES_REQUIRED) {
+  if (releaseEdge && reactivePlanning) {
     reactiveManualAckGranted = true;
     reactiveManualAckStage = 0;
-    DEBUG_SERIAL.println(F("# REACTIVE AVOID: manual acknowledgement accepted"));
+    reactiveManualAckLastEdge = now;
+    DEBUG_SERIAL.println(F("# REACTIVE AVOID: controls released, auto-avoid acknowledged"));
   }
 }
 
@@ -492,11 +475,14 @@ void updateReactiveAvoidance(unsigned long now) {
   }
 
   if (manualScanOnly) {
-    if (!forwardIntent || !withinPlanZone) {
+    if (!withinPlanZone) {
       reactivePlanning = false;
-      if (!withinPlanZone) {
-        resetReactiveManualAck();
-      }
+      resetReactiveManualAck();
+      return;
+    }
+
+    if (!forwardIntent && !reactiveManualAckGranted) {
+      reactivePlanning = false;
       return;
     }
 
@@ -781,9 +767,10 @@ void loop() {
   updateReactiveAvoidance(now);     // local servo-scan obstacle avoidance overlay
   // Compass heading is received from Pi via CMD_SEND_HEADING → piHeading
 
-  // Local avoidance overlay owns forward obstacle reaction only for
-  // Pi-driven discrete motor commands (autonomous navigation + dashboard
-  // manual arrows).  Raw joystick / wireless control remains operator-owned.
+  // Local avoidance overlay owns forward obstacle reaction automatically for
+  // Pi-driven discrete motor commands. Raw joystick / wireless control stays
+  // operator-driven until both wheel controls are released, which explicitly
+  // acknowledges one local avoid attempt.
 
   // ====================================================================
   //  6. Non-blocking buzzer tick
@@ -993,7 +980,7 @@ void pollCC1101() {
           // Store for immediate use — transitionToState() is handled by Mode Manager
           RawMotorPacket* pkt = (RawMotorPacket*)msg.data;
           if (robotState == STATE_WIRELESS) {
-            processRawMotorCommand(pkt->throttle, pkt->steer, pkt->flags);
+            processRawMotorCommand(pkt->leftSpeed, pkt->rightSpeed, pkt->flags);
           }
           // If not yet in WIRELESS, Mode Manager will switch us next iteration,
           // and the next packet will drive the motors.
@@ -1025,15 +1012,16 @@ void pollCC1101() {
 }
 
 // ======================== RAW MOTOR (ESP8266) ========================
-void processRawMotorCommand(int16_t throttle, int16_t steer, uint8_t flags) {
+void processRawMotorCommand(int16_t leftSpeed, int16_t rightSpeed, uint8_t flags) {
   const unsigned long now = millis();
+  (void)flags;
   lastManualCommand = now;
   reactiveAutoAvoidEnabled = false;
   setReactiveManualScanEnabled(true);
 
   const bool commandActive =
-      abs(throttle) > REACTIVE_ACK_ACTIVE_THRESHOLD ||
-      abs(steer) > REACTIVE_ACK_ACTIVE_THRESHOLD;
+      abs(leftSpeed) > REACTIVE_ACK_ACTIVE_THRESHOLD ||
+      abs(rightSpeed) > REACTIVE_ACK_ACTIVE_THRESHOLD;
   updateReactiveManualAckSequence(commandActive, now);
 
   if (reactiveAvoidState == REACTIVE_AVOID_WAIT_MANUAL && commandActive) {
@@ -1044,9 +1032,10 @@ void processRawMotorCommand(int16_t throttle, int16_t steer, uint8_t flags) {
     return;
   }
 
-  // Arcade drive mixing
-  int left  = constrain(throttle + steer, -255, 255);
-  int right = constrain(throttle - steer, -255, 255);
+  // Match the tested standalone receiver behavior by applying the same
+  // final wheel-direction inversion before the motor driver.
+  int left  = constrain(-leftSpeed, -255, 255);
+  int right = constrain(-rightSpeed, -255, 255);
 
   // Deadzone
   if (abs(left)  < 15) left  = 0;
@@ -1060,7 +1049,7 @@ void processRawMotorCommand(int16_t throttle, int16_t steer, uint8_t flags) {
   // Throttled debug
   static unsigned long lastPrint = 0;
   if (millis() - lastPrint > 500) {
-    DEBUG_SERIAL.print(F("# Raw L:"));
+    DEBUG_SERIAL.print(F("# Tank L:"));
     DEBUG_SERIAL.print(left);
     DEBUG_SERIAL.print(F(" R:"));
     DEBUG_SERIAL.println(right);
@@ -1357,10 +1346,10 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
 
     case CMD_RAW_MOTOR:
       if (length >= 5) {
-        int16_t throttle = 0;
-        int16_t steer = 0;
-        memcpy(&throttle, &payload[0], sizeof(int16_t));
-        memcpy(&steer, &payload[2], sizeof(int16_t));
+        int16_t leftSpeed = 0;
+        int16_t rightSpeed = 0;
+        memcpy(&leftSpeed, &payload[0], sizeof(int16_t));
+        memcpy(&rightSpeed, &payload[2], sizeof(int16_t));
         bool active = payload[4] != 0;
 
         if (active && navigationActive) {
@@ -1371,7 +1360,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
         if (active) {
           reactiveAutoAvoidEnabled = false;
           setReactiveManualScanEnabled(true);
-          processRawMotorCommand(throttle, steer, 0);
+          processRawMotorCommand(leftSpeed, rightSpeed, 0);
           manualOverride = true;
           controlMode = MODE_MANUAL;
         } else {

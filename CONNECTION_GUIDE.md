@@ -415,7 +415,8 @@ For the CC1101 wireless handheld transmitter in
 | `D5` | CC1101 `SCK` | SPI clock |
 | `D6` | CC1101 `MISO` | SPI MISO |
 | `D7` | CC1101 `MOSI` | SPI MOSI |
-| `D8` | Secondary joystick `SW` | Reverse toggle input; wire switch to GND |
+| `D0` | Joystick 1 `SW` | Left-wheel reverse toggle input; wire switch to GND |
+| `D8` | Joystick 2 `SW` | Right-wheel reverse toggle input; wire switch to GND |
 | `3V3` | CC1101 `VCC`, ADS1115 `VDD`, joystick `VCC` | CC1101 is 3.3V only |
 | `GND` | CC1101 `GND`, ADS1115 `GND`, joystick `GND` | Shared ground |
 
@@ -423,22 +424,20 @@ For the CC1101 wireless handheld transmitter in
 
 | ADS1115 Channel | Connected Control | Purpose |
 |---|---|---|
-| `A0` | Primary joystick `VRX` | Direction steering |
-| `A1` | Secondary joystick `VRX` | Ignored for motion (reserved) |
-| `A2` | Primary joystick `VRY` | Direction forward/reverse |
-| `A3` | Secondary joystick `VRY` | Accelerator input (north/positive only) |
+| `A0` | Joystick 1 `VRX` | Reserved / unused for drive |
+| `A1` | Joystick 1 `VRY` | Joystick 1 throttle axis |
+| `A2` | Joystick 2 `VRX` | Reserved / unused for drive |
+| `A3` | Joystick 2 `VRY` | Joystick 2 throttle axis |
 
 #### Remote Control Behavior
 
-- The primary joystick sets the direction vector while held, including angled directions.
-- The secondary joystick drives only from `VRY` on `A3` (north/positive movement only).
-- Secondary `VRX` on `A1` is ignored for motion.
-- Releasing the primary joystick clears the direction lock immediately.
-- The `D8` switch keeps the existing reverse-toggle behavior.
-- The ESP8266 still transmits the same raw `throttle/steer` packet that the Mega already understands.
+- Joystick 1 directly controls the right wheel.
+- Joystick 2 directly controls the left wheel.
+- Each joystick uses only its `VRY` axis for tank drive.
+- `D0` toggles left-wheel reverse trim and `D8` toggles right-wheel reverse trim.
+- The ESP8266 transmits direct raw wheel values, not throttle/steer mixing.
 - In raw manual joystick mode, obstacle detection triggers scanning first.
-- Raw manual auto-avoid only starts after the acknowledgement tap sequence:
-  `forward -> release -> forward -> release -> forward -> release -> forward`
+- Raw manual auto-avoid only starts after both controls are released while scanning is active.
 
 ### 7. Dual-Sensor Obstacle Detection
 

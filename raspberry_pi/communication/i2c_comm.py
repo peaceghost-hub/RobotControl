@@ -287,15 +287,15 @@ class I2CComm:
         resp = self._exchange(self.CMD_MANUAL_OVERRIDE, payload, expect=2)
         return self._is_ack(resp)
 
-    def send_raw_motor(self, throttle: int, steer: int, joystick_active: bool = False) -> bool:
-        """Send wireless-style raw throttle/steer over I2C.
+    def send_raw_motor(self, left_speed: int, right_speed: int, joystick_active: bool = False) -> bool:
+        """Send wireless-style raw left/right wheel values over I2C.
 
-        This mirrors the Mega's CC1101 raw motor path so joystick control
-        can behave like the wireless remote while still traveling Pi -> I2C.
+        This mirrors the Mega's CC1101 raw wheel path so joystick control
+        behaves the same whether it arrives via radio or Pi -> I2C.
         """
-        throttle = max(-255, min(255, int(throttle)))
-        steer = max(-255, min(255, int(steer)))
-        payload = struct.pack('<hhB', throttle, steer, 1 if joystick_active else 0)
+        left_speed = max(-255, min(255, int(left_speed)))
+        right_speed = max(-255, min(255, int(right_speed)))
+        payload = struct.pack('<hhB', left_speed, right_speed, 1 if joystick_active else 0)
         # Raw joystick control is latency-sensitive. A write-only send keeps
         # the control stream responsive and avoids building up slow ACK waits
         # on the Pi during rapid steering updates.

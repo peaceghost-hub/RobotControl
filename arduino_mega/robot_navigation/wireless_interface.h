@@ -18,20 +18,20 @@ struct WirelessMessage {
 // Message types (compatible across all protocols)
 enum MessageType : uint8_t {
   MSG_TYPE_COMMAND = 0x01,      // Remote control command
-  MSG_TYPE_STATUS = 0x02,        // Robot status update
-  MSG_TYPE_GPS = 0x03,           // GPS position data
-  MSG_TYPE_OBSTACLE = 0x04,      // Obstacle alert
-  MSG_TYPE_HANDSHAKE = 0x05,     // Connection handshake
-  MSG_TYPE_ACK = 0x06,           // Acknowledgment
-  MSG_TYPE_ERROR = 0x07,         // Error message
-  MSG_TYPE_HEARTBEAT = 0x08,     // Keep-alive
-  MSG_TYPE_RAW_MOTOR = 0x09      // Throttle/Steer raw values (ESP8266)
+  MSG_TYPE_STATUS = 0x02,       // Robot status update
+  MSG_TYPE_GPS = 0x03,          // GPS position data
+  MSG_TYPE_OBSTACLE = 0x04,     // Obstacle alert
+  MSG_TYPE_HANDSHAKE = 0x05,    // Connection handshake
+  MSG_TYPE_ACK = 0x06,          // Acknowledgment
+  MSG_TYPE_ERROR = 0x07,        // Error message
+  MSG_TYPE_HEARTBEAT = 0x08,    // Keep-alive
+  MSG_TYPE_RAW_MOTOR = 0x09     // Direct left/right wheel values (ESP8266)
 };
 
-// Raw motor packet (used by ESP8266 transmitter)
+// Raw wheel packet (used by ESP8266 transmitter)
 struct RawMotorPacket {
-  int16_t throttle;
-  int16_t steer;
+  int16_t leftSpeed;
+  int16_t rightSpeed;
   uint8_t flags;
   uint8_t crc;
 };

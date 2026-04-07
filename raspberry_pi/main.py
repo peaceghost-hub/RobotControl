@@ -187,8 +187,8 @@ class RobotController:
         self._manual_drive_speed = 180
         self._manual_drive_thread = None
         self._analog_drive_lock = Lock()
-        self._analog_drive_throttle = 0
-        self._analog_drive_steer = 0
+        self._analog_drive_left = 0
+        self._analog_drive_right = 0
         self._analog_drive_hold_active = False
         self._analog_drive_active = False
         self._analog_drive_thread = None
@@ -1023,9 +1023,16 @@ class RobotController:
                 direction = (payload or {}).get('direction', '').lower()
                 raw_throttle = (payload or {}).get('throttle')
                 raw_steer = (payload or {}).get('steer')
+                raw_left = (payload or {}).get('left_speed')
+                raw_right = (payload or {}).get('right_speed')
                 analog_motion = False
                 try:
-                    analog_motion = abs(int(raw_throttle or 0)) > 0 or abs(int(raw_steer or 0)) > 0
+                    analog_motion = (
+                        abs(int(raw_throttle or 0)) > 0
+                        or abs(int(raw_steer or 0)) > 0
+                        or abs(int(raw_left or 0)) > 0
+                        or abs(int(raw_right or 0)) > 0
+                    )
                 except (TypeError, ValueError):
                     analog_motion = False
                 if direction not in ('', 'none') or analog_motion:
@@ -1136,7 +1143,13 @@ class RobotController:
         mode = str((payload or {}).get('mode', '')).strip().lower()
         direction = (payload or {}).get('direction', '').lower()
 
-        if mode == 'analog' or 'throttle' in (payload or {}) or 'steer' in (payload or {}):
+        if (
+            mode == 'analog'
+            or 'throttle' in (payload or {})
+            or 'steer' in (payload or {})
+            or 'left_speed' in (payload or {})
+            or 'right_speed' in (payload or {})
+        ):
             return self._handle_manual_drive_analog(payload)
 
         try:
@@ -1192,22 +1205,22 @@ class RobotController:
             logger.warning("Manual drive apply failed: %s", exc)
             return False
 
-    def _set_analog_drive_target(self, throttle: int, steer: int, hold_active: bool = False) -> None:
-        throttle = max(-255, min(255, int(throttle)))
-        steer = max(-255, min(255, int(steer)))
+    def _set_analog_drive_target(self, left_speed: int, right_speed: int, hold_active: bool = False) -> None:
+        left_speed = max(-255, min(255, int(left_speed)))
+        right_speed = max(-255, min(255, int(right_speed)))
         with self._analog_drive_lock:
-            self._analog_drive_throttle = throttle
-            self._analog_drive_steer = steer
+            self._analog_drive_left = left_speed
+            self._analog_drive_right = right_speed
             self._analog_drive_hold_active = bool(hold_active)
             self._analog_drive_active = (
-                abs(throttle) > 0 or abs(steer) > 0 or self._analog_drive_hold_active
+                abs(left_speed) > 0 or abs(right_speed) > 0 or self._analog_drive_hold_active
             )
             self._analog_drive_last_input_mono = time.monotonic()
 
     def _clear_analog_drive_target(self) -> None:
         with self._analog_drive_lock:
-            self._analog_drive_throttle = 0
-            self._analog_drive_steer = 0
+            self._analog_drive_left = 0
+            self._analog_drive_right = 0
             self._analog_drive_hold_active = False
             self._analog_drive_active = False
             self._analog_drive_last_input_mono = time.monotonic()
@@ -1219,21 +1232,19 @@ class RobotController:
             last_input = self._analog_drive_last_input_mono
         return last_input > 0 and (time.monotonic() - last_input) < self._analog_bus_priority_hold
 
-    def _send_analog_drive_once(self, throttle: int, steer: int, joystick_active: bool) -> bool:
+    def _send_analog_drive_once(self, left_speed: int, right_speed: int, joystick_active: bool) -> bool:
         if not self.robot_link:
             return False
 
-        throttle = max(-255, min(255, int(throttle)))
-        steer = max(-255, min(255, int(steer)))
+        left_speed = max(-255, min(255, int(left_speed)))
+        right_speed = max(-255, min(255, int(right_speed)))
 
         success = False
         if hasattr(self.robot_link, 'send_raw_motor'):
-            success = bool(self.robot_link.send_raw_motor(throttle, steer, joystick_active=joystick_active))
+            success = bool(self.robot_link.send_raw_motor(left_speed, right_speed, joystick_active=joystick_active))
         else:
-            left_motor = max(-127, min(127, int(round((throttle + steer) * 127 / 255.0))))
-            right_motor = max(-127, min(127, int(round((throttle - steer) * 127 / 255.0))))
             if hasattr(self.robot_link, 'send_manual_control'):
-                success = bool(self.robot_link.send_manual_control(left_motor, right_motor, joystick_active=joystick_active))
+                success = bool(self.robot_link.send_manual_control(left_speed, right_speed, joystick_active=joystick_active))
 
         if success:
             self._analog_drive_last_send_mono = time.monotonic()
@@ -1245,14 +1256,14 @@ class RobotController:
 
         while not shutdown_event.is_set():
             with self._analog_drive_lock:
-                throttle = self._analog_drive_throttle
-                steer = self._analog_drive_steer
+                left_speed = self._analog_drive_left
+                right_speed = self._analog_drive_right
                 active = self._analog_drive_active
                 hold_active = self._analog_drive_hold_active
 
             if active:
-                joystick_active = bool(hold_active or abs(throttle) > 0 or abs(steer) > 0)
-                self._send_analog_drive_once(throttle, steer, joystick_active=joystick_active)
+                joystick_active = bool(hold_active or abs(left_speed) > 0 or abs(right_speed) > 0)
+                self._send_analog_drive_once(left_speed, right_speed, joystick_active=joystick_active)
                 release_pending = joystick_active
                 shutdown_event.wait(self._analog_drive_interval)
                 continue
@@ -1264,35 +1275,44 @@ class RobotController:
             shutdown_event.wait(0.01)
 
     def _handle_manual_drive_analog(self, payload: dict) -> bool:
-        """Apply continuous raw throttle/steer control from the dashboard joystick."""
+        """Apply continuous raw direct-wheel control from the dashboard joystick."""
         if not self.robot_link:
             logger.warning("Analog manual drive not supported by current comm link")
             return False
 
+        left_value = (payload or {}).get('left_speed')
+        right_value = (payload or {}).get('right_speed')
+
         try:
-            throttle = int((payload or {}).get('throttle', 0))
-            steer = int((payload or {}).get('steer', 0))
+            if left_value is not None or right_value is not None:
+                left_speed = int(left_value or 0)
+                right_speed = int(right_value or 0)
+            else:
+                throttle = int((payload or {}).get('throttle', 0))
+                steer = int((payload or {}).get('steer', 0))
+                left_speed = max(-255, min(255, int(round(throttle + steer))))
+                right_speed = max(-255, min(255, int(round(throttle - steer))))
         except (TypeError, ValueError):
             logger.warning("Invalid analog manual payload: %r", payload)
             return False
 
         hold_active = bool((payload or {}).get('hold_active', False))
 
-        throttle = max(-255, min(255, throttle))
-        steer = max(-255, min(255, steer))
+        left_speed = max(-255, min(255, left_speed))
+        right_speed = max(-255, min(255, right_speed))
 
         self._cancel_manual_assist(reason="analog manual command")
 
         with self._manual_drive_lock:
             self._manual_drive_active = False
             self._manual_drive_direction = 'stop'
-            self._manual_drive_speed = max(abs(throttle), abs(steer), 0)
+            self._manual_drive_speed = max(abs(left_speed), abs(right_speed), 0)
 
-        self._set_analog_drive_target(throttle, steer, hold_active=hold_active)
+        self._set_analog_drive_target(left_speed, right_speed, hold_active=hold_active)
         return self._send_analog_drive_once(
-            throttle,
-            steer,
-            joystick_active=bool(hold_active or abs(throttle) > 0 or abs(steer) > 0),
+            left_speed,
+            right_speed,
+            joystick_active=bool(hold_active or abs(left_speed) > 0 or abs(right_speed) > 0),
         )
 
     def _get_ai_drive_speed(self, payload: dict) -> int:
