@@ -17,6 +17,9 @@ except ImportError:  # pragma: no cover - optional dependency in dev envs
 logger = logging.getLogger(__name__)
 THR_STR_RE = re.compile(r"Thr:\s*(-?\d+)\s+Str:\s*(-?\d+)", re.IGNORECASE)
 LEFT_RIGHT_RE = re.compile(r"Left:\s*(-?\d+)\s*\|\s*Right:\s*(-?\d+)", re.IGNORECASE)
+USB_MODE_CLAIM = b"MODE USB\n"
+USB_MODE_RELEASE = b"MODE RADIO\n"
+USB_MODE_CLAIM_INTERVAL_S = 0.35
 
 
 class JoystickBridge:
@@ -41,6 +44,7 @@ class JoystickBridge:
         self._serial = None
         self._reader_thread: Optional[threading.Thread] = None
         self._running = threading.Event()
+        self._last_mode_claim_mono = 0.0
 
     @property
     def ready(self) -> bool:
@@ -72,6 +76,7 @@ class JoystickBridge:
                 self._serial.reset_input_buffer()
             except Exception:
                 pass
+            self._send_mode_command(USB_MODE_CLAIM, force=True)
             self._running.set()
             self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
             self._reader_thread.start()
@@ -91,16 +96,32 @@ class JoystickBridge:
 
         if self._serial:
             try:
+                self._send_mode_command(USB_MODE_RELEASE, force=True)
+            except Exception:
+                pass
+            try:
                 self._serial.close()
             except Exception as exc:  # pragma: no cover - hardware dependent
                 logger.debug("Error closing joystick serial port: %s", exc)
         self._serial = None
+        self._last_mode_claim_mono = 0.0
+
+    def _send_mode_command(self, command: bytes, force: bool = False) -> None:
+        if not self._serial or not self._serial.is_open:
+            return
+        now = time.monotonic()
+        if not force and (now - self._last_mode_claim_mono) < USB_MODE_CLAIM_INTERVAL_S:
+            return
+        self._serial.write(command)
+        self._serial.flush()
+        self._last_mode_claim_mono = now
 
     def _read_loop(self) -> None:  # pragma: no cover - hardware dependent
         transient_errors = 0
         try:
             while self._running.is_set() and self._serial:
                 try:
+                    self._send_mode_command(USB_MODE_CLAIM)
                     raw = self._serial.readline()
                 except Exception as exc:
                     if self._is_transient_read_error(exc):

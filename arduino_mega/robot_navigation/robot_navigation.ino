@@ -276,9 +276,8 @@ static int8_t chooseReactiveAvoidDirection(const PathScan& scan) {
   }
   if (leftPassable) return -1;
   if (rightPassable) return 1;
-  // No side meets the preferred clearance — still choose the wider side
-  // so we can attempt a best-effort avoid before declaring failure at 30 cm.
-  return (scoreDistance(scan.rightDist) >= scoreDistance(scan.leftDist)) ? 1 : -1;
+  // No safe side was actually found.
+  return 0;
 }
 
 static void startReactivePlanning(unsigned long now) {
@@ -356,6 +355,11 @@ void updateReactiveAvoidance(unsigned long now) {
     return;
   }
 
+  if (reactiveAvoidState == REACTIVE_AVOID_WAIT_MANUAL) {
+    motors.stop();
+    return;
+  }
+
   const bool movingForward = motors.isMovingForward();
   const bool forwardIntent = movingForward || forwardIntentFromShadow();
   const bool withinPlanZone = reactiveLastObstacleDistance > 0 &&
@@ -390,6 +394,8 @@ void updateReactiveAvoidance(unsigned long now) {
             startReactiveAvoidArc(dir, now);
             return;
           }
+          enterReactiveManualWait(F("no safe scanned path"));
+          return;
         }
 
         if (!obstacleAvoid.isScanInProgress() &&
@@ -532,6 +538,12 @@ void updateReactiveAvoidance(unsigned long now) {
     return;
   }
 
+  if (reactiveLastObstacleDistance > 0 &&
+      reactiveLastObstacleDistance <= REACTIVE_HARD_STOP_CM) {
+    enterReactiveManualWait(F("failed avoidance at 30 cm"));
+    return;
+  }
+
   if (!forwardIntent || !withinPlanZone) {
     reactivePlanning = false;
     return;
@@ -550,6 +562,8 @@ void updateReactiveAvoidance(unsigned long now) {
       startReactiveAvoidArc(dir, now);
       return;
     }
+    enterReactiveManualWait(F("no safe scanned path"));
+    return;
   }
 
   // Commit threshold reached but no safe side selected yet — hold and rescan
@@ -1345,7 +1359,7 @@ void handleI2CCommand(uint8_t command, const uint8_t* payload, uint8_t length) {
               !(leftMotor > 0 && rightMotor > 0)) {
             cancelReactiveAvoidance(false);
           }
-          if (!reactiveAvoidanceOwnsMotors()) {
+          if (!reactiveAvoidanceOwnsMotors() && !reactiveAvoidanceIsBlocked()) {
             motors.setMotors((int)leftMotor, (int)rightMotor);
           }
           manualOverride = true;

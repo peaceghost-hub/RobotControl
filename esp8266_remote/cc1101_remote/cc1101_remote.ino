@@ -27,6 +27,7 @@ const uint8_t PIN_JOY2_BTN = D8;
 
 const uint8_t CALIBRATION_SAMPLES = 20;
 const uint8_t LOOP_SAMPLES = 3;
+const unsigned long USB_BRIDGE_MODE_TIMEOUT_MS = 1500;
 const unsigned long BUTTON_DEBOUNCE_MS = 80;
 const int16_t TOGGLE_NEUTRAL_THRESHOLD = 25;
 const unsigned long TOGGLE_NEUTRAL_HOLD_MS = 120;
@@ -49,6 +50,8 @@ bool btn1StableState = false;
 bool btn2StableState = false;
 bool btn1PressArmed = false;
 bool btn2PressArmed = false;
+bool usbBridgeMode = false;
+unsigned long usbBridgeModeUntil = 0;
 unsigned long neutralSinceMs = 0;
 int8_t leftPendingSign = 0;
 int8_t rightPendingSign = 0;
@@ -159,6 +162,46 @@ int16_t stabilizeAxisDirection(int16_t candidate, int16_t& lastStable, int8_t& p
   return candidate;
 }
 
+void updateUsbBridgeMode(unsigned long now) {
+  static char commandBuf[24];
+  static uint8_t commandLen = 0;
+  static bool lastAnnouncedMode = false;
+
+  while (Serial.available() > 0) {
+    const char ch = (char)Serial.read();
+    if (ch == '\r') continue;
+
+    if (ch == '\n') {
+      commandBuf[commandLen] = '\0';
+      if (strcmp(commandBuf, "MODE USB") == 0) {
+        usbBridgeMode = true;
+        usbBridgeModeUntil = now + USB_BRIDGE_MODE_TIMEOUT_MS;
+      } else if (strcmp(commandBuf, "MODE RADIO") == 0) {
+        usbBridgeMode = false;
+        usbBridgeModeUntil = 0;
+      }
+      commandLen = 0;
+      continue;
+    }
+
+    if (commandLen < sizeof(commandBuf) - 1) {
+      commandBuf[commandLen++] = ch;
+    } else {
+      commandLen = 0;
+    }
+  }
+
+  if (usbBridgeMode && usbBridgeModeUntil > 0 && now > usbBridgeModeUntil) {
+    usbBridgeMode = false;
+    usbBridgeModeUntil = 0;
+  }
+
+  if (usbBridgeMode != lastAnnouncedMode) {
+    lastAnnouncedMode = usbBridgeMode;
+    Serial.println(usbBridgeMode ? "USB Bridge Mode: ON" : "USB Bridge Mode: OFF");
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -226,6 +269,9 @@ void setup() {
 }
 
 void loop() {
+  const unsigned long now = millis();
+  updateUsbBridgeMode(now);
+
   int32_t y1Raw = readAveragedAds(1, LOOP_SAMPLES + 1);
   int32_t y2Raw = readAveragedAds(3, LOOP_SAMPLES + 1);
 
@@ -246,7 +292,6 @@ void loop() {
       abs(joy1Throttle) <= TOGGLE_NEUTRAL_THRESHOLD &&
       abs(joy2Throttle) <= TOGGLE_NEUTRAL_THRESHOLD;
 
-  const unsigned long now = millis();
   if (joysticksNeutral) {
     if (neutralSinceMs == 0) neutralSinceMs = now;
   } else {
@@ -321,17 +366,19 @@ void loop() {
   if (reverseRight) pkt.flags |= 0x02;
   pkt.crc      = computeCrc(pkt);
 
-  // --- MANUAL BLIND SEND (NO CRASH) ---
-  byte len = sizeof(pkt);
-  ELECHOUSE_cc1101.SpiStrobe(0x36); // IDLE
-  ELECHOUSE_cc1101.SpiStrobe(0x3B); // FLUSH TX (clear any leftover data)
-  ELECHOUSE_cc1101.SpiWriteReg(0x3F, len); // LENGTH BYTE
-  ELECHOUSE_cc1101.SpiWriteBurstReg(0x3F, (uint8_t*)&pkt, len); // DATA
-  ELECHOUSE_cc1101.SpiStrobe(0x35); // TRANSMIT
-  delay(30); // WAIT for TX to complete (~12ms at 9.6kBaud for 6-byte packet)
-  ELECHOUSE_cc1101.SpiStrobe(0x36); // IDLE
-  ELECHOUSE_cc1101.SpiStrobe(0x3B); // FLUSH TX
-  // ------------------------------------
+  if (!usbBridgeMode) {
+    // --- MANUAL BLIND SEND (NO CRASH) ---
+    byte len = sizeof(pkt);
+    ELECHOUSE_cc1101.SpiStrobe(0x36); // IDLE
+    ELECHOUSE_cc1101.SpiStrobe(0x3B); // FLUSH TX (clear any leftover data)
+    ELECHOUSE_cc1101.SpiWriteReg(0x3F, len); // LENGTH BYTE
+    ELECHOUSE_cc1101.SpiWriteBurstReg(0x3F, (uint8_t*)&pkt, len); // DATA
+    ELECHOUSE_cc1101.SpiStrobe(0x35); // TRANSMIT
+    delay(30); // WAIT for TX to complete (~12ms at 9.6kBaud for 6-byte packet)
+    ELECHOUSE_cc1101.SpiStrobe(0x36); // IDLE
+    ELECHOUSE_cc1101.SpiStrobe(0x3B); // FLUSH TX
+    // ------------------------------------
+  }
 
   Serial.print("Left: "); Serial.print(pkt.leftSpeed);
   Serial.print(" | Right: "); Serial.println(pkt.rightSpeed);
