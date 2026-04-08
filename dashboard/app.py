@@ -790,7 +790,11 @@ def handle_joystick_message(message: dict) -> None:
     if has_explicit_enable:
         enabled = str(enable_raw).strip().lower() not in {'0', 'false', 'off', 'no', ''}
     else:
-        enabled = direction != 'stop' or joystick_runtime.get('override_engaged')
+        # For USB joystick control, a centered stick must immediately stop and
+        # release the live analog command path. Keeping "enabled" latched just
+        # because override was already engaged causes stale wheel values to
+        # linger until another packet happens to replace them.
+        enabled = direction != 'stop'
 
     if enabled:
         drive_payload['hold_active'] = True

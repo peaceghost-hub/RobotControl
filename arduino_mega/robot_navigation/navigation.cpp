@@ -245,18 +245,8 @@ void Navigation::update() {
         navState != NAV_STALLED) {
         if (obstacleAvoid->isObstacleDetected()) {
             motors->stop();
-            avoidAttempts++;
-            Serial.print(F("# NAV: obstacle! attempt #"));
-            Serial.println(avoidAttempts);
-
-            if (avoidAttempts > MAX_AVOID_ATTEMPTS) {
-                Serial.println(F("# NAV: too many obstacles — skipping waypoint"));
-                advanceWaypoint();
-                return;
-            }
-            // Alternate turn direction each attempt
-            avoidTurnDir = (avoidAttempts % 2 == 1) ? 1 : -1;
-            avoidTurnDegrees = avoidTurnDir * AVOID_TURN_DEG_BLOCKED;
+            avoidAttempts = 1;
+            Serial.println(F("# NAV: obstacle detected — scanning for one avoid attempt"));
             enterState(NAV_AVOID_STOP);
             return;
         }
@@ -496,7 +486,11 @@ void Navigation::handleAvoidScan() {
             avoidTurnDir = 1;
             avoidTurnDegrees = avoidTurnDir * AVOID_TURN_DEG_CLEAR;
         } else {
-            avoidTurnDegrees = avoidTurnDir * AVOID_TURN_DEG_BLOCKED;
+            Serial.println(F("# AVOID: no clear side locked — failed avoidance, stopping"));
+            motors->stop();
+            navigationActive = false;
+            enterState(NAV_IDLE);
+            return;
         }
 
         motors->startTurnDegrees(avoidTurnDegrees, AVOID_TURN_SPEED);
@@ -511,14 +505,23 @@ void Navigation::handleAvoidScan() {
     }
 
     if (millis() - stateEntryTime >= AVOID_SCAN_TIMEOUT) {
-        Serial.println(F("# AVOID: scan timeout — fallback turn"));
-        avoidTurnDegrees = avoidTurnDir * AVOID_TURN_DEG_BLOCKED;
-        motors->startTurnDegrees(avoidTurnDegrees, AVOID_TURN_SPEED);
-        enterState(NAV_AVOID_TURN);
+        Serial.println(F("# AVOID: scan timeout — failed avoidance, stopping"));
+        motors->stop();
+        navigationActive = false;
+        enterState(NAV_IDLE);
     }
 }
 
 void Navigation::handleAvoidTurn() {
+    const int dist = obstacleAvoid->getDistance();
+    if (dist > 0 && dist <= AVOID_FAIL_STOP_CM) {
+        Serial.println(F("# AVOID: obstacle reached 30 cm during turn — stopping"));
+        motors->stop();
+        navigationActive = false;
+        enterState(NAV_IDLE);
+        return;
+    }
+
     if (motors->isTurnComplete()) {
         // Drive past the obstacle
         Serial.println(F("# AVOID: driving past"));
@@ -528,6 +531,15 @@ void Navigation::handleAvoidTurn() {
 }
 
 void Navigation::handleAvoidDrive() {
+    const int dist = obstacleAvoid->getDistance();
+    if (dist > 0 && dist <= AVOID_FAIL_STOP_CM) {
+        Serial.println(F("# AVOID: obstacle reached 30 cm during pass — stopping"));
+        motors->stop();
+        navigationActive = false;
+        enterState(NAV_IDLE);
+        return;
+    }
+
     if (motors->isTimedForwardComplete()) {
         // Stop and prepare to recheck
         motors->stop();
@@ -543,23 +555,21 @@ void Navigation::handleAvoidRecheck() {
     obstacleAvoid->update();
     int dist = obstacleAvoid->getDistance();
 
-    if (dist > 0 && dist < AVOID_CENTER_RESUME_CM) {
+    if (dist > 0 && dist <= AVOID_FAIL_STOP_CM) {
+        Serial.println(F("# AVOID: obstacle still ahead at 30 cm — failed avoidance, stopping"));
+        motors->stop();
+        navigationActive = false;
+        enterState(NAV_IDLE);
+    } else if (dist > 0 && dist < OBSTACLE_TRIGGER_CM) {
         // Still blocked
-        Serial.println(F("# AVOID: still blocked after manoeuvre"));
-        if (avoidAttempts >= MAX_AVOID_ATTEMPTS) {
-            Serial.println(F("# AVOID: max attempts — skipping waypoint"));
-            advanceWaypoint();
-        } else {
-            // Try again with opposite direction
-            avoidAttempts++;
-            avoidTurnDir = -avoidTurnDir;
-            avoidTurnDegrees = avoidTurnDir * AVOID_TURN_DEG_BLOCKED;
-            motors->stop();
-            enterState(NAV_AVOID_STOP);
-        }
+        Serial.println(F("# AVOID: obstacle still ahead after one avoid attempt — stopping"));
+        motors->stop();
+        navigationActive = false;
+        enterState(NAV_IDLE);
     } else {
         // Clear — resume navigation (recalculates bearing automatically)
         Serial.println(F("# AVOID: clear — resuming navigation"));
+        avoidAttempts = 0;
         enterState(NAV_DRIVE_TO_TARGET);
     }
 }

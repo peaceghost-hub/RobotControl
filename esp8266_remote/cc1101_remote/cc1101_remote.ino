@@ -27,6 +27,12 @@ const uint8_t PIN_JOY2_BTN = D8;
 
 const uint8_t CALIBRATION_SAMPLES = 20;
 const uint8_t LOOP_SAMPLES = 3;
+const unsigned long BUTTON_DEBOUNCE_MS = 80;
+const int16_t TOGGLE_NEUTRAL_THRESHOLD = 25;
+const unsigned long TOGGLE_NEUTRAL_HOLD_MS = 120;
+const int32_t CENTER_TRACK_WINDOW = 1400;
+const uint8_t OPPOSITE_SIGN_CONFIRM_FRAMES = 3;
+const int16_t STRONG_DRIVE_THRESHOLD = 90;
 
 // Per-axis gain trim to compensate for asymmetric joystick travel around
 // the calibrated center. Negative travel on both tank-drive axes already
@@ -39,6 +45,17 @@ static const float JOY2_NEG_GAIN = 1.00f;
 float frequency = 433.00;
 bool reverseLeft = false;
 bool reverseRight = false;
+bool btn1StableState = false;
+bool btn2StableState = false;
+bool btn1PressArmed = false;
+bool btn2PressArmed = false;
+unsigned long neutralSinceMs = 0;
+int8_t leftPendingSign = 0;
+int8_t rightPendingSign = 0;
+uint8_t leftPendingCount = 0;
+uint8_t rightPendingCount = 0;
+int16_t lastStableLeft = 0;
+int16_t lastStableRight = 0;
 
 struct Packet {
   int16_t leftSpeed;
@@ -98,6 +115,50 @@ int16_t applyDirectionalGain(int16_t value, float negativeGain, float positiveGa
   return 0;
 }
 
+int16_t stabilizeAxisDirection(int16_t candidate, int16_t& lastStable, int8_t& pendingSign, uint8_t& pendingCount) {
+  const int16_t candidateAbs = abs(candidate);
+  const int16_t lastAbs = abs(lastStable);
+
+  if (candidateAbs <= TOGGLE_NEUTRAL_THRESHOLD) {
+    pendingSign = 0;
+    pendingCount = 0;
+    lastStable = 0;
+    return 0;
+  }
+
+  if (lastStable == 0 || candidateAbs < STRONG_DRIVE_THRESHOLD || lastAbs < STRONG_DRIVE_THRESHOLD) {
+    pendingSign = 0;
+    pendingCount = 0;
+    lastStable = candidate;
+    return candidate;
+  }
+
+  const bool sameSign = (candidate > 0 && lastStable > 0) || (candidate < 0 && lastStable < 0);
+  if (sameSign) {
+    pendingSign = 0;
+    pendingCount = 0;
+    lastStable = candidate;
+    return candidate;
+  }
+
+  const int8_t desiredSign = (candidate > 0) ? 1 : -1;
+  if (pendingSign != desiredSign) {
+    pendingSign = desiredSign;
+    pendingCount = 1;
+    return lastStable;
+  }
+
+  if (pendingCount < 255) pendingCount++;
+  if (pendingCount < OPPOSITE_SIGN_CONFIRM_FRAMES) {
+    return lastStable;
+  }
+
+  pendingSign = 0;
+  pendingCount = 0;
+  lastStable = candidate;
+  return candidate;
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -124,6 +185,10 @@ void setup() {
   
   Serial.println("Calibration Complete.");
   Serial.println("--------------------------------");
+
+  btn1StableState = (digitalRead(PIN_JOY1_BTN) == LOW);
+  btn2StableState = (digitalRead(PIN_JOY2_BTN) == HIGH);
+  neutralSinceMs = millis();
 
   // CC1101 Setup
   ELECHOUSE_cc1101.setGDO(PIN_GDO0, 0); 
@@ -164,18 +229,11 @@ void loop() {
   int32_t y1Raw = readAveragedAds(1, LOOP_SAMPLES + 1);
   int32_t y2Raw = readAveragedAds(3, LOOP_SAMPLES + 1);
 
-  static bool lastBtn1 = HIGH;
-  bool btn1 = (digitalRead(PIN_JOY1_BTN) == LOW);
-  if (btn1 != lastBtn1) {
-    lastBtn1 = btn1;
-    if (btn1) reverseLeft = !reverseLeft;
+  if (abs(y1Raw - y1Center) <= CENTER_TRACK_WINDOW) {
+    y1Center = (int16_t)(((int32_t)y1Center * 31 + y1Raw) / 32);
   }
-
-  static bool lastBtn2 = LOW;
-  bool btn2 = (digitalRead(PIN_JOY2_BTN) == HIGH);
-  if (btn2 != lastBtn2) {
-    lastBtn2 = btn2;
-    if (btn2) reverseRight = !reverseRight;
+  if (abs(y2Raw - y2Center) <= CENTER_TRACK_WINDOW) {
+    y2Center = (int16_t)(((int32_t)y2Center * 31 + y2Raw) / 32);
   }
 
   int16_t joy1Throttle = mapAdsToSigned255(y1Raw, y1Center);
@@ -183,6 +241,61 @@ void loop() {
 
   joy1Throttle = applyDirectionalGain(joy1Throttle, JOY1_NEG_GAIN, JOY1_POS_GAIN);
   joy2Throttle = applyDirectionalGain(joy2Throttle, JOY2_NEG_GAIN, JOY2_POS_GAIN);
+
+  const bool joysticksNeutral =
+      abs(joy1Throttle) <= TOGGLE_NEUTRAL_THRESHOLD &&
+      abs(joy2Throttle) <= TOGGLE_NEUTRAL_THRESHOLD;
+
+  const unsigned long now = millis();
+  if (joysticksNeutral) {
+    if (neutralSinceMs == 0) neutralSinceMs = now;
+  } else {
+    neutralSinceMs = 0;
+    btn1PressArmed = false;
+    btn2PressArmed = false;
+  }
+  const bool neutralLongEnough =
+      neutralSinceMs > 0 && (now - neutralSinceMs) >= TOGGLE_NEUTRAL_HOLD_MS;
+
+  static bool lastBtn1Raw = false;
+  static unsigned long lastBtn1ChangeMs = 0;
+  const bool btn1Raw = (digitalRead(PIN_JOY1_BTN) == LOW);
+  if (btn1Raw != lastBtn1Raw) {
+    lastBtn1Raw = btn1Raw;
+    lastBtn1ChangeMs = now;
+  } else if (btn1Raw != btn1StableState && (now - lastBtn1ChangeMs) >= BUTTON_DEBOUNCE_MS) {
+    btn1StableState = btn1Raw;
+    if (btn1StableState) {
+      btn1PressArmed = neutralLongEnough;
+    } else if (btn1PressArmed && neutralLongEnough) {
+      reverseLeft = !reverseLeft;
+      btn1PressArmed = false;
+      Serial.print("ReverseLeft: ");
+      Serial.println(reverseLeft ? "ON" : "OFF");
+    } else {
+      btn1PressArmed = false;
+    }
+  }
+
+  static bool lastBtn2Raw = false;
+  static unsigned long lastBtn2ChangeMs = 0;
+  const bool btn2Raw = (digitalRead(PIN_JOY2_BTN) == HIGH);
+  if (btn2Raw != lastBtn2Raw) {
+    lastBtn2Raw = btn2Raw;
+    lastBtn2ChangeMs = now;
+  } else if (btn2Raw != btn2StableState && (now - lastBtn2ChangeMs) >= BUTTON_DEBOUNCE_MS) {
+    btn2StableState = btn2Raw;
+    if (btn2StableState) {
+      btn2PressArmed = neutralLongEnough;
+    } else if (btn2PressArmed && neutralLongEnough) {
+      reverseRight = !reverseRight;
+      btn2PressArmed = false;
+      Serial.print("ReverseRight: ");
+      Serial.println(reverseRight ? "ON" : "OFF");
+    } else {
+      btn2PressArmed = false;
+    }
+  }
 
   int16_t leftThrottle = joy1Throttle;
   int16_t rightThrottle = joy2Throttle;
@@ -197,6 +310,9 @@ void loop() {
 
   if (reverseLeft) leftThrottle = -leftThrottle;
   if (reverseRight) rightThrottle = -rightThrottle;
+
+  leftThrottle = stabilizeAxisDirection(leftThrottle, lastStableLeft, leftPendingSign, leftPendingCount);
+  rightThrottle = stabilizeAxisDirection(rightThrottle, lastStableRight, rightPendingSign, rightPendingCount);
 
   pkt.leftSpeed = leftThrottle;
   pkt.rightSpeed = rightThrottle;

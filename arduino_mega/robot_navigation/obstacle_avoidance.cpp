@@ -29,6 +29,8 @@ ObstacleAvoidance::ObstacleAvoidance() {
     scanStep = SCAN_NONE;
     scanStepTime = 0;
     scanReady = false;
+    scanSamplesCollected = 0;
+    scanMinValidDistance = -1;
     memset(&pendingScan, 0, sizeof(pendingScan));
 }
 
@@ -141,6 +143,7 @@ void ObstacleAvoidance::triggerPing() {
 void ObstacleAvoidance::startScan() {
     if (scanStep != SCAN_NONE) return;  // already scanning
     scanReady = false;
+    resetScanAccumulator();
     scanStep = SCAN_CENTER_MOVE;
     scanStepTime = millis();
     moveServoTo(SERVO_CENTER);
@@ -169,6 +172,7 @@ void ObstacleAvoidance::updateScan() {
       case SCAN_CENTER_MOVE:
         // Servo was moved in startScan(); wait for settle
         if (servoSettled) {
+          resetScanAccumulator();
           triggerPing();
           scanStep = SCAN_CENTER_READ;
         }
@@ -176,7 +180,8 @@ void ObstacleAvoidance::updateScan() {
 
       case SCAN_CENTER_READ:
         if (usPhase == US_IDLE) {
-          pendingScan.centerDist = distance;
+          if (!collectScanSample()) return;
+          pendingScan.centerDist = finalizeScanAccumulator();
           moveServoTo(SERVO_LEFT);
           scanStepTime = now;
           scanStep = SCAN_LEFT_MOVE;
@@ -185,6 +190,7 @@ void ObstacleAvoidance::updateScan() {
 
       case SCAN_LEFT_MOVE:
         if (servoSettled) {
+          resetScanAccumulator();
           triggerPing();
           scanStep = SCAN_LEFT_READ;
         }
@@ -192,8 +198,9 @@ void ObstacleAvoidance::updateScan() {
 
       case SCAN_LEFT_READ:
         if (usPhase == US_IDLE) {
-          pendingScan.leftDist = distance;
-          pendingScan.leftClear = (distance == -1 || distance > OBSTACLE_THRESHOLD);
+          if (!collectScanSample()) return;
+          pendingScan.leftDist = finalizeScanAccumulator();
+          pendingScan.leftClear = (pendingScan.leftDist == -1 || pendingScan.leftDist > OBSTACLE_THRESHOLD);
           moveServoTo(SERVO_RIGHT);
           scanStepTime = now;
           scanStep = SCAN_RIGHT_MOVE;
@@ -202,6 +209,7 @@ void ObstacleAvoidance::updateScan() {
 
       case SCAN_RIGHT_MOVE:
         if (servoSettled) {
+          resetScanAccumulator();
           triggerPing();
           scanStep = SCAN_RIGHT_READ;
         }
@@ -209,8 +217,9 @@ void ObstacleAvoidance::updateScan() {
 
       case SCAN_RIGHT_READ:
         if (usPhase == US_IDLE) {
-          pendingScan.rightDist = distance;
-          pendingScan.rightClear = (distance == -1 || distance > OBSTACLE_THRESHOLD);
+          if (!collectScanSample()) return;
+          pendingScan.rightDist = finalizeScanAccumulator();
+          pendingScan.rightClear = (pendingScan.rightDist == -1 || pendingScan.rightDist > OBSTACLE_THRESHOLD);
           pendingScan.irDetected = false;  // KY-032 removed
           pendingScan.irDistance = 0;       // KY-032 removed
           moveServoTo(SERVO_CENTER);
@@ -307,4 +316,28 @@ void ObstacleAvoidance::moveServoTo(int angle) {
         currentServoAngle = angle;
         lastServoMove = millis();
     }
+}
+
+void ObstacleAvoidance::resetScanAccumulator() {
+    scanSamplesCollected = 0;
+    scanMinValidDistance = -1;
+}
+
+int ObstacleAvoidance::finalizeScanAccumulator() const {
+    return scanMinValidDistance;
+}
+
+bool ObstacleAvoidance::collectScanSample() {
+    if (distance > 0) {
+        if (scanMinValidDistance <= 0 || distance < scanMinValidDistance) {
+            scanMinValidDistance = distance;
+        }
+    }
+
+    scanSamplesCollected++;
+    if (scanSamplesCollected < SCAN_SAMPLES_PER_ANGLE) {
+        triggerPing();
+        return false;
+    }
+    return true;
 }

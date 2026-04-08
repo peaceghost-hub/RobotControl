@@ -70,9 +70,12 @@ private:
     unsigned long scanStepTime;
     PathScan pendingScan;
     bool scanReady;                // true once pendingScan is valid
+    uint8_t scanSamplesCollected;
+    int scanMinValidDistance;
 
     static const unsigned long CHECK_INTERVAL = 100;
     static const unsigned long SERVO_SETTLE   = 420;  // ms for servo + ultrasonic echo to stabilise
+    static const uint8_t SCAN_SAMPLES_PER_ANGLE = 2;  // conservative multi-sample lock per angle
     
 public:
     ObstacleAvoidance();
@@ -100,6 +103,9 @@ private:
     void updateUltrasonic();       // state machine tick
     void updateScan();             // scan state machine tick
     void moveServoTo(int angle);
+    void resetScanAccumulator();
+    int finalizeScanAccumulator() const;
+    bool collectScanSample();
 };
 
 #endif
