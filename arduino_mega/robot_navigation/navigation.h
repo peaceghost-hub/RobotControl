@@ -48,14 +48,16 @@
 // Obstacle avoidance
 #define OBSTACLE_TRIGGER_CM     60    // cm — treat front path as blocked within 60 cm
 #define AVOID_STOP_DURATION    300    // ms — settle after stop
-#define AVOID_SCAN_TIMEOUT    2000    // ms — servo scan must finish by then
-#define AVOID_TURN_DEG_CLEAR    55    // degrees — clear side selected from scan
+#define AVOID_SCAN_TIMEOUT    3200    // ms — allow the servo scan to settle properly
+#define AVOID_CENTER_RESUME_CM 100    // cm — only skip avoidance when center is clearly open
+#define AVOID_SIDE_LOCK_TOLERANCE_CM 12 // cm — keep the chosen side if both scans are close
+#define AVOID_TURN_DEG_CLEAR    70    // degrees — commit more decisively to the chosen side
 #define AVOID_TURN_DEG_BLOCKED  80    // degrees — fallback when both sides blocked
 #define AVOID_TURN_DURATION    800    // ms — time spent turning away
-#define AVOID_TURN_SPEED       140    // PWM during avoidance turn
-#define AVOID_DRIVE_DURATION  1500    // ms — time spent driving past
-#define AVOID_DRIVE_SPEED      100    // PWM during avoidance forward
-#define AVOID_RECHECK_SETTLE   300    // ms — settle before recheck
+#define AVOID_TURN_SPEED       150    // PWM during avoidance turn
+#define AVOID_DRIVE_DURATION  1800    // ms — hold the clear path a bit longer before reacquire
+#define AVOID_DRIVE_SPEED      110    // PWM during avoidance forward
+#define AVOID_RECHECK_SETTLE   450    // ms — let the sensor recentre before recheck
 #define MAX_AVOID_ATTEMPTS       3    // skip waypoint after N failures
 
 // Safety

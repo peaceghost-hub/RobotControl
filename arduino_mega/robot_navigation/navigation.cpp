@@ -456,7 +456,7 @@ void Navigation::handleAvoidScan() {
         const int centerDist = lastAvoidScan.centerDist;
         const int leftDist = lastAvoidScan.leftDist;
         const int rightDist = lastAvoidScan.rightDist;
-        const bool centerClear = (centerDist == -1 || centerDist > OBSTACLE_TRIGGER_CM);
+        const bool centerVeryClear = (centerDist == -1 || centerDist >= AVOID_CENTER_RESUME_CM);
         const bool leftClear = lastAvoidScan.leftClear;
         const bool rightClear = lastAvoidScan.rightClear;
 
@@ -471,10 +471,10 @@ void Navigation::handleAvoidScan() {
         Serial.print(F(","));
         Serial.print(rightClear ? F("1") : F("0"));
         Serial.print(F(","));
-        Serial.println(centerClear ? F("1") : F("0"));
+        Serial.println(centerVeryClear ? F("1") : F("0"));
 
-        if (centerClear) {
-            Serial.println(F("# AVOID: center clear — resuming navigation"));
+        if (centerVeryClear) {
+            Serial.println(F("# AVOID: center clearly open — resuming navigation"));
             if (avoidAttempts > 0) avoidAttempts--;
             enterState(NAV_DRIVE_TO_TARGET);
             return;
@@ -483,7 +483,11 @@ void Navigation::handleAvoidScan() {
         if (leftClear && rightClear) {
             const int leftScore = (leftDist == -1) ? 999 : leftDist;
             const int rightScore = (rightDist == -1) ? 999 : rightDist;
-            avoidTurnDir = (rightScore > leftScore) ? 1 : -1;
+            if (abs(rightScore - leftScore) <= AVOID_SIDE_LOCK_TOLERANCE_CM) {
+                avoidTurnDir = (avoidTurnDir >= 0) ? 1 : -1;
+            } else {
+                avoidTurnDir = (rightScore > leftScore) ? 1 : -1;
+            }
             avoidTurnDegrees = avoidTurnDir * AVOID_TURN_DEG_CLEAR;
         } else if (leftClear) {
             avoidTurnDir = -1;
@@ -496,7 +500,9 @@ void Navigation::handleAvoidScan() {
         }
 
         motors->startTurnDegrees(avoidTurnDegrees, AVOID_TURN_SPEED);
-        Serial.print(F("# AVOID: turning "));
+        Serial.print(F("# AVOID: locked "));
+        Serial.print(avoidTurnDegrees > 0 ? F("RIGHT") : F("LEFT"));
+        Serial.print(F(" path, turning "));
         Serial.print(avoidTurnDegrees > 0 ? F("RIGHT ") : F("LEFT "));
         Serial.print(abs(avoidTurnDegrees));
         Serial.println(F("°"));
@@ -537,7 +543,7 @@ void Navigation::handleAvoidRecheck() {
     obstacleAvoid->update();
     int dist = obstacleAvoid->getDistance();
 
-    if (dist > 0 && dist < OBSTACLE_TRIGGER_CM) {
+    if (dist > 0 && dist < AVOID_CENTER_RESUME_CM) {
         // Still blocked
         Serial.println(F("# AVOID: still blocked after manoeuvre"));
         if (avoidAttempts >= MAX_AVOID_ATTEMPTS) {

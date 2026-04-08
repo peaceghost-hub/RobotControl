@@ -375,8 +375,12 @@ void updateReactiveAvoidance(unsigned long now) {
           return;
         }
         if (frontClear) {
-          DEBUG_SERIAL.println(F("# REACTIVE AVOID: front clear while blocked"));
-          cancelReactiveAvoidance(true);
+          if (manualScanOnly) {
+            enterReactiveManualWait(F("front clear after acknowledged avoid"));
+          } else {
+            DEBUG_SERIAL.println(F("# REACTIVE AVOID: front clear while blocked"));
+            cancelReactiveAvoidance(true);
+          }
           return;
         }
 
@@ -434,13 +438,22 @@ void updateReactiveAvoidance(unsigned long now) {
         const bool frontSafe = reactiveLastObstacleDistance <= 0 ||
                                reactiveLastObstacleDistance >= REACTIVE_SAFE_CLEARANCE_CM;
         if (frontSafe && (now - reactiveStateStart >= REACTIVE_PASS_DURATION_MS / 2)) {
-          DEBUG_SERIAL.println(F("# REACTIVE AVOID: clearance restored"));
-          cancelReactiveAvoidance(false);
+          if (manualScanOnly) {
+            enterReactiveManualWait(F("one-shot avoid complete"));
+          } else {
+            DEBUG_SERIAL.println(F("# REACTIVE AVOID: clearance restored"));
+            cancelReactiveAvoidance(false);
+          }
           return;
         }
 
         if (now - reactiveStateStart < REACTIVE_PASS_DURATION_MS) {
           motors.setMotors(REACTIVE_PASS_SPEED, REACTIVE_PASS_SPEED);
+          return;
+        }
+
+        if (manualScanOnly) {
+          enterReactiveManualWait(F("one-shot avoid finished, waiting manual"));
           return;
         }
 
@@ -1024,7 +1037,10 @@ void processRawMotorCommand(int16_t leftSpeed, int16_t rightSpeed, uint8_t flags
       abs(rightSpeed) > REACTIVE_ACK_ACTIVE_THRESHOLD;
   updateReactiveManualAckSequence(commandActive, now);
 
-  if (reactiveAvoidState == REACTIVE_AVOID_WAIT_MANUAL && commandActive) {
+  if (reactiveManualScanEnabled && commandActive &&
+      (reactiveManualAckGranted ||
+       reactiveAvoidanceOwnsMotors() ||
+       reactiveAvoidState == REACTIVE_AVOID_WAIT_MANUAL)) {
     cancelReactiveAvoidance(false);
   }
 

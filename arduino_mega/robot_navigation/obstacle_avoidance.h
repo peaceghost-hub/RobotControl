@@ -72,7 +72,7 @@ private:
     bool scanReady;                // true once pendingScan is valid
 
     static const unsigned long CHECK_INTERVAL = 100;
-    static const unsigned long SERVO_SETTLE   = 300;  // ms for servo to stabilise
+    static const unsigned long SERVO_SETTLE   = 420;  // ms for servo + ultrasonic echo to stabilise
     
 public:
     ObstacleAvoidance();

@@ -783,6 +783,7 @@ def handle_joystick_message(message: dict) -> None:
     drive_payload = _build_joystick_drive_payload(message)
     direction = str(drive_payload.get('direction', 'stop')).lower()
     speed = drive_payload.get('speed')
+    tank_payload = ('left_speed' in drive_payload or 'right_speed' in drive_payload)
 
     has_explicit_enable = 'enable' in message
     enable_raw = message.get('enable', True)
@@ -848,7 +849,7 @@ def handle_joystick_message(message: dict) -> None:
     now = time.monotonic()
     due_for_refresh = (now - joystick_runtime.get('last_forward_mono', 0.0)) >= forward_interval_s
 
-    if signature == joystick_runtime.get('last_signature') and not due_for_refresh:
+    if not tank_payload and signature == joystick_runtime.get('last_signature') and not due_for_refresh:
         _set_joystick_state(
             armed=True,
             active=direction != 'stop',

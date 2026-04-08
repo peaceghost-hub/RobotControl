@@ -28,6 +28,14 @@ const uint8_t PIN_JOY2_BTN = D8;
 const uint8_t CALIBRATION_SAMPLES = 20;
 const uint8_t LOOP_SAMPLES = 3;
 
+// Per-axis gain trim to compensate for asymmetric joystick travel around
+// the calibrated center. Negative travel on both tank-drive axes already
+// reaches full scale on this hardware, while positive travel tops out early.
+static const float JOY1_POS_GAIN = 1.76f;
+static const float JOY1_NEG_GAIN = 1.00f;
+static const float JOY2_POS_GAIN = 1.28f;
+static const float JOY2_NEG_GAIN = 1.00f;
+
 float frequency = 433.00;
 bool reverseLeft = false;
 bool reverseRight = false;
@@ -78,6 +86,16 @@ int16_t mapAdsToSigned255(int32_t raw, int32_t center) {
     int32_t val = (abs(delta) - deadband) * 255L / span;
     return (int16_t)constrain(-val, -255L, 0L);
   }
+}
+
+int16_t applyDirectionalGain(int16_t value, float negativeGain, float positiveGain) {
+  if (value > 0) {
+    return (int16_t)constrain((long)roundf(value * positiveGain), 0L, 255L);
+  }
+  if (value < 0) {
+    return (int16_t)constrain((long)roundf(value * negativeGain), -255L, 0L);
+  }
+  return 0;
 }
 
 void setup() {
@@ -160,8 +178,14 @@ void loop() {
     if (btn2) reverseRight = !reverseRight;
   }
 
-  int16_t leftThrottle = mapAdsToSigned255(y1Raw, y1Center);
-  int16_t rightThrottle = mapAdsToSigned255(y2Raw, y2Center);
+  int16_t joy1Throttle = mapAdsToSigned255(y1Raw, y1Center);
+  int16_t joy2Throttle = mapAdsToSigned255(y2Raw, y2Center);
+
+  joy1Throttle = applyDirectionalGain(joy1Throttle, JOY1_NEG_GAIN, JOY1_POS_GAIN);
+  joy2Throttle = applyDirectionalGain(joy2Throttle, JOY2_NEG_GAIN, JOY2_POS_GAIN);
+
+  int16_t leftThrottle = joy1Throttle;
+  int16_t rightThrottle = joy2Throttle;
 
   // Swap joysticks: joystick 1 drives the right wheel, joystick 2 drives the left wheel.
   int16_t temp = leftThrottle;
